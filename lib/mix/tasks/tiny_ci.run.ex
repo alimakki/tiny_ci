@@ -142,14 +142,14 @@ defmodule Mix.Tasks.TinyCi.Run do
     {:error, :no_pipeline}
   end
 
-  defp dry_run_pipeline(%TinyCI.PipelineSpec{stages: stages}) do
-    context = TinyCI.Context.build()
+  defp dry_run_pipeline(%TinyCI.PipelineSpec{stages: stages, root: root}) do
+    context = TinyCI.Context.build(root: root)
     DryRun.print_plan(stages, context)
     :ok
   end
 
-  defp execute_pipeline(%TinyCI.PipelineSpec{stages: stages, hooks: hooks}) do
-    context = TinyCI.Context.build()
+  defp execute_pipeline(%TinyCI.PipelineSpec{stages: stages, hooks: hooks, root: root}) do
+    context = TinyCI.Context.build(root: root)
 
     case Executor.run_pipeline(stages, context) do
       {:ok, stage_results} ->

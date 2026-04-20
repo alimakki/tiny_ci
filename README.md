@@ -92,6 +92,7 @@ end
 |--------|---------|-------------|
 | `:mode` | `:parallel` | How steps within the stage execute — `:parallel` or `:serial` |
 | `:when` | (always run) | Condition expression; stage is skipped when it evaluates to falsy |
+| `:working_dir` | (pipeline root) | Default working directory for all steps in this stage |
 
 ### Steps
 
@@ -116,6 +117,7 @@ end
 | `:env` | Map of environment variables merged into the shell environment |
 | `:allow_failure` | When `true`, step can fail without failing the stage |
 | `:when` | Condition expression; step is skipped when it evaluates to falsy |
+| `:working_dir` | Directory to run the command in (string path) |
 
 ### Conditions
 
@@ -152,6 +154,27 @@ end
 ```
 
 A skipped step is reported with a `○` icon in the summary and does not affect the stage outcome. `--dry-run` shows which steps would be skipped before any execution.
+
+### Working Directory
+
+The `working_dir:` option sets the directory a shell command runs in. It can be set on a stage (applies to all steps) or on an individual step (overrides the stage value).
+
+```elixir
+# Stage-level: all steps run inside frontend/
+stage :frontend, working_dir: "frontend" do
+  step :install, cmd: "npm install"
+  step :build,   cmd: "npm run build"
+  step :test,    cmd: "npm test", working_dir: "frontend/packages/core"
+end
+
+# Step-level only
+stage :check do
+  step :mix_test, cmd: "mix test"
+  step :js_lint,  cmd: "eslint src", working_dir: "assets"
+end
+```
+
+Relative paths are resolved from the directory containing the pipeline file. Absolute paths are used as-is. If the directory does not exist, the step fails immediately with a clear error before any command is run. `--dry-run` shows the resolved path for each step.
 
 ### Hooks
 

@@ -23,7 +23,8 @@ defmodule TinyCI.Step do
           env: %{optional(String.t()) => String.t()},
           timeout: pos_integer() | nil,
           allow_failure: boolean(),
-          when_condition: term() | nil
+          when_condition: term() | nil,
+          working_dir: String.t() | nil
         }
 
   defstruct name: nil,
@@ -35,7 +36,8 @@ defmodule TinyCI.Step do
             env: %{},
             timeout: nil,
             allow_failure: false,
-            when_condition: nil
+            when_condition: nil,
+            working_dir: nil
 end
 
 defmodule TinyCI.Stage do
@@ -50,8 +52,9 @@ defmodule TinyCI.Stage do
           name: atom(),
           steps: [TinyCI.Step.t()],
           mode: :serial | :parallel,
-          when_condition: (map() -> boolean()) | nil
+          when_condition: (map() -> boolean()) | nil,
+          working_dir: String.t() | nil
         }
 
-  defstruct name: nil, steps: [], mode: :parallel, when_condition: nil
+  defstruct name: nil, steps: [], mode: :parallel, when_condition: nil, working_dir: nil
 end

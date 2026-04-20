@@ -83,6 +83,7 @@ defmodule TinyCI.DSL.Interpreter do
 
   defp build_spec(ast, path) do
     exprs = unwrap_block(ast)
+    root = path |> Path.dirname() |> Path.expand()
 
     {name_exprs, rest} = Enum.split_with(exprs, &match?({:name, _, _}, &1))
 
@@ -108,7 +109,7 @@ defmodule TinyCI.DSL.Interpreter do
         end
       end)
 
-    %PipelineSpec{name: name, stages: stages, hooks: hooks}
+    %PipelineSpec{name: name, stages: stages, hooks: hooks, root: root}
   end
 
   # ---------------------------------------------------------------------------
@@ -129,6 +130,7 @@ defmodule TinyCI.DSL.Interpreter do
       name: name,
       mode: Keyword.get(opts, :mode, :parallel),
       when_condition: Keyword.get(opts, :when),
+      working_dir: Keyword.get(opts, :working_dir),
       steps: build_stage_body(block)
     }
   end
@@ -153,6 +155,7 @@ defmodule TinyCI.DSL.Interpreter do
       timeout: Keyword.get(opts, :timeout),
       allow_failure: Keyword.get(opts, :allow_failure, false),
       when_condition: Keyword.get(opts, :when),
+      working_dir: Keyword.get(opts, :working_dir),
       config_block: build_config_block(block)
     }
   end

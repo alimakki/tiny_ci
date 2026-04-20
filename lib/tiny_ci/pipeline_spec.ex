@@ -15,11 +15,12 @@ defmodule TinyCI.PipelineSpec do
   """
 
   @enforce_keys [:name, :stages, :hooks]
-  defstruct [:name, :stages, :hooks]
+  defstruct [:name, :stages, :hooks, root: nil]
 
   @type t :: %__MODULE__{
           name: atom(),
           stages: [TinyCI.Stage.t()],
-          hooks: %{on_success: [TinyCI.Hook.t()], on_failure: [TinyCI.Hook.t()]}
+          hooks: %{on_success: [TinyCI.Hook.t()], on_failure: [TinyCI.Hook.t()]},
+          root: String.t() | nil
         }
 end

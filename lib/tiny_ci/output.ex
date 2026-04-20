@@ -66,23 +66,29 @@ defmodule TinyCI.Output do
     output_mode = resolve_mode(opts[:mode] || :auto)
     env = opts[:env] || %{}
     prefix = opts[:prefix]
+    working_dir = opts[:working_dir]
 
     case output_mode do
-      :streaming -> run_streaming(cmd, env, prefix)
-      :buffered -> run_buffered(cmd, env)
+      :streaming -> run_streaming(cmd, env, prefix, working_dir)
+      :buffered -> run_buffered(cmd, env, working_dir)
     end
   end
 
-  defp run_buffered(cmd, env) do
-    case Porcelain.shell(cmd, env: env) do
+  defp run_buffered(cmd, env, working_dir) do
+    porcelain_opts = [env: env] ++ if(working_dir, do: [dir: working_dir], else: [])
+
+    case Porcelain.shell(cmd, porcelain_opts) do
       %Porcelain.Result{status: 0, out: out} -> {:passed, out}
       %Porcelain.Result{out: out} -> {:failed, out}
     end
   end
 
-  defp run_streaming(cmd, env, prefix) do
-    proc =
-      Porcelain.spawn_shell(cmd, out: {:send, self()}, err: :out, result: :keep, env: env)
+  defp run_streaming(cmd, env, prefix, working_dir) do
+    porcelain_opts =
+      [out: {:send, self()}, err: :out, result: :keep, env: env] ++
+        if(working_dir, do: [dir: working_dir], else: [])
+
+    proc = Porcelain.spawn_shell(cmd, porcelain_opts)
 
     {status, output} = receive_output(proc.pid, prefix, [], "")
     {status, IO.iodata_to_binary(output)}

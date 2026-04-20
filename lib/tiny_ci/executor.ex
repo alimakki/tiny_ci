@@ -157,6 +157,12 @@ defmodule TinyCI.Executor do
   defp skip_stage?(%{when_condition: ast}, context),
     do: not TinyCI.DSL.ConditionEval.eval(ast, context)
 
+  defp resolve_working_dir(nil, _root), do: nil
+
+  defp resolve_working_dir(dir, root) do
+    if Path.type(dir) == :absolute, do: dir, else: Path.join(root || File.cwd!(), dir)
+  end
+
   defp skip_step?(%{when_condition: nil}, _context), do: false
 
   defp skip_step?(%{when_condition: f}, context) when is_function(f, 1),
@@ -165,22 +171,25 @@ defmodule TinyCI.Executor do
   defp skip_step?(%{when_condition: ast}, context),
     do: not TinyCI.DSL.ConditionEval.eval(ast, context)
 
-  defp execute_by_mode(%{mode: :serial, steps: steps}, context, output_mode),
-    do: execute_serial(steps, context, output_mode)
+  defp execute_by_mode(%{mode: :serial, steps: steps, working_dir: stage_wd}, context, output_mode),
+    do: execute_serial(steps, stage_wd, context, output_mode)
 
-  defp execute_by_mode(%{mode: :parallel, steps: steps}, context, output_mode),
-    do: execute_parallel(steps, context, output_mode)
+  defp execute_by_mode(%{mode: :parallel, steps: steps, working_dir: stage_wd}, context, output_mode),
+    do: execute_parallel(steps, stage_wd, context, output_mode)
 
-  defp execute_serial(steps, context, output_mode) do
+  defp execute_serial(steps, stage_wd, context, output_mode) do
+    root = Map.get(context, :root)
+
     {results, final_store} =
       Enum.reduce_while(steps, {[], context.store}, fn step, {acc, current_store} ->
         ctx = Map.put(context, :store, current_store)
+        effective_wd = resolve_working_dir(step.working_dir || stage_wd, root)
 
         step_result =
           if skip_step?(step, ctx) do
             %StepResult{name: step.name, status: :skipped, duration_ms: 0}
           else
-            run_step(step, ctx, output_mode, _prefix = nil)
+            run_step(step, ctx, output_mode, nil, effective_wd)
           end
 
         new_store = Map.merge(current_store, step_result.store_data)
@@ -196,13 +205,15 @@ defmodule TinyCI.Executor do
     {Enum.reverse(results), final_store}
   end
 
-  defp execute_parallel(steps, context, output_mode) do
+  defp execute_parallel(steps, stage_wd, context, output_mode) do
     prefix = if output_mode == :streaming, do: :step_name, else: nil
     caller_gl = Process.group_leader()
+    root = Map.get(context, :root)
 
     tasks =
       Enum.map(steps, fn step ->
         step_prefix = if prefix == :step_name, do: step.name, else: nil
+        effective_wd = resolve_working_dir(step.working_dir || stage_wd, root)
 
         Task.Supervisor.async(TinyCI.TaskSupervisor, fn ->
           Process.group_leader(self(), caller_gl)
@@ -210,7 +221,7 @@ defmodule TinyCI.Executor do
           if skip_step?(step, context) do
             %StepResult{name: step.name, status: :skipped, duration_ms: 0}
           else
-            run_step(step, context, output_mode, step_prefix)
+            run_step(step, context, output_mode, step_prefix, effective_wd)
           end
         end)
       end)
@@ -229,31 +240,43 @@ defmodule TinyCI.Executor do
          %{cmd: cmd, name: name, env: env, timeout: timeout, allow_failure: allow_failure},
          ctx,
          output_mode,
-         prefix
+         prefix,
+         working_dir
        )
        when cmd != nil do
-    merged_env = resolve_env(env, ctx.store)
-    output_opts = [mode: output_mode, env: merged_env, prefix: prefix]
+    if working_dir != nil and not File.dir?(working_dir) do
+      %StepResult{
+        name: name,
+        status: :failed,
+        output: "Working directory not found: #{working_dir}",
+        duration_ms: 0,
+        allowed_failure: allow_failure
+      }
+    else
+      merged_env = resolve_env(env, ctx.store)
+      output_opts = [mode: output_mode, env: merged_env, prefix: prefix, working_dir: working_dir]
 
-    {duration_ms, {status, output}} =
-      measure(fn ->
-        run_cmd_with_timeout(cmd, output_opts, timeout)
-      end)
+      {duration_ms, {status, output}} =
+        measure(fn ->
+          run_cmd_with_timeout(cmd, output_opts, timeout)
+        end)
 
-    %StepResult{
-      name: name,
-      status: status,
-      output: output,
-      duration_ms: duration_ms,
-      allowed_failure: allow_failure and status == :failed
-    }
+      %StepResult{
+        name: name,
+        status: status,
+        output: output,
+        duration_ms: duration_ms,
+        allowed_failure: allow_failure and status == :failed
+      }
+    end
   end
 
   defp run_step(
          %{module: module, name: name, config_block: block, allow_failure: allow_failure},
          ctx,
          _output_mode,
-         _prefix
+         _prefix,
+         _working_dir
        )
        when not is_nil(module) do
     config = if block, do: block.(), else: %{}

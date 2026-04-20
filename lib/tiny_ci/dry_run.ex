@@ -48,6 +48,7 @@ defmodule TinyCI.DryRun do
 
   defp print_stage(%Stage{} = stage, context) do
     skipped? = skip_stage?(stage, context)
+    root = Map.get(context, :root)
 
     if skipped? do
       IO.puts([
@@ -66,11 +67,11 @@ defmodule TinyCI.DryRun do
         " (#{stage.mode})"
       ])
 
-      Enum.each(stage.steps, &print_step(&1, context))
+      Enum.each(stage.steps, &print_step(&1, stage.working_dir, root, context))
     end
   end
 
-  defp print_step(step, context) do
+  defp print_step(step, stage_wd, root, context) do
     if skip_step?(step, context) do
       IO.puts([
         "    ",
@@ -84,7 +85,13 @@ defmodule TinyCI.DryRun do
       timeout_info = if step.timeout, do: " [timeout: #{step.timeout}ms]", else: ""
       allow_failure_info = if step.allow_failure, do: " [allow_failure]", else: ""
 
-      IO.puts("    • :#{step.name} — #{type_info}#{timeout_info}#{allow_failure_info}")
+      wd_info =
+        case resolve_working_dir(step.working_dir || stage_wd, root) do
+          nil -> ""
+          dir -> " [working_dir: #{dir}]"
+        end
+
+      IO.puts("    • :#{step.name} — #{type_info}#{timeout_info}#{allow_failure_info}#{wd_info}")
     end
   end
 
@@ -107,4 +114,10 @@ defmodule TinyCI.DryRun do
 
   defp skip_step?(%{when_condition: ast}, context),
     do: not TinyCI.DSL.ConditionEval.eval(ast, context)
+
+  defp resolve_working_dir(nil, _root), do: nil
+
+  defp resolve_working_dir(dir, root) do
+    if Path.type(dir) == :absolute, do: dir, else: Path.join(root || File.cwd!(), dir)
+  end
 end

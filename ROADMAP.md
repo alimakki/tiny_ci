@@ -58,11 +58,12 @@ As a pipeline author, I want to set a working directory on a step or stage so th
 - `--dry-run` displays the resolved working directory for each step.
 
 **Acceptance criteria**
-- [ ] `step "name", cmd: "npm test", working_dir: "frontend"` runs in `<root>/frontend`
-- [ ] Stage-level `working_dir:` is inherited by steps that don't declare their own
-- [ ] Absolute paths are accepted as-is; relative paths are resolved from pipeline root
-- [ ] Non-existent directory produces `{:error, :working_dir_not_found}` before execution
-- [ ] Validator allowlists `working_dir:` on both step and stage
+- [x] `step "name", cmd: "npm test", working_dir: "frontend"` runs in `<root>/frontend`
+- [x] Stage-level `working_dir:` is inherited by steps that don't declare their own
+- [x] Absolute paths are accepted as-is; relative paths are resolved from pipeline root
+- [x] Non-existent directory fails the step immediately with a clear error message
+- [x] Validator allowlists `working_dir:` on both step and stage
+- [x] `--dry-run` shows the resolved working directory for each step
 
 ---
 

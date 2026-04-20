@@ -112,6 +112,12 @@ defmodule TinyCI.DSL.Validator do
       {:when, condition} ->
         validate_condition(condition)
 
+      {:working_dir, v} when is_binary(v) ->
+        []
+
+      {:working_dir, _} ->
+        ["Stage :working_dir must be a string literal"]
+
       {key, _} ->
         ["Unknown stage option: :#{key}"]
     end)
@@ -183,6 +189,12 @@ defmodule TinyCI.DSL.Validator do
 
       {:when, condition} ->
         validate_condition(condition)
+
+      {:working_dir, v} when is_binary(v) ->
+        []
+
+      {:working_dir, _} ->
+        ["Step :working_dir must be a string literal"]
 
       {key, _} ->
         ["Unknown step option: :#{key}"]
