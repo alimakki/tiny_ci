@@ -78,6 +78,36 @@ Optional. Sets the pipeline name. Defaults to the filename stem (`deploy.exs` â†
 name :my_pipeline
 ```
 
+### Environment Variables
+
+The `env` directive declares environment variables that are automatically inherited by steps. It can be used at the pipeline level (all stages and steps inherit) or inside a stage block (only steps in that stage inherit). Step-level `env:` values take precedence and override inherited ones.
+
+```elixir
+# Pipeline-level: available to every step
+env "MIX_ENV": "test"
+env "DATABASE_URL": "postgres://localhost/mydb"
+
+stage :test do
+  # Stage-level: only steps in this stage inherit these
+  env "NODE_ENV": "test"
+
+  step :unit, cmd: "mix test"
+  # MIX_ENV, DATABASE_URL, and NODE_ENV are all available here
+
+  step :assets, cmd: "npm test"
+  # Override a specific key for one step
+  step :assets_prod, cmd: "npm run build", env: %{"NODE_ENV" => "production"}
+end
+```
+
+Multiple variables can be declared on one line or across multiple `env` calls â€” they are merged in declaration order:
+
+```elixir
+env "APP": "myapp", "REGION": "us-east-1"
+```
+
+`--dry-run` shows declared env vars at the pipeline and stage level.
+
 ### Stages
 
 Stages run sequentially. The pipeline halts on the first stage failure.

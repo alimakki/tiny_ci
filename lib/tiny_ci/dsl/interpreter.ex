@@ -93,23 +93,27 @@ defmodule TinyCI.DSL.Interpreter do
         _ -> path |> Path.basename(".exs") |> String.to_atom()
       end
 
-    {stages, hooks} =
-      Enum.reduce(rest, {[], %{on_success: [], on_failure: []}}, fn expr, {stages, hooks} ->
+    {stages, pipeline_env, hooks} =
+      Enum.reduce(rest, {[], %{}, %{on_success: [], on_failure: []}}, fn expr,
+                                                                         {stages, env_acc, hooks} ->
         case expr do
           {:stage, _, [stage_name | rest_args]} ->
-            {stages ++ [build_stage(stage_name, rest_args)], hooks}
+            {stages ++ [build_stage(stage_name, rest_args)], env_acc, hooks}
+
+          {:env, _, [kwlist]} when is_list(kwlist) ->
+            {stages, Map.merge(env_acc, kwlist_to_env(kwlist)), hooks}
 
           {:on_success, _, [hook_name | rest_args]} ->
             hook = build_hook(hook_name, rest_args)
-            {stages, Map.update!(hooks, :on_success, &(&1 ++ [hook]))}
+            {stages, env_acc, Map.update!(hooks, :on_success, &(&1 ++ [hook]))}
 
           {:on_failure, _, [hook_name | rest_args]} ->
             hook = build_hook(hook_name, rest_args)
-            {stages, Map.update!(hooks, :on_failure, &(&1 ++ [hook]))}
+            {stages, env_acc, Map.update!(hooks, :on_failure, &(&1 ++ [hook]))}
         end
       end)
 
-    %PipelineSpec{name: name, stages: stages, hooks: hooks, root: root}
+    %PipelineSpec{name: name, stages: stages, hooks: hooks, root: root, env: pipeline_env}
   end
 
   # ---------------------------------------------------------------------------
@@ -126,19 +130,31 @@ defmodule TinyCI.DSL.Interpreter do
   end
 
   defp build_stage_from_opts(name, opts, block) do
+    {steps, stage_env} = build_stage_body(block)
+
     %Stage{
       name: name,
       mode: Keyword.get(opts, :mode, :parallel),
       when_condition: Keyword.get(opts, :when),
       working_dir: Keyword.get(opts, :working_dir),
-      steps: build_stage_body(block)
+      env: stage_env,
+      steps: steps
     }
   end
 
-  defp build_stage_body(nil), do: []
+  defp build_stage_body(nil), do: {[], %{}}
 
-  defp build_stage_body(block),
-    do: block |> unwrap_block() |> Enum.map(&build_step/1)
+  defp build_stage_body(block) do
+    block
+    |> unwrap_block()
+    |> Enum.reduce({[], %{}}, fn
+      {:step, _, _} = expr, {steps, env_acc} ->
+        {steps ++ [build_step(expr)], env_acc}
+
+      {:env, _, [kwlist]}, {steps, env_acc} when is_list(kwlist) ->
+        {steps, Map.merge(env_acc, kwlist_to_env(kwlist))}
+    end)
+  end
 
   # ---------------------------------------------------------------------------
   # Step
@@ -195,6 +211,10 @@ defmodule TinyCI.DSL.Interpreter do
   # ---------------------------------------------------------------------------
   # Literal resolvers
   # ---------------------------------------------------------------------------
+
+  defp kwlist_to_env(kwlist) do
+    Map.new(kwlist, fn {k, v} -> {Atom.to_string(k), v} end)
+  end
 
   defp resolve_module(nil), do: nil
   defp resolve_module({:__aliases__, _, parts}), do: Module.concat(parts)

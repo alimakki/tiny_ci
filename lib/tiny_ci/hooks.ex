@@ -59,9 +59,10 @@ defmodule TinyCI.Hooks do
        when not is_nil(cmd) do
     IO.puts("Hook: #{name}")
     store = Map.get(context, :store, %{})
+    pipeline_env = Map.get(context, :pipeline_env, %{})
     hook_env = build_hook_env(context)
     resolved_env = resolve_env(env, store)
-    merged_env = hook_env |> Map.merge(resolved_env) |> Map.to_list()
+    merged_env = pipeline_env |> Map.merge(hook_env) |> Map.merge(resolved_env) |> Map.to_list()
     actual_timeout = timeout || @default_timeout
 
     task =

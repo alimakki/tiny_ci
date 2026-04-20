@@ -17,11 +17,11 @@ As a pipeline author, I want to declare environment variables at the pipeline or
 - Declared variables appear in `--dry-run` output.
 
 **Acceptance criteria**
-- [ ] `env name: "value"` is valid DSL at pipeline scope
-- [ ] `env name: "value"` is valid DSL inside a `stage` block
-- [ ] Shell steps receive merged env without explicit per-step `env:`
-- [ ] Step-level `env:` takes precedence over inherited values
-- [ ] Validator accepts `env` as an allowlisted DSL construct
+- [x] `env name: "value"` is valid DSL at pipeline scope
+- [x] `env name: "value"` is valid DSL inside a `stage` block
+- [x] Shell steps receive merged env without explicit per-step `env:`
+- [x] Step-level `env:` takes precedence over inherited values
+- [x] Validator accepts `env` as an allowlisted DSL construct
 
 ---
 

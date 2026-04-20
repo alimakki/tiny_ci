@@ -131,8 +131,10 @@ defmodule TinyCI.Executor do
         store: context.store
       }
     else
+      ctx_with_stage_env = Map.put(context, :stage_env, stage.env || %{})
+
       {duration_ms, {step_results, updated_store}} =
-        measure(fn -> execute_by_mode(stage, context, output_mode) end)
+        measure(fn -> execute_by_mode(stage, ctx_with_stage_env, output_mode) end)
 
       status =
         if Enum.all?(step_results, &(&1.status in [:passed, :skipped] or &1.allowed_failure)),
@@ -163,6 +165,14 @@ defmodule TinyCI.Executor do
     if Path.type(dir) == :absolute, do: dir, else: Path.join(root || File.cwd!(), dir)
   end
 
+  defp execute_step_or_skip(step, context, output_mode, prefix, working_dir) do
+    if skip_step?(step, context) do
+      %StepResult{name: step.name, status: :skipped, duration_ms: 0}
+    else
+      run_step(step, context, output_mode, prefix, working_dir)
+    end
+  end
+
   defp skip_step?(%{when_condition: nil}, _context), do: false
 
   defp skip_step?(%{when_condition: f}, context) when is_function(f, 1),
@@ -171,11 +181,19 @@ defmodule TinyCI.Executor do
   defp skip_step?(%{when_condition: ast}, context),
     do: not TinyCI.DSL.ConditionEval.eval(ast, context)
 
-  defp execute_by_mode(%{mode: :serial, steps: steps, working_dir: stage_wd}, context, output_mode),
-    do: execute_serial(steps, stage_wd, context, output_mode)
+  defp execute_by_mode(
+         %{mode: :serial, steps: steps, working_dir: stage_wd},
+         context,
+         output_mode
+       ),
+       do: execute_serial(steps, stage_wd, context, output_mode)
 
-  defp execute_by_mode(%{mode: :parallel, steps: steps, working_dir: stage_wd}, context, output_mode),
-    do: execute_parallel(steps, stage_wd, context, output_mode)
+  defp execute_by_mode(
+         %{mode: :parallel, steps: steps, working_dir: stage_wd},
+         context,
+         output_mode
+       ),
+       do: execute_parallel(steps, stage_wd, context, output_mode)
 
   defp execute_serial(steps, stage_wd, context, output_mode) do
     root = Map.get(context, :root)
@@ -185,12 +203,7 @@ defmodule TinyCI.Executor do
         ctx = Map.put(context, :store, current_store)
         effective_wd = resolve_working_dir(step.working_dir || stage_wd, root)
 
-        step_result =
-          if skip_step?(step, ctx) do
-            %StepResult{name: step.name, status: :skipped, duration_ms: 0}
-          else
-            run_step(step, ctx, output_mode, nil, effective_wd)
-          end
+        step_result = execute_step_or_skip(step, ctx, output_mode, nil, effective_wd)
 
         new_store = Map.merge(current_store, step_result.store_data)
 
@@ -217,12 +230,7 @@ defmodule TinyCI.Executor do
 
         Task.Supervisor.async(TinyCI.TaskSupervisor, fn ->
           Process.group_leader(self(), caller_gl)
-
-          if skip_step?(step, context) do
-            %StepResult{name: step.name, status: :skipped, duration_ms: 0}
-          else
-            run_step(step, context, output_mode, step_prefix, effective_wd)
-          end
+          execute_step_or_skip(step, context, output_mode, step_prefix, effective_wd)
         end)
       end)
 
@@ -253,7 +261,9 @@ defmodule TinyCI.Executor do
         allowed_failure: allow_failure
       }
     else
-      merged_env = resolve_env(env, ctx.store)
+      pipeline_env = Map.get(ctx, :pipeline_env, %{})
+      stage_env = Map.get(ctx, :stage_env, %{})
+      merged_env = pipeline_env |> Map.merge(stage_env) |> Map.merge(resolve_env(env, ctx.store))
       output_opts = [mode: output_mode, env: merged_env, prefix: prefix, working_dir: working_dir]
 
       {duration_ms, {status, output}} =
@@ -280,6 +290,9 @@ defmodule TinyCI.Executor do
        )
        when not is_nil(module) do
     config = if block, do: block.(), else: %{}
+    pipeline_env = Map.get(ctx, :pipeline_env, %{})
+    stage_env = Map.get(ctx, :stage_env, %{})
+    ctx = Map.put(ctx, :env, Map.merge(pipeline_env, stage_env))
 
     {duration_ms, {status, store_data}} =
       measure(fn ->

@@ -43,6 +43,13 @@ defmodule TinyCI.DryRun do
     branch = Map.get(context, :branch, "unknown")
     commit = Map.get(context, :commit, "unknown")
     IO.puts("  Branch: #{branch} | Commit: #{commit}")
+
+    pipeline_env = Map.get(context, :pipeline_env, %{})
+
+    unless map_size(pipeline_env) == 0 do
+      IO.puts("  Env: #{format_env(pipeline_env)}")
+    end
+
     IO.puts("")
   end
 
@@ -66,6 +73,10 @@ defmodule TinyCI.DryRun do
         IO.ANSI.reset(),
         " (#{stage.mode})"
       ])
+
+      unless map_size(stage.env) == 0 do
+        IO.puts("    Env: #{format_env(stage.env)}")
+      end
 
       Enum.each(stage.steps, &print_step(&1, stage.working_dir, root, context))
     end
@@ -114,6 +125,10 @@ defmodule TinyCI.DryRun do
 
   defp skip_step?(%{when_condition: ast}, context),
     do: not TinyCI.DSL.ConditionEval.eval(ast, context)
+
+  defp format_env(env) do
+    Enum.map_join(env, ", ", fn {k, v} -> "#{k}=#{v}" end)
+  end
 
   defp resolve_working_dir(nil, _root), do: nil
 

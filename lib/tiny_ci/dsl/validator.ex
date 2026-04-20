@@ -76,6 +76,12 @@ defmodule TinyCI.DSL.Validator do
   defp validate_top_level({:on_failure, _, _}),
     do: ["on_failure name must be an atom"]
 
+  defp validate_top_level({:env, _, [kwlist]}) when is_list(kwlist),
+    do: validate_env_keyword_list(kwlist)
+
+  defp validate_top_level({:env, _, _}),
+    do: ["env requires a keyword list, e.g. env MIX_ENV: \"test\""]
+
   defp validate_top_level({:defmodule, _, _}),
     do: [
       "Pipeline files must not use `defmodule`. " <>
@@ -133,6 +139,12 @@ defmodule TinyCI.DSL.Validator do
 
   defp validate_stage_expr({:step, _, _}),
     do: ["step name must be an atom, e.g. `step :unit, cmd: \"echo hi\"`"]
+
+  defp validate_stage_expr({:env, _, [kwlist]}) when is_list(kwlist),
+    do: validate_env_keyword_list(kwlist)
+
+  defp validate_stage_expr({:env, _, _}),
+    do: ["env requires a keyword list, e.g. env MIX_ENV: \"test\""]
 
   defp validate_stage_expr(node),
     do: ["Unexpected expression in stage body: #{Macro.to_string(node)}"]
@@ -285,6 +297,23 @@ defmodule TinyCI.DSL.Validator do
 
       {_, _} ->
         ["Env map values must be string literals or store(:key) references"]
+    end)
+  end
+
+  # ---------------------------------------------------------------------------
+  # Env keyword list
+  # ---------------------------------------------------------------------------
+
+  defp validate_env_keyword_list(pairs) do
+    Enum.flat_map(pairs, fn
+      {k, v} when is_atom(k) and is_binary(v) ->
+        []
+
+      {k, _} when is_atom(k) ->
+        ["env values must be string literals (key: :#{k})"]
+
+      _ ->
+        ["env keys must be atom literals, e.g. env MIX_ENV: \"test\""]
     end)
   end
 

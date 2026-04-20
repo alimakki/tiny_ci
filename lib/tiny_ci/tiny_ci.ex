@@ -53,8 +53,9 @@ defmodule TinyCI.Stage do
           steps: [TinyCI.Step.t()],
           mode: :serial | :parallel,
           when_condition: (map() -> boolean()) | nil,
-          working_dir: String.t() | nil
+          working_dir: String.t() | nil,
+          env: %{optional(String.t()) => String.t()}
         }
 
-  defstruct name: nil, steps: [], mode: :parallel, when_condition: nil, working_dir: nil
+  defstruct name: nil, steps: [], mode: :parallel, when_condition: nil, working_dir: nil, env: %{}
 end
