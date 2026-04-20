@@ -152,6 +152,7 @@ defmodule TinyCI.DSL.Interpreter do
       env: resolve_map(Keyword.get(opts, :env, {:%{}, [], []})),
       timeout: Keyword.get(opts, :timeout),
       allow_failure: Keyword.get(opts, :allow_failure, false),
+      when_condition: Keyword.get(opts, :when),
       config_block: build_config_block(block)
     }
   end

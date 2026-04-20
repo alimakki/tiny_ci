@@ -22,7 +22,8 @@ defmodule TinyCI.Step do
           config_block: (-> keyword()) | nil,
           env: %{optional(String.t()) => String.t()},
           timeout: pos_integer() | nil,
-          allow_failure: boolean()
+          allow_failure: boolean(),
+          when_condition: term() | nil
         }
 
   defstruct name: nil,
@@ -33,7 +34,8 @@ defmodule TinyCI.Step do
             config_block: nil,
             env: %{},
             timeout: nil,
-            allow_failure: false
+            allow_failure: false,
+            when_condition: nil
 end
 
 defmodule TinyCI.Stage do

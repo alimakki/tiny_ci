@@ -66,16 +66,26 @@ defmodule TinyCI.DryRun do
         " (#{stage.mode})"
       ])
 
-      Enum.each(stage.steps, &print_step/1)
+      Enum.each(stage.steps, &print_step(&1, context))
     end
   end
 
-  defp print_step(step) do
-    type_info = step_type_info(step)
-    timeout_info = if step.timeout, do: " [timeout: #{step.timeout}ms]", else: ""
-    allow_failure_info = if step.allow_failure, do: " [allow_failure]", else: ""
+  defp print_step(step, context) do
+    if skip_step?(step, context) do
+      IO.puts([
+        "    ",
+        IO.ANSI.yellow(),
+        "○ :#{step.name}",
+        IO.ANSI.reset(),
+        " — will skip (condition not met)"
+      ])
+    else
+      type_info = step_type_info(step)
+      timeout_info = if step.timeout, do: " [timeout: #{step.timeout}ms]", else: ""
+      allow_failure_info = if step.allow_failure, do: " [allow_failure]", else: ""
 
-    IO.puts("    • :#{step.name} — #{type_info}#{timeout_info}#{allow_failure_info}")
+      IO.puts("    • :#{step.name} — #{type_info}#{timeout_info}#{allow_failure_info}")
+    end
   end
 
   defp step_type_info(%{cmd: cmd}) when not is_nil(cmd), do: "cmd: #{inspect(cmd)}"
@@ -88,5 +98,13 @@ defmodule TinyCI.DryRun do
     do: not f.(context)
 
   defp skip_stage?(%{when_condition: ast}, context),
+    do: not TinyCI.DSL.ConditionEval.eval(ast, context)
+
+  defp skip_step?(%{when_condition: nil}, _context), do: false
+
+  defp skip_step?(%{when_condition: f}, context) when is_function(f, 1),
+    do: not f.(context)
+
+  defp skip_step?(%{when_condition: ast}, context),
     do: not TinyCI.DSL.ConditionEval.eval(ast, context)
 end

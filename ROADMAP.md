@@ -37,11 +37,11 @@ As a pipeline author, I want to apply conditional execution to individual steps 
 - `--dry-run` shows per-step skip/run status.
 
 **Acceptance criteria**
-- [ ] `step "name", cmd: "...", when: branch() == "main"` is valid DSL
-- [ ] Condition is evaluated at runtime against pipeline context
-- [ ] Skipped steps appear in reporter output with `:skipped` status
-- [ ] Module steps support `when:` in the same way as shell steps
-- [ ] Validator allowlists `when:` on step constructs
+- [x] `step "name", cmd: "...", when: branch() == "main"` is valid DSL
+- [x] Condition is evaluated at runtime against pipeline context
+- [x] Skipped steps appear in reporter output with `:skipped` status
+- [x] Module steps support `when:` in the same way as shell steps
+- [x] Validator allowlists `when:` on step constructs
 
 ---
 

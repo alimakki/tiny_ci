@@ -181,6 +181,9 @@ defmodule TinyCI.DSL.Validator do
       {:allow_failure, _} ->
         ["Step :allow_failure must be true or false"]
 
+      {:when, condition} ->
+        validate_condition(condition)
+
       {key, _} ->
         ["Unknown step option: :#{key}"]
     end)

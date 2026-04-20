@@ -115,10 +115,11 @@ end
 | `:timeout` | Max execution time in ms; step fails if exceeded |
 | `:env` | Map of environment variables merged into the shell environment |
 | `:allow_failure` | When `true`, step can fail without failing the stage |
+| `:when` | Condition expression; step is skipped when it evaluates to falsy |
 
 ### Conditions
 
-The `:when` option accepts a boolean expression built from these primitives:
+The `:when` option is supported on both **stages** and **steps**. It accepts a boolean expression built from these primitives:
 
 | Expression | Description |
 |------------|-------------|
@@ -126,37 +127,31 @@ The `:when` option accepts a boolean expression built from these primitives:
 | `env("VAR")` | Value of environment variable, or `nil` if unset |
 | `file_changed?("glob")` | `true` if any file matching the glob changed since last commit |
 
-Combine with standard boolean operators:
+Combine with standard boolean operators: `and`, `or`, `not`, `==`, `!=`.
+
+**Stage-level conditions** skip the entire stage when not met:
 
 ```elixir
-# Run only on main
 stage :deploy, when: branch() == "main" do
-  step :release, cmd: "mix release"
-end
-
-# Run only when CI env var is set
-stage :deploy, when: env("CI") != nil do
-  step :release, cmd: "mix release"
-end
-
-# Run only when source files changed
-stage :test, when: file_changed?("lib/**/*.ex") do
-  step :unit, cmd: "mix test"
-end
-
-# Combine with and / or / not
-stage :deploy, when: branch() == "main" and env("CI") != nil do
   step :release, cmd: "mix release"
 end
 
 stage :test, when: file_changed?("lib/**") or file_changed?("test/**") do
   step :unit, cmd: "mix test"
 end
+```
 
-stage :staging, when: not (branch() == "main") do
-  step :deploy_staging, cmd: "make deploy-staging"
+**Step-level conditions** skip individual steps within a running stage, leaving the rest of the stage unaffected:
+
+```elixir
+stage :check do
+  step :unit,     cmd: "mix test"
+  step :dialyzer, cmd: "mix dialyzer", when: branch() == "main"
+  step :audit,    cmd: "mix deps.audit", when: env("CI") != nil
 end
 ```
+
+A skipped step is reported with a `○` icon in the summary and does not affect the stage outcome. `--dry-run` shows which steps would be skipped before any execution.
 
 ### Hooks
 

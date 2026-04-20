@@ -135,7 +135,7 @@ defmodule TinyCI.Executor do
         measure(fn -> execute_by_mode(stage, context, output_mode) end)
 
       status =
-        if Enum.all?(step_results, &(&1.status == :passed or &1.allowed_failure)),
+        if Enum.all?(step_results, &(&1.status in [:passed, :skipped] or &1.allowed_failure)),
           do: :passed,
           else: :failed
 
@@ -157,6 +157,14 @@ defmodule TinyCI.Executor do
   defp skip_stage?(%{when_condition: ast}, context),
     do: not TinyCI.DSL.ConditionEval.eval(ast, context)
 
+  defp skip_step?(%{when_condition: nil}, _context), do: false
+
+  defp skip_step?(%{when_condition: f}, context) when is_function(f, 1),
+    do: not f.(context)
+
+  defp skip_step?(%{when_condition: ast}, context),
+    do: not TinyCI.DSL.ConditionEval.eval(ast, context)
+
   defp execute_by_mode(%{mode: :serial, steps: steps}, context, output_mode),
     do: execute_serial(steps, context, output_mode)
 
@@ -167,11 +175,19 @@ defmodule TinyCI.Executor do
     {results, final_store} =
       Enum.reduce_while(steps, {[], context.store}, fn step, {acc, current_store} ->
         ctx = Map.put(context, :store, current_store)
-        step_result = run_step(step, ctx, output_mode, _prefix = nil)
+
+        step_result =
+          if skip_step?(step, ctx) do
+            %StepResult{name: step.name, status: :skipped, duration_ms: 0}
+          else
+            run_step(step, ctx, output_mode, _prefix = nil)
+          end
+
         new_store = Map.merge(current_store, step_result.store_data)
 
         case {step_result.status, step_result.allowed_failure} do
           {:passed, _} -> {:cont, {[step_result | acc], new_store}}
+          {:skipped, _} -> {:cont, {[step_result | acc], new_store}}
           {:failed, true} -> {:cont, {[step_result | acc], new_store}}
           {:failed, false} -> {:halt, {[step_result | acc], new_store}}
         end
@@ -190,7 +206,12 @@ defmodule TinyCI.Executor do
 
         Task.Supervisor.async(TinyCI.TaskSupervisor, fn ->
           Process.group_leader(self(), caller_gl)
-          run_step(step, context, output_mode, step_prefix)
+
+          if skip_step?(step, context) do
+            %StepResult{name: step.name, status: :skipped, duration_ms: 0}
+          else
+            run_step(step, context, output_mode, step_prefix)
+          end
         end)
       end)
 
