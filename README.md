@@ -110,7 +110,7 @@ env "APP": "myapp", "REGION": "us-east-1"
 
 ### Stages
 
-Stages run sequentially. The pipeline halts on the first stage failure.
+By default, stages run sequentially. When any stage declares `needs:`, the pipeline switches to DAG execution: independent stages run in parallel while dependent stages wait for their prerequisites.
 
 ```elixir
 stage :name, mode: :parallel do
@@ -121,8 +121,49 @@ end
 | Option | Default | Description |
 |--------|---------|-------------|
 | `:mode` | `:parallel` | How steps within the stage execute — `:parallel` or `:serial` |
+| `:needs` | `[]` | List of stage names that must complete successfully before this stage starts |
 | `:when` | (always run) | Condition expression; stage is skipped when it evaluates to falsy |
 | `:working_dir` | (pipeline root) | Default working directory for all steps in this stage |
+
+### Stage Dependencies (DAG)
+
+The `needs:` option declares explicit dependencies between stages. Stages without `needs:` at the same level run in parallel; stages with `needs:` wait for all listed stages to pass.
+
+```elixir
+# build and lint run in parallel (no dependencies between them)
+stage :build do
+  step :compile, cmd: "mix compile"
+end
+
+stage :lint do
+  step :format, cmd: "mix format --check-formatted"
+  step :credo,  cmd: "mix credo"
+end
+
+# test waits for build and lint to both succeed
+stage :test, needs: [:build, :lint] do
+  step :unit, cmd: "mix test"
+end
+
+# deploy waits for test
+stage :deploy, needs: [:test], when: branch() == "main" do
+  step :release, cmd: "mix release"
+end
+```
+
+**Execution topology** for the above:
+
+```
+Level 1 (parallel): :build  :lint
+Level 2:            :test          ← waits for both
+Level 3:            :deploy        ← waits for test
+```
+
+**Failure propagation:** if a stage fails, all stages that `needs:` it (directly or transitively) are automatically skipped. Independent stages at the same level still run.
+
+**Cycle detection:** circular dependencies (`a needs b, b needs a`) are caught at parse time with a descriptive error — the pipeline will not start.
+
+`--dry-run` shows the dependency graph grouped by level, with `[needs: ...]` shown for each dependent stage.
 
 ### Steps
 
@@ -419,8 +460,8 @@ Module hooks also receive `:pipeline_result` (`:on_success` or `:on_failure`).
 Pipeline files are validated against an allowlist of permitted constructs before execution:
 
 - `name`, `stage`, `step`, `on_success`, `on_failure`, `set`
-- Stage options: `:mode`, `:when`
-- Step options: `:cmd`, `:module`, `:timeout`, `:env`, `:allow_failure`
+- Stage options: `:mode`, `:needs`, `:when`, `:working_dir`
+- Step options: `:cmd`, `:module`, `:timeout`, `:env`, `:allow_failure`, `:when`, `:working_dir`, `:retry`, `:retry_delay`
 - Condition expressions: `branch()`, `env/1`, `file_changed?/1`, `==`, `!=`, `and`, `or`, `not`, `if/else`
 
 Constructs outside this list (e.g. `defmodule`, `System.cmd`, `File.read`) are
@@ -459,6 +500,7 @@ lib/
       condition_eval.ex   # Condition expression evaluator
       interpreter.ex      # DSL file parser → PipelineSpec
       validator.ex        # AST allowlist validator
+    dag.ex                # DAG level computation and cycle detection
     dsl.ex                # Macro-based DSL (internal use)
     executor.ex           # Stage/step execution engine
     hooks.ex              # Hook runner
@@ -507,16 +549,12 @@ mix credo                          # static analysis
 - **Hooks** — `on_success` / `on_failure` pipeline hooks (shell and module-based)
 - **Step data passing** — pipeline store for sharing data between module steps
 - **Custom DSL** — declarative pipeline format with an allowlist validator
+- **Stage dependencies (DAG)** — `needs:` for fan-out/fan-in topologies with parallel independent stages, transitive skip propagation, and cycle detection at parse time
 
 ### Up Next
 
-- **Phase 13 — Watch Mode** — `mix tiny_ci.run --watch` to re-run on file changes
-- **Phase 14 — Polish & Distribution** — `mix tiny_ci.init`, `--only stage_name`, step retries, escript/Burrito binary
-
-### Ideas to Explore
-
-- **Pipeline composition** — include or extend another pipeline file
-- **Live TUI** — real-time terminal UI showing stage/step progress
-- **Secret management** — `secret "MY_KEY"` reading from an encrypted store
-- **Step caching** — skip steps whose inputs haven't changed
-- **Matrix builds** — `stage :test, matrix: [elixir: ["1.17", "1.18"]]`
+- **Secrets management** — `secret "MY_KEY"` reading from env or a local secrets file, with value masking in output
+- **Dependency caching** — skip steps when input files haven't changed, keyed by file hash
+- **Artifact persistence** — declare build outputs that downstream stages can consume
+- **Matrix builds** — `stage :test, matrix: [elixir: ["1.17", "1.18"]]` with cartesian-product parallel runs
+- **Watch mode** — `mix tiny_ci.run --watch` to re-run on file changes
