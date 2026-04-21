@@ -1341,4 +1341,95 @@ defmodule TinyCI.ExecutorTest do
       assert {:error, {:stage_failed, :test, _reason}, [%StageResult{status: :failed}]} = result
     end
   end
+
+  describe "run_pipeline/2 with DAG (needs:)" do
+    test "independent stages run and all pass" do
+      stages = [
+        %Stage{name: :build, needs: [], mode: :serial, steps: [%Step{name: :b, cmd: "true"}]},
+        %Stage{name: :lint, needs: [], mode: :serial, steps: [%Step{name: :l, cmd: "true"}]}
+      ]
+
+      assert {:ok, results} = Executor.run_pipeline(stages)
+      assert length(results) == 2
+      assert Enum.all?(results, &(&1.status == :passed))
+    end
+
+    test "dependent stage runs after its dependency" do
+      stages = [
+        %Stage{name: :build, needs: [], mode: :serial, steps: [%Step{name: :b, cmd: "true"}]},
+        %Stage{
+          name: :deploy,
+          needs: [:build],
+          mode: :serial,
+          steps: [%Step{name: :d, cmd: "true"}]
+        }
+      ]
+
+      assert {:ok, results} = Executor.run_pipeline(stages)
+      names = Enum.map(results, & &1.name)
+      assert :build in names
+      assert :deploy in names
+      assert Enum.all?(results, &(&1.status == :passed))
+    end
+
+    test "dependent stage is skipped when its dependency fails" do
+      stages = [
+        %Stage{name: :build, needs: [], mode: :serial, steps: [%Step{name: :b, cmd: "false"}]},
+        %Stage{
+          name: :deploy,
+          needs: [:build],
+          mode: :serial,
+          steps: [%Step{name: :d, cmd: "true"}]
+        }
+      ]
+
+      assert {:error, {:stage_failed, :build, _}, results} = Executor.run_pipeline(stages)
+      build_result = Enum.find(results, &(&1.name == :build))
+      deploy_result = Enum.find(results, &(&1.name == :deploy))
+      assert build_result.status == :failed
+      assert deploy_result.status == :skipped
+    end
+
+    test "independent stage still runs when unrelated stage fails" do
+      stages = [
+        %Stage{name: :build, needs: [], mode: :serial, steps: [%Step{name: :b, cmd: "false"}]},
+        %Stage{name: :lint, needs: [], mode: :serial, steps: [%Step{name: :l, cmd: "true"}]},
+        %Stage{
+          name: :deploy,
+          needs: [:build],
+          mode: :serial,
+          steps: [%Step{name: :d, cmd: "true"}]
+        }
+      ]
+
+      assert {:error, {:stage_failed, :build, _}, results} = Executor.run_pipeline(stages)
+      lint_result = Enum.find(results, &(&1.name == :lint))
+      assert lint_result.status == :passed
+    end
+
+    test "transitive skip: grandchild is skipped when grandparent fails" do
+      stages = [
+        %Stage{name: :a, needs: [], mode: :serial, steps: [%Step{name: :s, cmd: "false"}]},
+        %Stage{name: :b, needs: [:a], mode: :serial, steps: [%Step{name: :s, cmd: "true"}]},
+        %Stage{name: :c, needs: [:b], mode: :serial, steps: [%Step{name: :s, cmd: "true"}]}
+      ]
+
+      assert {:error, {:stage_failed, :a, _}, results} = Executor.run_pipeline(stages)
+      b_result = Enum.find(results, &(&1.name == :b))
+      c_result = Enum.find(results, &(&1.name == :c))
+      assert b_result.status == :skipped
+      assert c_result.status == :skipped
+    end
+
+    test "returns ok when all stages pass in a linear DAG" do
+      stages = [
+        %Stage{name: :a, needs: [], mode: :serial, steps: [%Step{name: :s, cmd: "true"}]},
+        %Stage{name: :b, needs: [:a], mode: :serial, steps: [%Step{name: :s, cmd: "true"}]},
+        %Stage{name: :c, needs: [:b], mode: :serial, steps: [%Step{name: :s, cmd: "true"}]}
+      ]
+
+      assert {:ok, results} = Executor.run_pipeline(stages)
+      assert Enum.all?(results, &(&1.status == :passed))
+    end
+  end
 end

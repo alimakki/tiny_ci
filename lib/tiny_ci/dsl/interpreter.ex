@@ -50,12 +50,16 @@ defmodule TinyCI.DSL.Interpreter do
   def interpret_file(path) do
     with {:ok, content} <- File.read(path),
          {:ok, ast} <- parse(content, path),
-         :ok <- Validator.validate(ast) do
-      {:ok, build_spec(ast, path)}
+         :ok <- Validator.validate(ast),
+         spec = build_spec(ast, path),
+         :ok <- TinyCI.DAG.validate(spec.stages) do
+      {:ok, spec}
     else
       {:error, :enoent} -> {:error, :file_not_found}
       {:error, {:parse_error, _} = e} -> {:error, e}
       {:error, {:validation_error, _} = e} -> {:error, e}
+      {:error, {:circular_dependency, _} = e} -> {:error, e}
+      {:error, {:unknown_stages, _} = e} -> {:error, e}
       {:error, violations} when is_list(violations) -> {:error, {:validation_error, violations}}
     end
   end
@@ -135,6 +139,7 @@ defmodule TinyCI.DSL.Interpreter do
     %Stage{
       name: name,
       mode: Keyword.get(opts, :mode, :parallel),
+      needs: Keyword.get(opts, :needs, []),
       when_condition: Keyword.get(opts, :when),
       working_dir: Keyword.get(opts, :working_dir),
       env: stage_env,

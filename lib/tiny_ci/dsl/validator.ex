@@ -124,8 +124,21 @@ defmodule TinyCI.DSL.Validator do
       {:working_dir, _} ->
         ["Stage :working_dir must be a string literal"]
 
+      {:needs, v} when is_list(v) ->
+        validate_needs_list(v)
+
+      {:needs, _} ->
+        ["Stage :needs must be a list of stage name atoms, e.g. needs: [:build, :test]"]
+
       {key, _} ->
         ["Unknown stage option: :#{key}"]
+    end)
+  end
+
+  defp validate_needs_list(items) do
+    Enum.flat_map(items, fn
+      a when is_atom(a) -> []
+      _ -> ["Stage :needs items must be atom stage names, e.g. needs: [:build, :test]"]
     end)
   end
 

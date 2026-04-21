@@ -22,7 +22,7 @@ defmodule TinyCI.Executor do
   option passed to `run_pipeline/3`.
   """
 
-  alias TinyCI.{Output, Reporter, StageResult, StepResult}
+  alias TinyCI.{DAG, Output, Reporter, StageResult, StepResult}
 
   @doc """
   Starts the task supervisor used for parallel step execution.
@@ -64,6 +64,14 @@ defmodule TinyCI.Executor do
     ctx = Map.put_new(ctx, :store, %{})
     output_mode = Output.resolve_mode(opts[:output] || :auto)
 
+    if DAG.dag_mode?(stages) do
+      run_pipeline_dag(stages, ctx, output_mode)
+    else
+      run_pipeline_sequential(stages, ctx, output_mode)
+    end
+  end
+
+  defp run_pipeline_sequential(stages, ctx, output_mode) do
     result =
       Enum.reduce_while(stages, {[], ctx.store}, fn stage, {acc, current_store} ->
         ctx_with_store = Map.put(ctx, :store, current_store)
@@ -86,6 +94,83 @@ defmodule TinyCI.Executor do
     case result do
       {:error, _reason, _results} = error -> error
       {accumulated, _store} -> {:ok, Enum.reverse(accumulated)}
+    end
+  end
+
+  defp run_pipeline_dag(stages, ctx, output_mode) do
+    case DAG.build_levels(stages) do
+      {:error, _} = error ->
+        error
+
+      {:ok, levels} ->
+        execute_dag_levels(levels, ctx, output_mode)
+    end
+  end
+
+  defp execute_dag_levels(levels, ctx, output_mode) do
+    initial = {[], ctx.store, MapSet.new()}
+
+    {all_results, _store, _blocked} =
+      Enum.reduce(levels, initial, fn level, {acc_results, current_store, blocked} ->
+        ctx_with_store = Map.put(ctx, :store, current_store)
+
+        {stage_results, new_blocked} =
+          execute_dag_level(level, ctx_with_store, output_mode, blocked)
+
+        if output_mode == :buffered do
+          Enum.each(stage_results, &Reporter.print_step_output/1)
+        end
+
+        new_store =
+          Enum.reduce(stage_results, current_store, fn r, s -> Map.merge(s, r.store) end)
+
+        {acc_results ++ stage_results, new_store, new_blocked}
+      end)
+
+    if Enum.any?(all_results, &(&1.status == :failed)) do
+      failed = Enum.find(all_results, &(&1.status == :failed))
+      {:error, {:stage_failed, failed.name, :failed}, all_results}
+    else
+      {:ok, all_results}
+    end
+  end
+
+  defp execute_dag_level(stages, ctx, output_mode, blocked) do
+    caller_gl = Process.group_leader()
+    tasks = Enum.map(stages, &spawn_dag_stage(&1, ctx, output_mode, blocked, caller_gl))
+    stage_results = Task.await_many(tasks, :infinity)
+
+    new_blocked =
+      Enum.zip(stages, stage_results)
+      |> Enum.reduce(blocked, fn {stage, result}, acc ->
+        dep_blocked? = Enum.any?(stage.needs, &MapSet.member?(blocked, &1))
+        if result.status == :failed or dep_blocked?, do: MapSet.put(acc, stage.name), else: acc
+      end)
+
+    {stage_results, new_blocked}
+  end
+
+  defp spawn_dag_stage(stage, ctx, output_mode, blocked, caller_gl) do
+    Task.Supervisor.async(TinyCI.TaskSupervisor, fn ->
+      Process.group_leader(self(), caller_gl)
+      run_dag_stage(stage, ctx, output_mode, blocked)
+    end)
+  end
+
+  defp run_dag_stage(stage, ctx, output_mode, blocked) do
+    if Enum.any?(stage.needs, &MapSet.member?(blocked, &1)) do
+      IO.puts("Stage: #{stage.name}")
+      IO.puts("  Skipped (dependency failed)")
+
+      %StageResult{
+        name: stage.name,
+        status: :skipped,
+        step_results: [],
+        duration_ms: 0,
+        store: ctx.store
+      }
+    else
+      execute(stage, ctx, output_mode)
     end
   end
 

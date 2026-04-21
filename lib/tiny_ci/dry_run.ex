@@ -6,7 +6,7 @@ defmodule TinyCI.DryRun do
   stages would be skipped and which would run, along with step details.
   """
 
-  alias TinyCI.Stage
+  alias TinyCI.{DAG, Stage}
 
   @doc """
   Prints the execution plan for the given stages and context.
@@ -29,11 +29,40 @@ defmodule TinyCI.DryRun do
   def print_plan(stages, context) do
     print_header(context)
 
-    Enum.each(stages, fn stage ->
-      print_stage(stage, context)
-    end)
+    if DAG.dag_mode?(stages) do
+      print_dag_plan(stages, context)
+    else
+      Enum.each(stages, &print_stage(&1, context))
+    end
 
     IO.puts("")
+  end
+
+  defp print_dag_plan(stages, context) do
+    case DAG.build_levels(stages) do
+      {:ok, levels} ->
+        levels
+        |> Enum.with_index(1)
+        |> Enum.each(&print_dag_level(&1, context))
+
+      {:error, {:circular_dependency, cycle}} ->
+        IO.puts([
+          IO.ANSI.red(),
+          "  ✗ Circular dependency detected: #{inspect(cycle)}",
+          IO.ANSI.reset()
+        ])
+
+      {:error, {:unknown_stages, errors}} ->
+        Enum.each(errors, fn e ->
+          IO.puts([IO.ANSI.red(), "  ✗ #{e}", IO.ANSI.reset()])
+        end)
+    end
+  end
+
+  defp print_dag_level({level, idx}, context) do
+    names = Enum.map_join(level, ", ", fn s -> ":#{s.name}" end)
+    IO.puts([IO.ANSI.cyan(), "  [level #{idx}] #{names}", IO.ANSI.reset()])
+    Enum.each(level, &print_stage(&1, context))
   end
 
   defp print_header(context) do
@@ -66,12 +95,18 @@ defmodule TinyCI.DryRun do
         " — will skip (condition not met)"
       ])
     else
+      needs_info =
+        case stage.needs do
+          [] -> ""
+          names -> " [needs: #{Enum.map_join(names, ", ", &":#{&1}")}]"
+        end
+
       IO.puts([
         "  ",
         IO.ANSI.green(),
         "▶ :#{stage.name}",
         IO.ANSI.reset(),
-        " (#{stage.mode})"
+        " (#{stage.mode})#{needs_info}"
       ])
 
       unless map_size(stage.env) == 0 do

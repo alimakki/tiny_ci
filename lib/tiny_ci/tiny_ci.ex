@@ -48,18 +48,29 @@ defmodule TinyCI.Stage do
   @moduledoc """
   Represents a pipeline stage containing one or more steps.
 
-  Stages run sequentially within a pipeline. Steps within a stage run
-  according to the stage's `:mode` — either `:serial` or `:parallel`.
+  Stages run sequentially by default. When `needs:` is declared on one or
+  more stages, the pipeline switches to DAG execution: independent stages
+  run in parallel and dependent stages wait for their prerequisites.
+
+  Steps within a stage run according to the stage's `:mode` — either
+  `:serial` or `:parallel`.
   """
 
   @type t :: %__MODULE__{
           name: atom(),
           steps: [TinyCI.Step.t()],
           mode: :serial | :parallel,
+          needs: [atom()],
           when_condition: (map() -> boolean()) | nil,
           working_dir: String.t() | nil,
           env: %{optional(String.t()) => String.t()}
         }
 
-  defstruct name: nil, steps: [], mode: :parallel, when_condition: nil, working_dir: nil, env: %{}
+  defstruct name: nil,
+            steps: [],
+            mode: :parallel,
+            needs: [],
+            when_condition: nil,
+            working_dir: nil,
+            env: %{}
 end

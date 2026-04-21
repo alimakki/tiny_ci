@@ -219,6 +219,17 @@ defmodule Mix.Tasks.TinyCi.Run do
     ])
   end
 
+  defp print_error({:circular_dependency, cycle}) do
+    IO.puts(:stderr, [IO.ANSI.red(), "Circular dependency detected:", IO.ANSI.reset()])
+
+    IO.puts(:stderr, "  Stages involved: #{Enum.map_join(cycle, ", ", &":#{&1}")}")
+  end
+
+  defp print_error({:unknown_stages, errors}) do
+    IO.puts(:stderr, [IO.ANSI.red(), "Unknown stage references:", IO.ANSI.reset()])
+    Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
+  end
+
   defp print_error(reason) do
     IO.puts(:stderr, [
       IO.ANSI.red(),
