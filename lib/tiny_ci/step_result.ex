@@ -23,7 +23,8 @@ defmodule TinyCI.StepResult do
           output: String.t(),
           duration_ms: non_neg_integer(),
           allowed_failure: boolean(),
-          store_data: map()
+          store_data: map(),
+          attempts: pos_integer()
         }
 
   @enforce_keys [:name, :status]
@@ -32,5 +33,6 @@ defmodule TinyCI.StepResult do
             output: "",
             duration_ms: 0,
             allowed_failure: false,
-            store_data: %{}
+            store_data: %{},
+            attempts: 1
 end

@@ -169,9 +169,34 @@ defmodule TinyCI.Executor do
     if skip_step?(step, context) do
       %StepResult{name: step.name, status: :skipped, duration_ms: 0}
     else
-      run_step(step, context, output_mode, prefix, working_dir)
+      run_step_with_retries(step, context, output_mode, prefix, working_dir)
     end
   end
+
+  defp run_step_with_retries(step, ctx, output_mode, prefix, working_dir) do
+    total = (step.retry || 0) + 1
+    delay = step.retry_delay || 0
+    attempt_step(step, ctx, output_mode, prefix, working_dir, {1, total, delay, 0})
+  end
+
+  defp attempt_step(step, ctx, output_mode, prefix, working_dir, {attempt, total, delay, acc_ms}) do
+    log_attempt(attempt, total)
+    result = run_step(step, ctx, output_mode, prefix, working_dir)
+    total_ms = acc_ms + result.duration_ms
+
+    if result.status == :failed and attempt < total do
+      sleep_between_attempts(delay)
+      attempt_step(step, ctx, output_mode, prefix, working_dir, {attempt + 1, total, delay, total_ms})
+    else
+      %{result | attempts: attempt, duration_ms: total_ms}
+    end
+  end
+
+  defp log_attempt(_attempt, 1), do: :ok
+  defp log_attempt(attempt, total), do: IO.puts("  [attempt #{attempt}/#{total}]")
+
+  defp sleep_between_attempts(0), do: :ok
+  defp sleep_between_attempts(delay), do: Process.sleep(delay)
 
   defp skip_step?(%{when_condition: nil}, _context), do: false
 

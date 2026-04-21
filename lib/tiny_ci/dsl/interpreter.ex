@@ -172,6 +172,8 @@ defmodule TinyCI.DSL.Interpreter do
       allow_failure: Keyword.get(opts, :allow_failure, false),
       when_condition: Keyword.get(opts, :when),
       working_dir: Keyword.get(opts, :working_dir),
+      retry: Keyword.get(opts, :retry),
+      retry_delay: Keyword.get(opts, :retry_delay),
       config_block: build_config_block(block)
     }
   end

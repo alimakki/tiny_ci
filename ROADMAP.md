@@ -80,11 +80,11 @@ As a pipeline author, I want to configure a step to retry automatically on failu
 - Retries are visible in `--dry-run` output as metadata.
 
 **Acceptance criteria**
-- [ ] `step "name", cmd: "...", retry: 3` retries up to 3 times on non-zero exit
-- [ ] `retry_delay: 1000` waits 1 second between attempts
-- [ ] Reporter shows attempt count on failure: `failed after 3 attempts`
-- [ ] `allow_failure: true` combined with `retry:` exhausts retries before allowing failure
-- [ ] Timeouts apply per attempt, not across all attempts combined
+- [x] `step "name", cmd: "...", retry: 3` retries up to 3 times on non-zero exit
+- [x] `retry_delay: 1000` waits 1 second between attempts
+- [x] Reporter shows attempt count on failure: `failed after 3 attempts`
+- [x] `allow_failure: true` combined with `retry:` exhausts retries before allowing failure
+- [x] Timeouts apply per attempt, not across all attempts combined
 
 ---
 

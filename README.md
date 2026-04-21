@@ -148,6 +148,8 @@ end
 | `:allow_failure` | When `true`, step can fail without failing the stage |
 | `:when` | Condition expression; step is skipped when it evaluates to falsy |
 | `:working_dir` | Directory to run the command in (string path) |
+| `:retry` | Number of times to retry on failure (e.g. `retry: 3` = up to 3 retries) |
+| `:retry_delay` | Milliseconds to wait between retry attempts (default: no delay) |
 
 ### Conditions
 
@@ -205,6 +207,28 @@ end
 ```
 
 Relative paths are resolved from the directory containing the pipeline file. Absolute paths are used as-is. If the directory does not exist, the step fails immediately with a clear error before any command is run. `--dry-run` shows the resolved path for each step.
+
+### Step Retries
+
+The `retry:` option retries a failed step automatically, useful for flaky network calls, intermittent package downloads, or external service timeouts.
+
+```elixir
+stage :test do
+  # Retry up to 3 times on failure
+  step :flaky_test, cmd: "mix test --seed random", retry: 3
+
+  # Retry with a 2-second delay between attempts
+  step :fetch_deps, cmd: "mix deps.get", retry: 2, retry_delay: 2000
+end
+```
+
+- `retry: N` — retry up to N times; total max attempts = N + 1
+- `retry_delay: N` — wait N milliseconds between attempts (default: no delay)
+- Each attempt is logged with its number (e.g. `[attempt 2/3]`)
+- `allow_failure: true` exhausts all retries before allowing the failure
+- `timeout:` applies per attempt, not across all attempts combined
+- `--dry-run` shows `[retry: N]` and `[retry_delay: Nms]` in the step plan
+- The summary reports `passed on attempt N` or `failed after N attempts` when retries were used
 
 ### Hooks
 

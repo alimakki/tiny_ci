@@ -24,7 +24,9 @@ defmodule TinyCI.Step do
           timeout: pos_integer() | nil,
           allow_failure: boolean(),
           when_condition: term() | nil,
-          working_dir: String.t() | nil
+          working_dir: String.t() | nil,
+          retry: non_neg_integer() | nil,
+          retry_delay: non_neg_integer() | nil
         }
 
   defstruct name: nil,
@@ -37,7 +39,9 @@ defmodule TinyCI.Step do
             timeout: nil,
             allow_failure: false,
             when_condition: nil,
-            working_dir: nil
+            working_dir: nil,
+            retry: nil,
+            retry_delay: nil
 end
 
 defmodule TinyCI.Stage do

@@ -208,6 +208,18 @@ defmodule TinyCI.DSL.Validator do
       {:working_dir, _} ->
         ["Step :working_dir must be a string literal"]
 
+      {:retry, v} when is_integer(v) and v > 0 ->
+        []
+
+      {:retry, _} ->
+        ["Step :retry must be a positive integer (number of retries)"]
+
+      {:retry_delay, v} when is_integer(v) and v >= 0 ->
+        []
+
+      {:retry_delay, _} ->
+        ["Step :retry_delay must be a non-negative integer (milliseconds)"]
+
       {key, _} ->
         ["Unknown step option: :#{key}"]
     end)

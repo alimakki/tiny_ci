@@ -268,7 +268,7 @@ defmodule TinyCI.DSL.ValidatorTest do
       assert {:error, [msg]} =
                validate("""
                stage :test do
-                 step :unit, cmd: "mix test", retry: 3
+                 step :unit, cmd: "mix test", foo: "bar"
                end
                """)
 

@@ -115,6 +115,12 @@ defmodule TinyCI.Reporter do
   defp step_label(%StepResult{allowed_failure: true}),
     do: IO.ANSI.yellow() <> "⚠" <> IO.ANSI.reset() <> " (allowed failure)"
 
+  defp step_label(%StepResult{status: :failed, attempts: n}) when n > 1,
+    do: IO.ANSI.red() <> "✗" <> IO.ANSI.reset() <> " (failed after #{n} attempts)"
+
+  defp step_label(%StepResult{status: :passed, attempts: n}) when n > 1,
+    do: IO.ANSI.green() <> "✓" <> IO.ANSI.reset() <> " (passed on attempt #{n})"
+
   defp step_label(%StepResult{status: status}), do: status_icon(status)
 
   defp status_icon(:passed), do: IO.ANSI.green() <> "✓" <> IO.ANSI.reset()
