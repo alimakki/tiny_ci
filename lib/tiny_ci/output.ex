@@ -4,12 +4,12 @@ defmodule TinyCI.Output do
 
   Supports two modes:
 
-    * `:streaming` — prints output line-by-line as it arrives using
-      `Porcelain.spawn_shell/2`. Ideal for TTY environments where real-time
-      feedback is expected.
+    * `:streaming` — prints output line-by-line as it arrives using a
+      `Port` directly backed by the OS process. Ideal for TTY environments
+      where real-time feedback is expected.
 
     * `:buffered` — captures the full output and returns it after the command
-      finishes using `Porcelain.shell/2`. Used in non-TTY environments or when
+      finishes using `System.cmd/3`. Used in non-TTY environments or when
       output interleaving must be prevented.
 
   In streaming mode an optional prefix can be provided. When set, each printed
@@ -55,6 +55,7 @@ defmodule TinyCI.Output do
     * `:mode` — `:streaming`, `:buffered`, or `:auto` (default `:auto`)
     * `:prefix` — string to prepend to each output line (streaming only)
     * `:env` — map of environment variables for the command
+    * `:working_dir` — directory to run the command in
 
   ## Returns
 
@@ -75,39 +76,41 @@ defmodule TinyCI.Output do
   end
 
   defp run_buffered(cmd, env, working_dir) do
-    porcelain_opts = [env: env] ++ if(working_dir, do: [dir: working_dir], else: [])
-
-    case Porcelain.shell(cmd, porcelain_opts) do
-      %Porcelain.Result{status: 0, out: out} -> {:passed, out}
-      %Porcelain.Result{out: out} -> {:failed, out}
-    end
+    cmd_opts = [stderr_to_stdout: true, env: string_env(env)]
+    cmd_opts = if working_dir, do: [{:cd, working_dir} | cmd_opts], else: cmd_opts
+    {output, exit_code} = System.cmd("sh", ["-c", cmd], cmd_opts)
+    status = if exit_code == 0, do: :passed, else: :failed
+    {status, output}
   end
 
   defp run_streaming(cmd, env, prefix, working_dir) do
-    porcelain_opts =
-      [out: {:send, self()}, err: :out, result: :keep, env: env] ++
-        if(working_dir, do: [dir: working_dir], else: [])
+    sh = System.find_executable("sh") || "/bin/sh"
+    port_opts = [:stderr_to_stdout, :binary, :exit_status, {:env, charlist_env(env)}]
 
-    proc = Porcelain.spawn_shell(cmd, porcelain_opts)
+    port_opts =
+      if working_dir, do: [{:cd, String.to_charlist(working_dir)} | port_opts], else: port_opts
 
-    {status, output} = receive_output(proc.pid, prefix, [], "")
-    {status, IO.iodata_to_binary(output)}
+    port = Port.open({:spawn_executable, sh}, [{:args, [~c"-c", cmd]} | port_opts])
+    {status, chunks} = collect_port(port, prefix, [], "")
+    {status, IO.iodata_to_binary(chunks)}
   end
 
-  defp receive_output(from_pid, prefix, acc, line_buf) do
+  defp collect_port(port, prefix, chunks, line_buf) do
     receive do
-      {^from_pid, :data, :out, data} ->
-        chunk = IO.iodata_to_binary(data)
-        {complete_lines, remaining} = split_lines(line_buf <> chunk)
-        print_lines(complete_lines, prefix)
-        receive_output(from_pid, prefix, [acc, chunk], remaining)
+      {^port, {:data, data}} ->
+        {lines, remaining} = split_lines(line_buf <> data)
+        print_lines(lines, prefix)
+        collect_port(port, prefix, [chunks, data], remaining)
 
-      {^from_pid, :result, %Porcelain.Result{status: exit_status}} ->
-        if line_buf != "", do: print_lines([line_buf], prefix)
-        status = if exit_status == 0, do: :passed, else: :failed
-        {status, [acc | if(line_buf != "", do: "", else: "")]}
+      {^port, {:exit_status, exit_code}} ->
+        flush_line(line_buf, prefix)
+        status = if exit_code == 0, do: :passed, else: :failed
+        {status, chunks}
     end
   end
+
+  defp flush_line("", _prefix), do: :ok
+  defp flush_line(line, prefix), do: print_lines([line], prefix)
 
   defp split_lines(text) do
     parts = String.split(text, "\n", parts: :infinity)
@@ -125,5 +128,13 @@ defmodule TinyCI.Output do
     Enum.each(lines, fn line ->
       IO.puts("  [#{prefix}] #{line}")
     end)
+  end
+
+  defp string_env(env) do
+    Enum.map(env, fn {k, v} -> {to_string(k), to_string(v)} end)
+  end
+
+  defp charlist_env(env) do
+    Enum.map(env, fn {k, v} -> {String.to_charlist(k), String.to_charlist(v)} end)
   end
 end

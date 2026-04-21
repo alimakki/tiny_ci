@@ -57,7 +57,6 @@ defmodule Mix.Tasks.TinyCi.Run do
   @impl Mix.Task
   def run(args) do
     Application.ensure_all_started(:tiny_ci)
-    Application.ensure_all_started(:porcelain)
 
     {opts, positional, _invalid} =
       OptionParser.parse(args,
