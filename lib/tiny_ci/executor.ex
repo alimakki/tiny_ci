@@ -186,7 +186,15 @@ defmodule TinyCI.Executor do
 
     if result.status == :failed and attempt < total do
       sleep_between_attempts(delay)
-      attempt_step(step, ctx, output_mode, prefix, working_dir, {attempt + 1, total, delay, total_ms})
+
+      attempt_step(
+        step,
+        ctx,
+        output_mode,
+        prefix,
+        working_dir,
+        {attempt + 1, total, delay, total_ms}
+      )
     else
       %{result | attempts: attempt, duration_ms: total_ms}
     end
