@@ -169,12 +169,12 @@ As a pipeline author, I want stages to declare explicit dependencies so that ind
 - Circular dependency detection at parse time produces a clear error.
 
 **Acceptance criteria**
-- [ ] `stage "deploy", needs: ["test", "build"]` is valid DSL
-- [ ] `test` and `build` run in parallel if they have no mutual dependencies
-- [ ] `deploy` starts only after both `test` and `build` succeed
-- [ ] Cycle detection at pipeline load time: `{:error, :circular_dependency, [...]}`
-- [ ] Reporter shows parallel stages grouped on the same "level"
-- [ ] `--dry-run` renders a dependency graph (ASCII or indented tree)
+- [x] `stage "deploy", needs: ["test", "build"]` is valid DSL
+- [x] `test` and `build` run in parallel if they have no mutual dependencies
+- [x] `deploy` starts only after both `test` and `build` succeed
+- [x] Cycle detection at pipeline load time: `{:error, :circular_dependency, [...]}`
+- [x] Reporter shows parallel stages grouped on the same "level"
+- [x] `--dry-run` renders a dependency graph (ASCII or indented tree)
 
 ---
 
