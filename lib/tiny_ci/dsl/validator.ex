@@ -130,6 +130,24 @@ defmodule TinyCI.DSL.Validator do
       {:needs, _} ->
         ["Stage :needs must be a list of stage name atoms, e.g. needs: [:build, :test]"]
 
+      {:matrix, v} when is_list(v) ->
+        validate_matrix_spec(v)
+
+      {:matrix, _} ->
+        ["Stage :matrix must be a keyword list, e.g. matrix: [elixir: [\"1.17\", \"1.18\"]]"]
+
+      {:max_parallel, v} when is_integer(v) and v > 0 ->
+        []
+
+      {:max_parallel, _} ->
+        ["Stage :max_parallel must be a positive integer"]
+
+      {:allow_failure, v} when is_boolean(v) ->
+        []
+
+      {:allow_failure, _} ->
+        ["Stage :allow_failure must be true or false"]
+
       {key, _} ->
         ["Unknown stage option: :#{key}"]
     end)
@@ -139,6 +157,26 @@ defmodule TinyCI.DSL.Validator do
     Enum.flat_map(items, fn
       a when is_atom(a) -> []
       _ -> ["Stage :needs items must be atom stage names, e.g. needs: [:build, :test]"]
+    end)
+  end
+
+  defp validate_matrix_spec(pairs) do
+    Enum.flat_map(pairs, fn
+      {k, vals} when is_atom(k) and is_list(vals) ->
+        validate_matrix_values(k, vals)
+
+      {k, _} when is_atom(k) ->
+        ["Matrix key :#{k} must have a list of string values, e.g. #{k}: [\"a\", \"b\"]"]
+
+      _ ->
+        ["Matrix entries must be keyword pairs, e.g. elixir: [\"1.17\", \"1.18\"]"]
+    end)
+  end
+
+  defp validate_matrix_values(key, values) do
+    Enum.flat_map(values, fn
+      v when is_binary(v) -> []
+      _ -> ["Matrix values for :#{key} must be string literals"]
     end)
   end
 

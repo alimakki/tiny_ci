@@ -6,7 +6,7 @@ defmodule TinyCI.Reporter do
   including pass/fail/skip status and wall-clock duration.
   """
 
-  alias TinyCI.{StageResult, StepResult}
+  alias TinyCI.{Matrix, MatrixRunResult, StageResult, StepResult}
 
   @doc """
   Prints a formatted pipeline summary to stdout.
@@ -47,11 +47,16 @@ defmodule TinyCI.Reporter do
   Each step's captured output is printed under a labeled header
   so parallel output appears grouped by step, not interleaved.
 
+  Matrix stage output is printed inline during execution, so this
+  function is a no-op for matrix stages.
+
   ## Parameters
 
     * `stage_result` — a `%TinyCI.StageResult{}` struct
   """
   @spec print_step_output(StageResult.t()) :: :ok
+  def print_step_output(%StageResult{matrix_runs: [_ | _]}), do: :ok
+
   def print_step_output(%StageResult{step_results: step_results}) do
     Enum.each(step_results, fn %StepResult{name: name, output: output} ->
       if output != "" do
@@ -100,16 +105,39 @@ defmodule TinyCI.Reporter do
     [IO.ANSI.bright(), "═══ #{text} ═══", IO.ANSI.reset()]
   end
 
+  defp print_stage(%StageResult{matrix_runs: [_ | _]} = stage) do
+    IO.puts(
+      "  #{status_icon(stage.status)} #{stage.name} — #{colorize_status(stage.status)} (#{format_duration(stage.duration_ms)})"
+    )
+
+    Enum.each(stage.matrix_runs, &print_matrix_run/1)
+  end
+
   defp print_stage(%StageResult{} = stage) do
     IO.puts(
       "  #{status_icon(stage.status)} #{stage.name} — #{colorize_status(stage.status)} (#{format_duration(stage.duration_ms)})"
     )
 
-    Enum.each(stage.step_results, fn step ->
-      label = step_label(step)
+    Enum.each(stage.step_results, &print_step_row/1)
+  end
 
-      IO.puts("    #{label} #{step.name} (#{format_duration(step.duration_ms)})")
-    end)
+  defp print_matrix_run(%MatrixRunResult{
+         combination: combo,
+         status: status,
+         duration_ms: ms,
+         step_results: steps
+       }) do
+    label = Matrix.label(combo)
+    IO.puts("    #{status_icon(status)} [#{label}] (#{format_duration(ms)})")
+    Enum.each(steps, &print_matrix_step/1)
+  end
+
+  defp print_matrix_step(step) do
+    IO.puts("      #{step_label(step)} #{step.name} (#{format_duration(step.duration_ms)})")
+  end
+
+  defp print_step_row(step) do
+    IO.puts("    #{step_label(step)} #{step.name} (#{format_duration(step.duration_ms)})")
   end
 
   defp step_label(%StepResult{allowed_failure: true}),

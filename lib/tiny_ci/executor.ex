@@ -22,7 +22,7 @@ defmodule TinyCI.Executor do
   option passed to `run_pipeline/3`.
   """
 
-  alias TinyCI.{DAG, Output, Reporter, StageResult, StepResult}
+  alias TinyCI.{DAG, Matrix, MatrixRunResult, Output, Reporter, StageResult, StepResult}
 
   @doc """
   Starts the task supervisor used for parallel step execution.
@@ -218,21 +218,104 @@ defmodule TinyCI.Executor do
     else
       ctx_with_stage_env = Map.put(context, :stage_env, stage.env || %{})
 
-      {duration_ms, {step_results, updated_store}} =
-        measure(fn -> execute_by_mode(stage, ctx_with_stage_env, output_mode) end)
+      if stage.matrix != [] do
+        execute_matrix_stage(stage, ctx_with_stage_env, output_mode)
+      else
+        execute_regular_stage(stage, ctx_with_stage_env, output_mode)
+      end
+    end
+  end
 
-      status =
-        if Enum.all?(step_results, &(&1.status in [:passed, :skipped] or &1.allowed_failure)),
-          do: :passed,
-          else: :failed
+  defp execute_regular_stage(stage, context, output_mode) do
+    {duration_ms, {step_results, updated_store}} =
+      measure(fn -> execute_by_mode(stage, context, output_mode) end)
 
-      %StageResult{
-        name: stage.name,
-        status: status,
-        step_results: step_results,
-        duration_ms: duration_ms,
-        store: updated_store
-      }
+    status =
+      if Enum.all?(step_results, &(&1.status in [:passed, :skipped] or &1.allowed_failure)),
+        do: :passed,
+        else: :failed
+
+    %StageResult{
+      name: stage.name,
+      status: status,
+      step_results: step_results,
+      duration_ms: duration_ms,
+      store: updated_store
+    }
+  end
+
+  defp execute_matrix_stage(stage, context, _output_mode) do
+    combinations = Matrix.combinations(stage.matrix)
+    max_concurrency = stage.max_parallel || length(combinations)
+    caller_gl = Process.group_leader()
+
+    {duration_ms, run_results} =
+      measure(fn ->
+        TinyCI.TaskSupervisor
+        |> Task.Supervisor.async_stream(
+          combinations,
+          fn combo ->
+            Process.group_leader(self(), caller_gl)
+            run_matrix_combination(stage, combo, context)
+          end,
+          max_concurrency: max_concurrency,
+          timeout: :infinity,
+          ordered: true
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+      end)
+
+    Enum.each(run_results, &print_combination_output/1)
+
+    any_failed = Enum.any?(run_results, &(&1.status == :failed))
+    status = if any_failed and not stage.allow_failure, do: :failed, else: :passed
+
+    merged_store =
+      Enum.reduce(run_results, context.store, fn r, acc -> Map.merge(acc, r.store) end)
+
+    %StageResult{
+      name: stage.name,
+      status: status,
+      step_results: [],
+      matrix_runs: run_results,
+      duration_ms: duration_ms,
+      store: merged_store
+    }
+  end
+
+  defp run_matrix_combination(stage, combination, context) do
+    combo_env = Matrix.env_vars(combination)
+    combo_store = Map.new(combination)
+
+    ctx =
+      context
+      |> Map.update(:stage_env, combo_env, &Map.merge(&1, combo_env))
+      |> Map.update(:store, combo_store, &Map.merge(&1, combo_store))
+
+    stage_for_run = %{stage | matrix: [], max_parallel: nil}
+
+    {duration_ms, {step_results, updated_store}} =
+      measure(fn -> execute_by_mode(stage_for_run, ctx, :buffered) end)
+
+    any_failed = Enum.any?(step_results, &(&1.status == :failed and not &1.allowed_failure))
+
+    %MatrixRunResult{
+      combination: combination,
+      status: if(any_failed, do: :failed, else: :passed),
+      step_results: step_results,
+      duration_ms: duration_ms,
+      store: updated_store
+    }
+  end
+
+  defp print_combination_output(%MatrixRunResult{combination: combo, step_results: results}) do
+    label = Matrix.label(combo)
+    Enum.each(results, &print_combo_step_output(&1, label))
+  end
+
+  defp print_combo_step_output(%StepResult{name: name, output: output}, label) do
+    if output != "" do
+      IO.puts("  [#{label}][#{name}] #{String.trim(output)}")
     end
   end
 

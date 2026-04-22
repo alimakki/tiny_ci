@@ -192,12 +192,12 @@ As a pipeline author, I want to define a matrix of variable combinations so that
 - A failing matrix combination fails the parent stage; `allow_failure: true` on the matrix stage allows partial failure.
 
 **Acceptance criteria**
-- [ ] `matrix: [elixir: ["1.17", "1.18"], otp: ["26", "27"]]` produces 4 runs
-- [ ] Each run receives `ELIXIR` and `OTP` env vars with its combination's values
-- [ ] All 4 runs start in parallel (subject to `max_parallel:`)
-- [ ] Reporter shows: `test [elixir=1.17, otp=26] ✓`, `test [elixir=1.17, otp=27] ✓`, etc.
-- [ ] One failing combination marks the stage as failed
-- [ ] `--dry-run` lists all generated matrix combinations without running them
+- [x] `matrix: [elixir: ["1.17", "1.18"], otp: ["26", "27"]]` produces 4 runs
+- [x] Each run receives `ELIXIR` and `OTP` env vars with its combination's values
+- [x] All 4 runs start in parallel (subject to `max_parallel:`)
+- [x] Reporter shows: `test [elixir=1.17, otp=26] ✓`, `test [elixir=1.17, otp=27] ✓`, etc.
+- [x] One failing combination marks the stage as failed
+- [x] `--dry-run` lists all generated matrix combinations without running them
 
 ---
 

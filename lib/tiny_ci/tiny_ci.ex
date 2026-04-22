@@ -52,6 +52,10 @@ defmodule TinyCI.Stage do
   more stages, the pipeline switches to DAG execution: independent stages
   run in parallel and dependent stages wait for their prerequisites.
 
+  When `matrix:` is set, the stage is replicated once per combination of
+  matrix variable values (cartesian product). All combinations run in
+  parallel subject to `max_parallel:`.
+
   Steps within a stage run according to the stage's `:mode` — either
   `:serial` or `:parallel`.
   """
@@ -61,6 +65,9 @@ defmodule TinyCI.Stage do
           steps: [TinyCI.Step.t()],
           mode: :serial | :parallel,
           needs: [atom()],
+          matrix: keyword([String.t()]),
+          max_parallel: pos_integer() | nil,
+          allow_failure: boolean(),
           when_condition: (map() -> boolean()) | nil,
           working_dir: String.t() | nil,
           env: %{optional(String.t()) => String.t()}
@@ -70,6 +77,9 @@ defmodule TinyCI.Stage do
             steps: [],
             mode: :parallel,
             needs: [],
+            matrix: [],
+            max_parallel: nil,
+            allow_failure: false,
             when_condition: nil,
             working_dir: nil,
             env: %{}

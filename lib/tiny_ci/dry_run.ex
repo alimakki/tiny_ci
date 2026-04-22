@@ -6,7 +6,7 @@ defmodule TinyCI.DryRun do
   stages would be skipped and which would run, along with step details.
   """
 
-  alias TinyCI.{DAG, Stage}
+  alias TinyCI.{DAG, Matrix, Stage}
 
   @doc """
   Prints the execution plan for the given stages and context.
@@ -101,20 +101,39 @@ defmodule TinyCI.DryRun do
           names -> " [needs: #{Enum.map_join(names, ", ", &":#{&1}")}]"
         end
 
+      matrix_info =
+        case stage.matrix do
+          [] -> ""
+          spec -> " [matrix: #{length(Matrix.combinations(spec))} combinations]"
+        end
+
       IO.puts([
         "  ",
         IO.ANSI.green(),
         "▶ :#{stage.name}",
         IO.ANSI.reset(),
-        " (#{stage.mode})#{needs_info}"
+        " (#{stage.mode})#{needs_info}#{matrix_info}"
       ])
 
       unless map_size(stage.env) == 0 do
         IO.puts("    Env: #{format_env(stage.env)}")
       end
 
+      if stage.matrix != [] do
+        print_matrix_combinations(stage.matrix)
+      end
+
       Enum.each(stage.steps, &print_step(&1, stage.working_dir, root, context))
     end
+  end
+
+  defp print_matrix_combinations(matrix_spec) do
+    IO.puts("    Combinations:")
+    matrix_spec |> Matrix.combinations() |> Enum.each(&print_combination/1)
+  end
+
+  defp print_combination(combo) do
+    IO.puts("      • #{Matrix.label(combo)}")
   end
 
   defp print_step(step, stage_wd, root, context) do

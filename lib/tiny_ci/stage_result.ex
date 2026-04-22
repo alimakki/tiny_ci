@@ -17,6 +17,7 @@ defmodule TinyCI.StageResult do
           name: atom(),
           status: status(),
           step_results: [TinyCI.StepResult.t()],
+          matrix_runs: [TinyCI.MatrixRunResult.t()],
           duration_ms: non_neg_integer(),
           store: map()
         }
@@ -25,6 +26,7 @@ defmodule TinyCI.StageResult do
   defstruct name: nil,
             status: :passed,
             step_results: [],
+            matrix_runs: [],
             duration_ms: 0,
             store: %{}
 end

@@ -1432,4 +1432,144 @@ defmodule TinyCI.ExecutorTest do
       assert Enum.all?(results, &(&1.status == :passed))
     end
   end
+
+  describe "execute/2 with matrix stages" do
+    test "produces one MatrixRunResult per combination" do
+      stage = %Stage{
+        name: :test,
+        mode: :serial,
+        matrix: [elixir: ["1.17", "1.18"], otp: ["26", "27"]],
+        steps: [%Step{name: :unit, cmd: "true"}]
+      }
+
+      assert %StageResult{matrix_runs: runs} = Executor.execute(stage)
+      assert length(runs) == 4
+    end
+
+    test "matrix stage passes when all combinations pass" do
+      stage = %Stage{
+        name: :test,
+        mode: :serial,
+        matrix: [elixir: ["1.17", "1.18"]],
+        steps: [%Step{name: :unit, cmd: "true"}]
+      }
+
+      assert %StageResult{status: :passed} = Executor.execute(stage)
+    end
+
+    test "matrix stage fails when any combination fails" do
+      stage = %Stage{
+        name: :test,
+        mode: :serial,
+        matrix: [result: ["pass", "fail"]],
+        steps: [%Step{name: :unit, cmd: "test \"$RESULT\" = pass"}]
+      }
+
+      assert %StageResult{status: :failed, matrix_runs: runs} = Executor.execute(stage)
+      statuses = Map.new(runs, fn r -> {Keyword.fetch!(r.combination, :result), r.status} end)
+      assert statuses["pass"] == :passed
+      assert statuses["fail"] == :failed
+    end
+
+    test "matrix stage passes with allow_failure: true even when a combination fails" do
+      stage = %Stage{
+        name: :test,
+        mode: :serial,
+        matrix: [result: ["pass", "fail"]],
+        allow_failure: true,
+        steps: [%Step{name: :unit, cmd: "test \"$RESULT\" = pass"}]
+      }
+
+      assert %StageResult{status: :passed} = Executor.execute(stage)
+    end
+
+    test "each combination receives uppercased env vars" do
+      stage = %Stage{
+        name: :test,
+        mode: :serial,
+        matrix: [lang: ["elixir"]],
+        steps: [%Step{name: :check, cmd: ~s(test "$LANG" = "elixir")}]
+      }
+
+      assert %StageResult{status: :passed} = Executor.execute(stage)
+    end
+
+    test "combination values are added to the store for module steps" do
+      defmodule StoreCheck do
+        @moduledoc false
+        def execute(_config, ctx) do
+          send(ctx[:test_pid], {:store, ctx.store})
+          :ok
+        end
+      end
+
+      stage = %Stage{
+        name: :test,
+        mode: :serial,
+        matrix: [version: ["1.0"]],
+        steps: [%Step{name: :check, module: StoreCheck}]
+      }
+
+      Executor.execute(stage, %{test_pid: self()})
+      assert_received {:store, store}
+      assert store[:version] == "1.0"
+    end
+
+    test "max_parallel limits concurrency" do
+      stage = %Stage{
+        name: :test,
+        mode: :serial,
+        matrix: [n: ["1", "2", "3", "4"]],
+        max_parallel: 2,
+        steps: [%Step{name: :unit, cmd: "true"}]
+      }
+
+      assert %StageResult{status: :passed, matrix_runs: runs} = Executor.execute(stage)
+      assert length(runs) == 4
+    end
+
+    test "matrix stage skips when when_condition is false" do
+      stage = %Stage{
+        name: :test,
+        mode: :serial,
+        matrix: [elixir: ["1.17", "1.18"]],
+        when_condition: fn _ctx -> false end,
+        steps: [%Step{name: :unit, cmd: "false"}]
+      }
+
+      assert %StageResult{status: :skipped, matrix_runs: []} = Executor.execute(stage)
+    end
+  end
+
+  describe "run_pipeline/2 with matrix stages" do
+    test "matrix stage integrates into pipeline results" do
+      stages = [
+        %Stage{
+          name: :test,
+          mode: :serial,
+          matrix: [elixir: ["1.17", "1.18"]],
+          steps: [%Step{name: :unit, cmd: "true"}]
+        }
+      ]
+
+      assert {:ok, [result]} = Executor.run_pipeline(stages)
+      assert result.status == :passed
+      assert length(result.matrix_runs) == 2
+    end
+
+    test "failing matrix stage halts the pipeline" do
+      stages = [
+        %Stage{
+          name: :test,
+          mode: :serial,
+          matrix: [result: ["fail"]],
+          steps: [%Step{name: :unit, cmd: "false"}]
+        },
+        %Stage{name: :deploy, mode: :serial, steps: [%Step{name: :d, cmd: "true"}]}
+      ]
+
+      assert {:error, {:stage_failed, :test, _}, results} = Executor.run_pipeline(stages)
+      assert length(results) == 1
+    end
+  end
 end

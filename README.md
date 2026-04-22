@@ -124,6 +124,9 @@ end
 | `:needs` | `[]` | List of stage names that must complete successfully before this stage starts |
 | `:when` | (always run) | Condition expression; stage is skipped when it evaluates to falsy |
 | `:working_dir` | (pipeline root) | Default working directory for all steps in this stage |
+| `:matrix` | `[]` | Keyword list of variable names to value lists; stage runs once per combination |
+| `:max_parallel` | (unlimited) | Maximum number of matrix runs executing at the same time |
+| `:allow_failure` | `false` | When `true`, a failing matrix combination does not fail the parent stage |
 
 ### Stage Dependencies (DAG)
 
@@ -164,6 +167,63 @@ Level 3:            :deploy        ← waits for test
 **Cycle detection:** circular dependencies (`a needs b, b needs a`) are caught at parse time with a descriptive error — the pipeline will not start.
 
 `--dry-run` shows the dependency graph grouped by level, with `[needs: ...]` shown for each dependent stage.
+
+### Matrix Builds
+
+The `matrix:` option replicates a stage across multiple variable combinations. TinyCI computes the cartesian product of all values, starts one run per combination (in parallel by default), and groups results under the parent stage name in the summary.
+
+```elixir
+stage :test, matrix: [elixir: ["1.17", "1.18"], otp: ["26", "27"]] do
+  step :unit, cmd: "mix test"
+end
+```
+
+The above generates four parallel runs:
+
+| Combination | Env vars injected |
+|-------------|-------------------|
+| `elixir=1.17, otp=26` | `ELIXIR=1.17  OTP=26` |
+| `elixir=1.17, otp=27` | `ELIXIR=1.17  OTP=27` |
+| `elixir=1.18, otp=26` | `ELIXIR=1.18  OTP=26` |
+| `elixir=1.18, otp=27` | `ELIXIR=1.18  OTP=27` |
+
+Each step in the stage receives its combination's values as uppercased environment variables (`ELIXIR`, `OTP`). The same values are also written into the pipeline store so module steps can read them via `ctx.store`.
+
+**Limiting concurrency** — use `max_parallel:` to cap how many runs execute simultaneously:
+
+```elixir
+stage :test,
+  matrix: [elixir: ["1.17", "1.18"], otp: ["26", "27"]],
+  max_parallel: 2 do
+  step :unit, cmd: "mix test"
+end
+```
+
+**Allowing partial failure** — by default any failing combination marks the entire stage as failed. Set `allow_failure: true` to let the pipeline continue even when some combinations fail:
+
+```elixir
+stage :compatibility,
+  matrix: [os: ["ubuntu", "macos", "windows"]],
+  allow_failure: true do
+  step :smoke, cmd: "./run_smoke_test.sh"
+end
+```
+
+**Reporter output** — each combination is shown as a sub-row under the stage:
+
+```
+  ✓ test — passed (3.2s)
+    ✓ [elixir=1.17, otp=26] (0.8s)
+      ✓ unit (0.8s)
+    ✓ [elixir=1.17, otp=27] (0.9s)
+      ✓ unit (0.9s)
+    ✓ [elixir=1.18, otp=26] (0.7s)
+      ✓ unit (0.7s)
+    ✓ [elixir=1.18, otp=27] (0.8s)
+      ✓ unit (0.8s)
+```
+
+`--dry-run` lists all generated combinations without executing anything.
 
 ### Steps
 
@@ -460,7 +520,7 @@ Module hooks also receive `:pipeline_result` (`:on_success` or `:on_failure`).
 Pipeline files are validated against an allowlist of permitted constructs before execution:
 
 - `name`, `stage`, `step`, `on_success`, `on_failure`, `set`
-- Stage options: `:mode`, `:needs`, `:when`, `:working_dir`
+- Stage options: `:mode`, `:needs`, `:when`, `:working_dir`, `:matrix`, `:max_parallel`, `:allow_failure`
 - Step options: `:cmd`, `:module`, `:timeout`, `:env`, `:allow_failure`, `:when`, `:working_dir`, `:retry`, `:retry_delay`
 - Condition expressions: `branch()`, `env/1`, `file_changed?/1`, `==`, `!=`, `and`, `or`, `not`, `if/else`
 
@@ -504,6 +564,8 @@ lib/
     dsl.ex                # Macro-based DSL (internal use)
     executor.ex           # Stage/step execution engine
     hooks.ex              # Hook runner
+    matrix.ex             # Matrix combination generator and helpers
+    matrix_run_result.ex  # MatrixRunResult struct
     output.ex             # Command output streaming
     pipeline_spec.ex      # PipelineSpec struct
     reporter.ex           # Summary and output formatting
@@ -550,11 +612,11 @@ mix credo                          # static analysis
 - **Step data passing** — pipeline store for sharing data between module steps
 - **Custom DSL** — declarative pipeline format with an allowlist validator
 - **Stage dependencies (DAG)** — `needs:` for fan-out/fan-in topologies with parallel independent stages, transitive skip propagation, and cycle detection at parse time
+- **Matrix builds** — `matrix:` option for cartesian-product parallel stage runs with env var injection, `max_parallel:` concurrency cap, and `allow_failure:` for partial tolerance
 
 ### Up Next
 
 - **Secrets management** — `secret "MY_KEY"` reading from env or a local secrets file, with value masking in output
 - **Dependency caching** — skip steps when input files haven't changed, keyed by file hash
 - **Artifact persistence** — declare build outputs that downstream stages can consume
-- **Matrix builds** — `stage :test, matrix: [elixir: ["1.17", "1.18"]]` with cartesian-product parallel runs
 - **Watch mode** — `mix tiny_ci.run --watch` to re-run on file changes
