@@ -1,0 +1,1181 @@
+lets say you were to build a CI system akin to github actions or circle ci, but built in elixir. how could it compete with existing tools by leveraging inherent features of elixir/beam? could such a tool be monetizable?
+
+It could compete—but not by copying GitHub Actions or CircleCI feature-for-feature. If you just rebuild the same model (ephemeral containers + YAML pipelines), you’re fighting a commodity battle against very well-funded incumbents. The interesting angle is to lean hard into what the Erlang VM actually does unusually well.
+
+Here’s where an Elixir/BEAM-native CI system could genuinely differentiate:
+
+1. Massive concurrency as a first-class primitive
+
+BEAM excels at running millions of lightweight processes with strong isolation.
+
+What that enables:
+
+Treat every step in a pipeline as an independent process—not just a container job
+Fine-grained parallelism: split test suites dynamically at runtime based on load
+Real-time scheduling (instead of static pipeline DAGs)
+
+Differentiator:
+Instead of:
+
+“Here’s your pipeline graph, hope you sized your parallelism right”
+
+You get:
+
+“The system continuously rebalances work across the cluster while your pipeline runs”
+
+That’s something traditional CI systems don’t do well because they rely on external orchestrators (often Kubernetes).
+
+2. Fault tolerance as a built-in feature (not bolted on)
+
+BEAM’s supervision trees are basically designed for CI workloads.
+
+Use case:
+
+A flaky test crashes → restart just that process
+A worker node dies → processes rescheduled automatically
+Long pipelines survive partial infrastructure failures
+
+Differentiator:
+
+“Self-healing pipelines” instead of “rerun the whole job”
+Step-level retries with zero orchestration overhead
+3. Stateful pipelines (this is the big one)
+
+Most CI systems are stateless between steps unless you explicitly cache or persist artifacts.
+
+With BEAM:
+
+You can maintain live state across the entire pipeline
+Use in-memory state + message passing instead of constantly hitting storage
+
+New possibilities:
+
+Adaptive pipelines (change behavior mid-run)
+Feedback loops (e.g., dynamically skip tests based on earlier results)
+Long-lived workflows that behave more like services than scripts
+
+This is a fundamentally different model from YAML-driven CI.
+
+4. Real-time observability baked in
+
+With tools like Phoenix LiveView:
+
+Live updating pipeline UI without polling
+Step-level logs streamed instantly
+Interactive pipelines (pause, modify, resume)
+
+Differentiator:
+
+CI as a live system, not a static log viewer
+5. Distributed execution without Kubernetes overhead
+
+BEAM clustering gives you:
+
+Node discovery
+Message passing
+Work distribution
+
+Out of the box.
+
+So instead of:
+
+Kubernetes + runners + queue + autoscaler
+
+You get:
+
+Native distributed job execution with far less infrastructure
+
+That’s appealing for:
+
+Small teams
+On-prem deployments
+Edge environments
+6. Deterministic, reproducible execution (if designed right)
+
+If you combine:
+
+BEAM processes
+Immutable inputs
+Controlled side effects
+
+You could build:
+
+Replayable pipelines
+Time-travel debugging (rerun exact execution paths)
+
+This is still rare in CI tooling.
+
+Where it would struggle
+
+Let’s be blunt—there are real challenges:
+
+1. Ecosystem gravity
+GitHub owns the developer workflow
+Tight integration (PRs, checks, permissions) is hard to replicate
+2. Container-native expectations
+CI today = Docker
+You’d still need to integrate with container runtimes
+3. Language niche
+Elixir is respected but not dominant
+Selling infra tools from a niche ecosystem is harder
+Monetization: yes, but not in the obvious way
+
+If you try:
+
+“Hosted CI that charges per minute”
+
+You’ll lose. That’s a race to the bottom.
+
+More promising angles:
+
+1. “CI for complex systems”
+
+Target:
+
+Distributed systems teams
+Real-time systems
+High-concurrency apps
+
+Sell:
+
+Deterministic testing
+Fault injection
+Stateful pipelines
+
+This is higher value than generic CI.
+
+2. On-prem / private CI
+
+Big companies often want:
+
+Full control
+No SaaS dependency
+
+BEAM’s lightweight clustering makes this attractive.
+
+Charge for:
+
+Enterprise features
+Support
+Observability tooling
+3. CI as a programmable runtime
+
+Instead of YAML:
+
+Pipelines written in Elixir
+Full access to language features
+
+This appeals to:
+
+Power users
+Teams frustrated with YAML limitations
+
+Think:
+
+“CI as code, not configuration”
+
+4. Specialized niches
+
+You could dominate a niche instead of competing broadly:
+
+Testing distributed systems
+Chaos engineering CI
+Real-time systems validation
+A realistic winning strategy
+
+If you want this to work, don’t position it as:
+
+“A better GitHub Actions”
+
+Position it as:
+
+“A new category: real-time, stateful, fault-tolerant CI”
+
+Then:
+
+Start with a narrow, painful niche
+Overdeliver on capabilities incumbents can’t match
+Expand outward carefully
+Bottom line
+
+Yes, it could absolutely compete—but only if it doesn’t try to be a clone.
+
+The BEAM gives you:
+
+Concurrency
+Fault tolerance
+Distribution
+Stateful computation
+
+If you turn those into:
+
+Adaptive pipelines
+Self-healing jobs
+Real-time CI systems
+
+…then you’re not just another CI vendor—you’re offering something meaningfully different.
+
+If you’re curious, I can sketch what the architecture of such a system might look like (scheduler, worker model, pipeline DSL, etc.).
+
+If you’re looking for where this actually wins, the key is to stop thinking about CI as “run these steps” and start thinking about it as “run a distributed program that happens to validate code.” That shift is exactly where a BEAM-native system could outperform tools like GitHub Actions, CircleCI, or Jenkins.
+
+Below are concrete, painful use cases where current systems struggle—and how a stateful, Elixir-driven approach changes the game.
+
+1. CI for distributed systems (microservices, clusters)
+Problem today
+
+Testing distributed systems in CI is awkward:
+
+You spin up N containers
+Hope networking behaves
+Run tests
+Tear everything down
+If something flakes → rerun everything
+
+There’s no memory across steps, no orchestration intelligence.
+
+Example: consensus system (Raft, etc.)
+
+Let’s say you’re testing:
+
+Leader election
+Network partitions
+Node crashes
+
+In GitHub Actions:
+
+You script chaos with bash + Docker
+Failures are hard to reproduce
+No introspection into system state mid-run
+With a BEAM CI
+
+Each node = a process
+The cluster = a supervised tree
+
+You can:
+
+Pause execution mid-test
+Inject failures programmatically
+Observe internal state live
+Replay exact execution paths
+
+New capability:
+
+“Simulate a network partition at step 43, then heal it after 200ms, and verify convergence”
+
+That’s extremely hard in stateless CI.
+
+2. Flaky test isolation at scale
+Problem today
+
+Flaky tests:
+
+Waste CI minutes
+Are hard to isolate
+Usually require rerunning entire jobs
+With BEAM
+
+Each test can be:
+
+Its own process
+With its own supervision + retry policy
+
+You can:
+
+Retry just the failing test
+Track historical flakiness in memory
+Dynamically quarantine tests during the run
+Example
+
+Instead of:
+
+“Job failed, rerun everything”
+
+You get:
+
+“Test X failed 3 times across 2 nodes, quarantining and continuing pipeline”
+
+That’s a fundamentally better developer experience.
+
+3. Adaptive test execution (huge monorepos)
+Problem today
+
+Large repos (thousands of tests):
+
+You pre-split tests statically
+Parallelism is fixed
+Slow nodes bottleneck everything
+With BEAM scheduling
+
+You can:
+
+Start with a pool of workers
+Continuously rebalance work
+Assign tests dynamically based on runtime performance
+Example
+
+A pipeline could:
+
+Detect slow tests
+Redistribute them mid-run
+Spin up more workers only when needed
+
+This is closer to a real-time scheduler than a CI pipeline.
+
+4. Long-running integration environments
+Problem today
+
+CI environments are ephemeral:
+
+Spin up → test → destroy
+Expensive and slow
+No continuity between runs
+Stateful CI advantage
+
+You can maintain:
+
+A long-lived environment
+With evolving state across runs
+Example
+
+Instead of:
+
+Rebuilding a staging environment every time
+
+You get:
+
+A persistent system that:
+Applies migrations incrementally
+Tracks drift
+Runs validations continuously
+New category:
+
+“CI as a continuously running system,” not a batch job
+
+5. Debuggable pipelines (this is huge)
+Problem today
+
+CI debugging = logs + guesswork.
+
+With BEAM + state
+
+You can:
+
+Inspect pipeline state live
+Attach to running processes
+Replay execution deterministically
+Example
+
+Imagine:
+
+Clicking a failed step
+Seeing its full message history
+Re-running it with modified parameters
+
+That’s closer to debugging a program than reading logs.
+
+Why stateful beats stateless (in practice)
+
+Stateless CI (like CircleCI):
+
+Each step is isolated
+State must be serialized (artifacts, caches)
+No memory of how you got there
+
+Stateful CI:
+
+Keeps execution context in memory
+Enables continuous decision-making
+Concrete advantages
+1. Zero serialization overhead
+
+No need to:
+
+Upload artifacts
+Download caches
+Reconstruct context
+2. Dynamic control flow
+
+Instead of static YAML:
+
+Branch based on runtime results
+Modify pipeline behavior mid-flight
+3. Fine-grained recovery
+Restart a single process
+Not an entire job
+4. Temporal awareness
+
+You can encode:
+
+“If this fails twice within 10 seconds, do X”
+“If system stabilizes, skip remaining checks”
+5. Rich coordination
+
+Processes can:
+
+Communicate directly
+Share signals and state
+Designing the DSL in Elixir
+
+If you make it YAML-but-in-Elixir, you’ve already lost.
+
+Lean into Elixir as a programming language, not config.
+
+Core design principles
+Pipelines are processes
+Steps are functions/processes
+State is explicit and mutable (within constraints)
+Concurrency is default
+Supervision is built-in
+Example 1: Basic pipeline
+defmodule MyPipeline do
+  use CI.Pipeline
+
+  pipeline do
+    step :checkout, &git_clone/1
+
+    step :test do
+      parallel do
+        run :unit_tests
+        run :integration_tests
+      end
+    end
+
+    step :deploy, &deploy_app/1
+  end
+end
+Example 2: Stateful pipeline
+pipeline do
+  state %{failures: 0}
+
+  step :run_tests do |ctx|
+    result = run_tests()
+
+    if result.failed do
+      ctx.failures = ctx.failures + 1
+    end
+
+    ctx
+  end
+
+  step :decision do |ctx|
+    if ctx.failures > 5 do
+      skip :deploy
+    else
+      continue()
+    end
+  end
+end
+Example 3: Dynamic scheduling
+step :adaptive_tests do
+  pool size: 10
+
+  schedule fn scheduler ->
+    tests = discover_tests()
+
+    Enum.each(tests, fn test ->
+      scheduler.enqueue(test)
+    end)
+
+    scheduler.on_result(fn test, result ->
+      if slow?(test) do
+        scheduler.increase_parallelism()
+      end
+    end)
+  end
+end
+Example 4: Fault-tolerant steps
+step :external_api_test do
+  retry max: 3, strategy: :exponential_backoff
+
+  run fn ->
+    call_external_api()
+  end
+end
+Example 5: Distributed system test
+step :cluster_test do
+  cluster size: 5
+
+  run fn cluster ->
+    cluster.partition([1,2], [3,4,5])
+
+    assert eventually(fn ->
+      cluster.consensus_reached?()
+    end)
+
+    cluster.heal()
+  end
+end
+Example 6: Interactive / live pipeline
+
+Using something like Phoenix LiveView:
+
+step :manual_gate do
+  wait_for :approval
+
+  on_approve fn ->
+    continue()
+  end
+
+  on_reject fn ->
+    fail_pipeline()
+  end
+end
+The real takeaway
+
+The biggest opportunity isn’t:
+
+“Make CI faster”
+
+It’s:
+
+“Make CI intelligent and interactive”
+
+What incumbents optimize for:
+Simplicity
+Isolation
+Scalability via containers
+What BEAM lets you optimize for:
+Coordination
+Adaptation
+Fault tolerance
+Long-lived state
+
+If you execute this well, you don’t end up competing head-on with GitHub.
+
+You end up building something closer to:
+
+“A distributed testing runtime that happens to integrate with CI”
+
+If you want, I can go one level deeper and sketch:
+
+scheduler internals
+process model
+how to map this onto Kubernetes (or avoid it entirely)
+
+That’s where the design gets really interesting.
+
+go sketch it out
+
+Alright—let’s design this like we actually intend to build it, not just pitch it. The goal is a CI system that behaves like a distributed runtime, not a job runner.
+
+I’ll break it into three layers: execution model, core components, and infrastructure strategy—then tie it together with a concrete flow.
+
+1. Execution model (the heart of the system)
+
+Think of a pipeline as a living process tree, not a DAG.
+
+Core idea
+A pipeline = a supervised process
+Each step = a child process
+Each test/task = potentially its own process
+State = in-memory, evolving over time
+
+This directly leverages the Erlang VM model:
+
+lightweight processes
+message passing
+supervision trees
+Process hierarchy (simplified)
+PipelineSupervisor
+  ├── PipelineProcess (stateful)
+  │     ├── StepSupervisor
+  │     │     ├── StepProcess (checkout)
+  │     │     ├── StepProcess (tests)
+  │     │     │     ├── TestWorker 1
+  │     │     │     ├── TestWorker 2
+  │     │     │     └── ...
+  │     │     └── StepProcess (deploy)
+  │     └── StateManager
+Key properties
+1. Everything is restartable
+A failed test ≠ failed pipeline
+A crashed node ≠ lost execution
+2. Everything communicates
+Steps send messages to each other
+Scheduler adjusts behavior mid-run
+3. State lives inside the system
+No constant artifact passing
+No reconstructing context
+2. Core components
+A. Pipeline Engine
+
+This is the runtime that executes your DSL.
+
+Responsibilities:
+Interpret pipeline definition
+Spawn processes
+Maintain pipeline state
+Handle control flow (skip, retry, branch)
+Internals:
+GenServer for pipeline state
+DynamicSupervisor for steps
+Event bus for communication
+B. Scheduler (this is your secret weapon)
+
+Unlike Kubernetes, this scheduler operates at function/task granularity, not containers.
+
+Responsibilities:
+Assign work to workers
+Rebalance load in real time
+React to runtime signals
+Example behavior:
+Detect slow test → split workload
+Detect idle nodes → redistribute tasks
+Detect flaky test → isolate + retry elsewhere
+Implementation sketch:
+defmodule Scheduler do
+  def handle_result(test, result, state) do
+    cond do
+      slow?(test) ->
+        increase_parallelism(state)
+
+      flaky?(test) ->
+        quarantine(test, state)
+
+      true ->
+        state
+    end
+  end
+end
+C. Worker Nodes
+
+Each node in the cluster:
+
+Runs BEAM
+Joins cluster automatically
+Executes tasks as processes
+Key difference vs traditional CI:
+Not “a runner that executes a job”
+More like “a compute node in a distributed system”
+D. State Manager
+
+You need controlled state, not chaos.
+
+Hybrid model:
+In-memory (fast, primary)
+Persistent (for recovery)
+Tools:
+ETS → fast local state
+Mnesia or external DB → distributed persistence
+What gets stored:
+Pipeline state
+Step results
+Execution history
+Flakiness metrics
+E. Event Bus
+
+Everything emits events:
+
+step_started
+test_failed
+node_down
+retry_triggered
+Why this matters:
+Enables observability
+Powers UI (e.g. Phoenix LiveView)
+Feeds scheduler decisions
+3. Distributed system design
+Cluster formation
+
+Use BEAM-native clustering:
+
+Node discovery (DNS, gossip, etc.)
+Automatic connection
+Topology options:
+1. Fully connected cluster
+Simple
+Good for small/medium setups
+2. Control plane + workers
+Control nodes run:
+scheduler
+pipeline engine
+Worker nodes run:
+execution only
+Failure handling
+
+This is where BEAM shines.
+
+Scenario: node dies mid-test
+Node disappears
+Processes on that node are gone
+Supervisor detects failure
+Scheduler reassigns tasks
+Pipeline continues
+
+No “job failed” unless you decide it should
+
+Network partitions
+
+You can even:
+
+Detect split-brain
+Pause pipelines
+Resume when healed
+
+That’s almost unheard of in CI systems.
+
+4. Execution flow (end-to-end)
+
+Let’s walk a real pipeline:
+
+Step 1: Trigger
+Git push hits system (via webhook)
+Pipeline definition loaded
+Step 2: Pipeline starts
+PipelineProcess spawned
+Initial state created
+Step 3: Steps scheduled
+Step processes created
+Dependencies resolved dynamically (not static DAG)
+Step 4: Work distribution
+
+Scheduler:
+
+Breaks tasks into units
+Sends to worker nodes
+
+Workers:
+
+Execute as BEAM processes
+Stream results back
+Step 5: Runtime adaptation
+
+During execution:
+
+Slow tests detected → redistributed
+Failures spike → retries triggered
+Node overloaded → work shifted
+Step 6: State-driven decisions
+
+Pipeline can:
+
+Skip deploy if instability detected
+Increase test coverage dynamically
+Trigger additional validation steps
+Step 7: Completion
+Final state persisted
+Artifacts optionally exported
+Pipeline remains inspectable (not just logs)
+5. Kubernetes: integrate or bypass?
+
+You have two viable strategies:
+
+Option A: Use Kubernetes as substrate
+Each worker = pod
+BEAM cluster runs inside K8s
+Pros:
+Familiar infra
+Easy scaling
+Cons:
+You inherit K8s complexity
+Some redundancy (scheduler vs scheduler)
+Option B: Minimize Kubernetes
+Use BEAM clustering directly
+Use VMs or lightweight containers
+Pros:
+Simpler mental model
+Lower overhead
+More “native” feel
+Cons:
+Harder sell to enterprises
+Hybrid (likely best):
+K8s for provisioning
+BEAM for execution logic
+6. Where this becomes 10x better
+1. “Replayable CI”
+
+Because you control:
+
+State
+Events
+Execution flow
+
+You can:
+
+Replay pipelines deterministically
+Debug exact failures
+2. “Self-healing pipelines”
+
+Instead of:
+
+“Rerun job”
+
+You get:
+
+“System recovered automatically”
+
+3. “CI as a service runtime”
+
+Pipelines can:
+
+Run for hours/days
+React to events
+Act like services
+4. “Test orchestration engine”
+
+This is the real wedge:
+
+Distributed system testing
+Chaos testing
+Load simulation
+7. Hard problems you’d need to solve
+
+Let’s not pretend this is easy.
+
+1. Isolation vs BEAM processes
+CI users expect clean environments
+BEAM processes share a VM
+
+Solution:
+
+Combine BEAM orchestration + containers for isolation
+2. Determinism
+Concurrency introduces nondeterminism
+
+Solution:
+
+Event sourcing
+Controlled scheduling modes
+3. Language adoption
+Not everyone wants to write Elixir
+
+Solution:
+
+Provide higher-level abstractions
+Optional YAML wrapper (but not primary)
+4. Ecosystem integration
+GitHub checks, PR status, etc.
+
+You still need to plug into GitHub.
+
+Final mental model
+
+What you’re building is closer to:
+
+A distributed systems simulator + execution engine
+
+…than:
+
+A CI pipeline runner
+
+And that’s exactly why it could win.
+
+Because tools like Jenkins or CircleCI are fundamentally built around:
+
+jobs
+steps
+containers
+
+Whereas this would be built around:
+
+processes
+state
+coordination
+
+If you want to go even deeper, the next layer would be:
+
+how to design the event log (event sourcing vs snapshots)
+how to expose time-travel debugging
+or how to build a “deterministic execution mode”
+
+Those are the pieces that could make this feel almost magical compared to today’s CI.
+
+go further
+
+Now we’re getting into the part that actually determines whether this idea is just interesting or genuinely category-creating: determinism, event sourcing, and time-travel debugging. This is where a BEAM-native CI could do things tools like GitHub Actions or Jenkins simply aren’t designed to do.
+
+I’ll go deeper on three layers:
+
+Event-sourced execution model
+Deterministic (or controllably nondeterministic) scheduling
+Time-travel + replay as a first-class feature
+1. Event-sourced CI engine
+
+Instead of treating a pipeline as “a sequence of steps,” treat it as:
+
+“A stream of events that describe everything that happened”
+
+Core idea
+
+Every meaningful action emits an event:
+
+{:pipeline_started, pipeline_id}
+{:step_started, step_id}
+{:test_scheduled, test_id, node}
+{:test_passed, test_id, duration}
+{:test_failed, test_id, error}
+{:node_down, node_id}
+{:retry_triggered, step_id}
+Architecture
+EventLog (append-only)
+      ↓
+State Projector (rebuilds current state)
+      ↓
+Pipeline State (in memory)
+Why this matters
+1. You can rebuild everything
+Pipeline state = pure function of events
+No hidden state
+2. You get auditability for free
+“Why did deploy get skipped?”
+→ replay events
+3. You unlock replay
+
+This is the foundation for everything else.
+
+Storage strategy
+Append-only log (Kafka, disk log, or custom)
+Periodic snapshots for performance
+snapshot(state, every: 1000_events)
+2. Deterministic execution (the hard part)
+
+BEAM concurrency is powerful—but inherently nondeterministic.
+
+If you want replay/debugging, you need to control time and scheduling.
+
+Problem
+
+Normally:
+
+Process scheduling order is unpredictable
+Message timing varies
+Race conditions are hard to reproduce
+Solution: “Deterministic mode”
+
+Introduce a logical scheduler layer above BEAM.
+
+Key idea
+
+Instead of letting processes run freely:
+
+All messages go through a scheduler
+Scheduler decides:
+when messages are delivered
+in what order
+Conceptual model
+Real BEAM Process
+   ↓
+Message intercepted
+   ↓
+Logical Scheduler
+   ↓
+Delivered in controlled order
+Execution modes
+1. Normal mode (fast, production CI)
+Native BEAM scheduling
+Maximum throughput
+2. Deterministic mode (debug/replay)
+Controlled message ordering
+Recorded scheduling decisions
+Recording execution
+
+During a run:
+
+{:deliver, msg_id: 1, to: pid_a}
+{:deliver, msg_id: 2, to: pid_b}
+{:sleep, pid_a, 10ms}
+
+This becomes your execution trace.
+
+Replay
+
+To replay:
+
+Feed same events
+Enforce same scheduling decisions
+
+→ identical execution
+
+Tradeoff
+Deterministic mode is slower
+But only needed for debugging / critical pipelines
+3. Time-travel debugging
+
+This is where things get genuinely different.
+
+What you can enable
+1. Step-level replay
+
+“Replay just the failing step with identical conditions”
+
+2. Timeline navigation
+
+Think:
+
+Scrub through pipeline execution like a video
+Inspect state at any point
+3. Branching timelines
+
+“What if I changed this condition?”
+
+Replay from event N with modified logic.
+
+Example workflow
+Pipeline fails
+Developer opens UI (powered by Phoenix LiveView)
+Sees:
+event timeline
+process tree
+Clicks failure point
+Replays from 2 seconds earlier
+Injects:
+different env var
+different retry policy
+Observes new outcome
+This is fundamentally different from logs
+
+Logs tell you:
+
+what happened
+
+This tells you:
+
+why it happened and what would happen if…
+
+4. Event + state + scheduler together
+
+Let’s combine it.
+
+Execution loop (simplified)
+def handle_event(event, state) do
+  state = apply_event(event, state)
+
+  decisions = Scheduler.decide(state)
+
+  Enum.each(decisions, fn decision ->
+    emit_event(decision)
+  end)
+
+  state
+end
+Key insight
+
+The system becomes:
+
+A feedback loop between state, events, and scheduling
+
+5. Deterministic testing of distributed systems
+
+This is your killer feature.
+
+Example: race condition
+
+In normal CI:
+
+Happens 1/100 runs
+Impossible to debug
+In this system:
+
+You can:
+
+Record execution trace
+Replay exact race
+Try alternate schedules
+Example
+explore_schedules do
+  assert no_deadlocks()
+end
+
+You’re now doing something closer to:
+
+model checking
+systematic concurrency testing
+This edges into research territory
+
+You’re borrowing ideas from:
+
+Jepsen
+Model Checking
+
+…but embedding them into CI.
+
+6. “What actually broke?” becomes trivial
+
+Because you have:
+
+full event log
+full state history
+deterministic replay
+
+You can answer:
+
+Which test introduced instability?
+Which node failure cascaded?
+Which retry changed outcome?
+7. New primitives you can expose
+
+This is where your DSL becomes powerful.
+
+A. “eventually” as a first-class concept
+assert eventually(timeout: 5_000) do
+  cluster.consistent?()
+end
+B. “within” time windows
+assert within(200_ms) do
+  response_received?()
+end
+C. failure injection
+inject_failure :network_partition, nodes: [1,2]
+D. schedule exploration
+explore concurrency: 100 do
+  run_distributed_test()
+end
+8. Where this becomes commercially interesting
+
+Now you’re no longer selling “CI minutes.”
+
+You’re selling:
+
+1. Confidence in distributed systems
+fintech
+infra companies
+databases
+2. Debugging superpowers
+reduce time-to-fix dramatically
+3. Flakiness elimination
+huge cost saver at scale
+9. The uncomfortable truth
+
+This is powerful—but:
+
+It’s harder to build than a typical CI
+It’s harder to explain
+It’s overkill for simple apps
+The wedge (important)
+
+Don’t sell this as:
+
+“Better CI”
+
+Sell it as:
+
+“The only CI that can deterministically debug concurrency and distributed failures”
+
+Final mental shift
+
+Traditional CI (like CircleCI):
+
+Executes scripts
+
+This system:
+
+Executes and understands programs
+
+If you build just enough of this (even without full determinism), you already beat incumbents in:
+
+flakiness handling
+adaptive execution
+observability
+
+If you go all the way with:
+
+event sourcing
+deterministic replay
+
+…you’re building something that starts to look less like CI and more like a distributed systems laboratory.
+
+If you want, next step could be:
+
+a concrete MVP scope (what to cut vs keep)
+or how to phase this without boiling the ocean (which is critical here)
