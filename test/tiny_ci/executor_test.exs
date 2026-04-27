@@ -1541,6 +1541,134 @@ defmodule TinyCI.ExecutorTest do
     end
   end
 
+  describe "run_pipeline/3 with filter: option" do
+    test "single filter runs only the matching stage" do
+      stages = [
+        %Stage{name: :build, mode: :serial, steps: [%Step{name: :b, cmd: "true"}]},
+        %Stage{name: :test, mode: :serial, steps: [%Step{name: :t, cmd: "true"}]},
+        %Stage{name: :deploy, mode: :serial, steps: [%Step{name: :d, cmd: "false"}]}
+      ]
+
+      assert {:ok, results} = Executor.run_pipeline(stages, %{}, filter: [:test])
+      assert length(results) == 1
+      assert hd(results).name == :test
+      assert hd(results).status == :passed
+    end
+
+    test "multi-stage filter runs only listed stages" do
+      stages = [
+        %Stage{name: :build, mode: :serial, steps: [%Step{name: :b, cmd: "true"}]},
+        %Stage{name: :test, mode: :serial, steps: [%Step{name: :t, cmd: "true"}]},
+        %Stage{name: :deploy, mode: :serial, steps: [%Step{name: :d, cmd: "false"}]}
+      ]
+
+      assert {:ok, results} = Executor.run_pipeline(stages, %{}, filter: [:build, :test])
+      assert length(results) == 2
+      names = Enum.map(results, & &1.name)
+      assert :build in names
+      assert :test in names
+      refute :deploy in names
+    end
+
+    test "filtered-out stages are not present in results" do
+      stages = [
+        %Stage{name: :build, mode: :serial, steps: [%Step{name: :b, cmd: "true"}]},
+        %Stage{name: :test, mode: :serial, steps: [%Step{name: :t, cmd: "true"}]},
+        %Stage{name: :deploy, mode: :serial, steps: [%Step{name: :d, cmd: "true"}]}
+      ]
+
+      assert {:ok, results} = Executor.run_pipeline(stages, %{}, filter: [:test])
+      names = Enum.map(results, & &1.name)
+      refute :build in names
+      refute :deploy in names
+    end
+
+    test "nil filter runs all stages" do
+      stages = [
+        %Stage{name: :build, mode: :serial, steps: [%Step{name: :b, cmd: "true"}]},
+        %Stage{name: :test, mode: :serial, steps: [%Step{name: :t, cmd: "true"}]}
+      ]
+
+      assert {:ok, results} = Executor.run_pipeline(stages, %{}, filter: nil)
+      assert length(results) == 2
+    end
+
+    test "empty filter runs all stages" do
+      stages = [
+        %Stage{name: :build, mode: :serial, steps: [%Step{name: :b, cmd: "true"}]},
+        %Stage{name: :test, mode: :serial, steps: [%Step{name: :t, cmd: "true"}]}
+      ]
+
+      assert {:ok, results} = Executor.run_pipeline(stages, %{}, filter: [])
+      assert length(results) == 2
+    end
+
+    test "warns when a filtered-in stage needs a filtered-out stage" do
+      stages = [
+        %Stage{name: :build, needs: [], mode: :serial, steps: [%Step{name: :b, cmd: "true"}]},
+        %Stage{
+          name: :test,
+          needs: [:build],
+          mode: :serial,
+          steps: [%Step{name: :t, cmd: "true"}]
+        }
+      ]
+
+      output =
+        ExUnit.CaptureIO.capture_io(fn ->
+          {:ok, _} = Executor.run_pipeline(stages, %{}, filter: [:test])
+        end)
+
+      assert output =~ ~s(":test" needs ":build" which was filtered)
+    end
+
+    test "no warning when needs stage is also in filter" do
+      stages = [
+        %Stage{name: :build, needs: [], mode: :serial, steps: [%Step{name: :b, cmd: "true"}]},
+        %Stage{
+          name: :test,
+          needs: [:build],
+          mode: :serial,
+          steps: [%Step{name: :t, cmd: "true"}]
+        }
+      ]
+
+      output =
+        ExUnit.CaptureIO.capture_io(fn ->
+          {:ok, _} = Executor.run_pipeline(stages, %{}, filter: [:build, :test])
+        end)
+
+      refute output =~ "which was filtered"
+    end
+
+    test "DAG mode: filter strips filtered deps so DAG validation passes" do
+      stages = [
+        %Stage{name: :build, needs: [], mode: :serial, steps: [%Step{name: :b, cmd: "true"}]},
+        %Stage{
+          name: :test,
+          needs: [:build],
+          mode: :serial,
+          steps: [%Step{name: :t, cmd: "true"}]
+        },
+        %Stage{
+          name: :deploy,
+          needs: [:test],
+          mode: :serial,
+          steps: [%Step{name: :d, cmd: "true"}]
+        }
+      ]
+
+      {result, _io} =
+        ExUnit.CaptureIO.with_io(fn ->
+          Executor.run_pipeline(stages, %{}, filter: [:deploy])
+        end)
+
+      assert {:ok, [result]} = result
+      assert result.name == :deploy
+      assert result.status == :passed
+    end
+  end
+
   describe "run_pipeline/2 with matrix stages" do
     test "matrix stage integrates into pipeline results" do
       stages = [

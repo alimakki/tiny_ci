@@ -60,19 +60,26 @@ defmodule Mix.Tasks.TinyCi.Run do
 
     {opts, positional, _invalid} =
       OptionParser.parse(args,
-        switches: [file: :string, root: :string, dry_run: :boolean, list: :boolean],
+        switches: [
+          file: :string,
+          root: :string,
+          dry_run: :boolean,
+          list: :boolean,
+          filter: :string
+        ],
         aliases: [f: :file, r: :root]
       )
 
     root = opts[:root] || File.cwd!()
     name = List.first(positional)
+    filter = parse_filter(opts[:filter])
 
     result =
       if opts[:list] do
         list_available_pipelines(root)
       else
         case resolve_pipeline(opts, root, name) do
-          {:ok, spec} -> dispatch_pipeline(spec, opts[:dry_run])
+          {:ok, spec} -> run_with_filter(spec, opts[:dry_run], filter)
           {:error, reason} -> handle_error(reason)
         end
       end
@@ -133,29 +140,78 @@ defmodule Mix.Tasks.TinyCi.Run do
     :ok
   end
 
-  defp dispatch_pipeline(spec, true), do: dry_run_pipeline(spec)
-  defp dispatch_pipeline(spec, _), do: execute_pipeline(spec)
+  defp run_with_filter(spec, dry_run, filter) do
+    with :ok <- validate_filter(filter, spec.stages) do
+      dispatch_pipeline(spec, dry_run, filter)
+    end
+  end
+
+  defp dispatch_pipeline(spec, true, filter), do: dry_run_pipeline(spec, filter)
+  defp dispatch_pipeline(spec, _, filter), do: execute_pipeline(spec, filter)
 
   defp handle_error(reason) do
     print_error(reason)
     {:error, :no_pipeline}
   end
 
-  defp dry_run_pipeline(%TinyCI.PipelineSpec{stages: stages, root: root, env: pipeline_env}) do
+  defp parse_filter(nil), do: nil
+
+  defp parse_filter(filter_str) do
+    filter_str
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.map(fn
+      ":" <> name -> String.to_atom(name)
+      name -> String.to_atom(name)
+    end)
+  end
+
+  defp validate_filter(nil, _stages), do: :ok
+  defp validate_filter([], _stages), do: :ok
+
+  defp validate_filter(filter, stages) do
+    stage_names = MapSet.new(stages, & &1.name)
+    unknown = Enum.reject(filter, &MapSet.member?(stage_names, &1))
+
+    if unknown == [] do
+      :ok
+    else
+      available = Enum.map_join(stages, ", ", fn s -> ":#{s.name}" end)
+      unknown_str = Enum.map_join(unknown, ", ", &":#{&1}")
+
+      IO.puts(:stderr, [
+        IO.ANSI.red(),
+        "Unknown stage filter: #{unknown_str}.",
+        IO.ANSI.reset(),
+        " Available stages: #{available}"
+      ])
+
+      {:error, :no_pipeline}
+    end
+  end
+
+  defp dry_run_pipeline(
+         %TinyCI.PipelineSpec{stages: stages, root: root, env: pipeline_env},
+         filter
+       ) do
     context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
-    DryRun.print_plan(stages, context)
+    filtered = filter_stages(stages, filter)
+    DryRun.print_plan(filtered, context)
     :ok
   end
 
-  defp execute_pipeline(%TinyCI.PipelineSpec{
-         stages: stages,
-         hooks: hooks,
-         root: root,
-         env: pipeline_env
-       }) do
+  defp execute_pipeline(
+         %TinyCI.PipelineSpec{
+           stages: stages,
+           hooks: hooks,
+           root: root,
+           env: pipeline_env
+         },
+         filter
+       ) do
     context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
 
-    case Executor.run_pipeline(stages, context) do
+    case Executor.run_pipeline(stages, context, filter: filter) do
       {:ok, stage_results} ->
         Reporter.print_summary(stage_results)
         Hooks.run_hooks(hooks, :on_success, context)
@@ -174,6 +230,14 @@ defmodule Mix.Tasks.TinyCi.Run do
 
         {:error, :pipeline_failed}
     end
+  end
+
+  defp filter_stages(stages, nil), do: stages
+  defp filter_stages(stages, []), do: stages
+
+  defp filter_stages(stages, filter) do
+    filter_set = MapSet.new(filter)
+    Enum.filter(stages, &MapSet.member?(filter_set, &1.name))
   end
 
   defp print_error(:not_found) do

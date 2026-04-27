@@ -63,12 +63,41 @@ defmodule TinyCI.Executor do
     ctx = context || TinyCI.Context.build()
     ctx = Map.put_new(ctx, :store, %{})
     output_mode = Output.resolve_mode(opts[:output] || :auto)
+    filtered = apply_filter(stages, opts[:filter])
 
-    if DAG.dag_mode?(stages) do
-      run_pipeline_dag(stages, ctx, output_mode)
+    if DAG.dag_mode?(filtered) do
+      run_pipeline_dag(filtered, ctx, output_mode)
     else
-      run_pipeline_sequential(stages, ctx, output_mode)
+      run_pipeline_sequential(filtered, ctx, output_mode)
     end
+  end
+
+  defp apply_filter(stages, nil), do: stages
+  defp apply_filter(stages, []), do: stages
+
+  defp apply_filter(stages, filter) do
+    filter_set = MapSet.new(filter)
+    all_names = MapSet.new(stages, & &1.name)
+
+    Enum.each(stages, fn stage ->
+      if MapSet.member?(filter_set, stage.name) do
+        stage.needs
+        |> Enum.filter(&(MapSet.member?(all_names, &1) and not MapSet.member?(filter_set, &1)))
+        |> Enum.each(fn dep ->
+          IO.puts([
+            IO.ANSI.yellow(),
+            ~s(Warning: ":#{stage.name}" needs ":#{dep}" which was filtered — running :#{stage.name} without it),
+            IO.ANSI.reset()
+          ])
+        end)
+      end
+    end)
+
+    stages
+    |> Enum.filter(&MapSet.member?(filter_set, &1.name))
+    |> Enum.map(fn stage ->
+      %{stage | needs: Enum.filter(stage.needs, &MapSet.member?(filter_set, &1))}
+    end)
   end
 
   defp run_pipeline_sequential(stages, ctx, output_mode) do

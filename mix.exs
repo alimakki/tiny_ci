@@ -23,7 +23,7 @@ defmodule TinyCi.MixProject do
   # Run "mix help deps" to learn about dependencies.
   defp deps do
     [
-      {:tidewave, "~> 0.4", only: :dev},
+      {:tidewave, "~> 0.5", only: :dev},
       {:bandit, "~> 1.0", only: :dev},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
       # {:dep_from_hexpm, "~> 0.3.0"},

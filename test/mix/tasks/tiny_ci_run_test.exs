@@ -224,6 +224,101 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       refute output =~ "Pipeline failed"
     end
 
+    test "--filter runs only the specified stage", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :build, mode: :serial do
+        step :compile, cmd: "echo compiled"
+      end
+      stage :test, mode: :serial do
+        step :unit, cmd: "echo tested"
+      end
+      stage :deploy, mode: :serial do
+        step :release, cmd: "exit 1"
+      end
+      """)
+
+      output =
+        capture_io(fn ->
+          result = Mix.Tasks.TinyCi.Run.run(["--file", path, "--filter", ":test"])
+          assert result == :ok
+        end)
+
+      assert output =~ "Pipeline completed successfully"
+      assert output =~ "test"
+      refute output =~ "deploy"
+    end
+
+    test "--filter with multiple stages runs only listed stages", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :build, mode: :serial do
+        step :compile, cmd: "echo compiled"
+      end
+      stage :test, mode: :serial do
+        step :unit, cmd: "echo tested"
+      end
+      stage :deploy, mode: :serial do
+        step :release, cmd: "exit 1"
+      end
+      """)
+
+      output =
+        capture_io(fn ->
+          result = Mix.Tasks.TinyCi.Run.run(["--file", path, "--filter", ":build,:test"])
+          assert result == :ok
+        end)
+
+      assert output =~ "Pipeline completed successfully"
+    end
+
+    test "--filter with unknown stage name prints error and returns error", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :build, mode: :serial do
+        step :compile, cmd: "echo compiled"
+      end
+      """)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          _stdout =
+            capture_io(fn ->
+              result = Mix.Tasks.TinyCi.Run.run(["--file", path, "--filter", ":nonexistent"])
+              assert result == {:error, :no_pipeline}
+            end)
+        end)
+
+      assert stderr =~ "nonexistent"
+      assert stderr =~ "build"
+    end
+
+    test "--dry-run --filter shows only filtered stages", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :build, mode: :serial do
+        step :compile, cmd: "echo compiled"
+      end
+      stage :test, mode: :serial do
+        step :unit, cmd: "echo tested"
+      end
+      """)
+
+      output =
+        capture_io(fn ->
+          result = Mix.Tasks.TinyCi.Run.run(["--file", path, "--dry-run", "--filter", ":test"])
+          assert result == :ok
+        end)
+
+      assert output =~ "Dry Run"
+      assert output =~ ":test"
+      refute output =~ ":build"
+    end
+
     test "returns validation error for legacy defmodule format", %{project_root: root} do
       path = Path.join(root, "tiny_ci.exs")
 

@@ -43,6 +43,7 @@ mix tiny_ci.run [pipeline] [options]
 | `--root DIR` | `-r` | Project root for pipeline discovery |
 | `--dry-run` | | Show what would execute without running anything |
 | `--list` | | List all available pipelines in `.tiny_ci/` |
+| `--filter STAGES` | | Run only the named stage(s) — see below |
 
 The optional `pipeline` argument selects a named pipeline from `.tiny_ci/`:
 
@@ -52,6 +53,35 @@ mix tiny_ci.run ci        # runs .tiny_ci/ci.exs
 mix tiny_ci.run jobs/release  # runs .tiny_ci/jobs/release.exs
 mix tiny_ci.run --list    # prints all available pipelines
 ```
+
+### Filtering Stages (`--filter`)
+
+Run only specific named stages without editing the pipeline file — useful for
+debugging a single stage locally.
+
+```bash
+# Run only the :test stage
+mix tiny_ci.run --filter :test
+
+# Run :build and :test, skip everything else
+mix tiny_ci.run --filter :build,:test
+
+# Preview which stages would run (without executing)
+mix tiny_ci.run --dry-run --filter :deploy
+```
+
+Stages not in the filter list are silently omitted — they do not appear as
+skipped in the output.
+
+If a filtered-in stage declares `needs:` pointing to a stage that was filtered
+out, a warning is printed and the stage runs without that dependency:
+
+```
+Warning: ":test" needs ":build" which was filtered — running :test without it
+```
+
+Passing an unknown stage name to `--filter` is an error; the available stage
+names are listed in the error message.
 
 Exit codes: `0` on success, `1` on failure — suitable for git hooks and scripts.
 
