@@ -44,6 +44,7 @@ mix tiny_ci.run [pipeline] [options]
 | `--dry-run` | | Show what would execute without running anything |
 | `--list` | | List all available pipelines in `.tiny_ci/` |
 | `--filter STAGES` | | Run only the named stage(s) — see below |
+| `--output FORMAT` | | Output format: `json` for machine-readable output |
 
 The optional `pipeline` argument selects a named pipeline from `.tiny_ci/`:
 
@@ -82,6 +83,58 @@ Warning: ":test" needs ":build" which was filtered — running :test without it
 
 Passing an unknown stage name to `--filter` is an error; the available stage
 names are listed in the error message.
+
+### Machine-Readable Output (`--output json`)
+
+Add `--output json` to get a JSON object on stdout instead of human-readable
+text. All ANSI output, stage headers, and progress lines are suppressed — only
+the JSON object is printed.
+
+```bash
+# Run and capture JSON
+mix tiny_ci.run --output json
+
+# Pipe into jq
+mix tiny_ci.run --output json | jq '.status'
+# → "passed" or "failed"
+
+# Check per-stage results
+mix tiny_ci.run --output json | jq '[.stages[] | {name, status, duration_ms}]'
+```
+
+Output shape:
+
+```json
+{
+  "status": "passed",
+  "duration_ms": 1234,
+  "stages": [
+    {
+      "name": "test",
+      "status": "passed",
+      "duration_ms": 500,
+      "steps": [
+        {
+          "name": "unit",
+          "status": "passed",
+          "output": "...",
+          "duration_ms": 200,
+          "attempts": 1,
+          "allowed_failure": false
+        }
+      ],
+      "matrix_runs": []
+    }
+  ]
+}
+```
+
+Matrix stages include a `matrix_runs` array instead of top-level `steps`. Each
+run has a `combination` map (e.g. `{"elixir": "1.17", "otp": "26"}`), its own
+`status`, `duration_ms`, and a `steps` array.
+
+Exit codes are unchanged: `0` on success, `1` on failure — the JSON `status`
+field and the exit code always agree.
 
 Exit codes: `0` on success, `1` on failure — suitable for git hooks and scripts.
 

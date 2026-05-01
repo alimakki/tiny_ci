@@ -188,8 +188,10 @@ defmodule TinyCI.Executor do
 
   defp run_dag_stage(stage, ctx, output_mode, blocked) do
     if Enum.any?(stage.needs, &MapSet.member?(blocked, &1)) do
-      IO.puts("Stage: #{stage.name}")
-      IO.puts("  Skipped (dependency failed)")
+      if output_mode != :silent do
+        IO.puts("Stage: #{stage.name}")
+        IO.puts("  Skipped (dependency failed)")
+      end
 
       %StageResult{
         name: stage.name,
@@ -232,10 +234,10 @@ defmodule TinyCI.Executor do
   def execute(%TinyCI.Stage{} = stage, context \\ %{}, output_mode \\ :buffered) do
     context = Map.put_new(context, :store, %{})
 
-    IO.puts("Stage: #{stage.name}")
+    if output_mode != :silent, do: IO.puts("Stage: #{stage.name}")
 
     if skip_stage?(stage, context) do
-      IO.puts("  Skipped (condition not met)")
+      if output_mode != :silent, do: IO.puts("  Skipped (condition not met)")
 
       %StageResult{
         name: stage.name,
@@ -273,7 +275,7 @@ defmodule TinyCI.Executor do
     }
   end
 
-  defp execute_matrix_stage(stage, context, _output_mode) do
+  defp execute_matrix_stage(stage, context, output_mode) do
     combinations = Matrix.combinations(stage.matrix)
     max_concurrency = stage.max_parallel || length(combinations)
     caller_gl = Process.group_leader()
@@ -294,7 +296,7 @@ defmodule TinyCI.Executor do
         |> Enum.map(fn {:ok, result} -> result end)
       end)
 
-    Enum.each(run_results, &print_combination_output/1)
+    if output_mode != :silent, do: Enum.each(run_results, &print_combination_output/1)
 
     any_failed = Enum.any?(run_results, &(&1.status == :failed))
     status = if any_failed and not stage.allow_failure, do: :failed, else: :passed

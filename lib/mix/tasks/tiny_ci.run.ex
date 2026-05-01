@@ -18,6 +18,8 @@ defmodule Mix.Tasks.TinyCi.Run do
     * `--root DIR` / `-r` — project root directory (defaults to current directory)
     * `--dry-run` — show what would execute without running anything
     * `--list` — list all available pipelines in `.tiny_ci/` and exit
+    * `--filter STAGES` — run only the named stage(s), comma-separated
+    * `--output FORMAT` — output format: `json` for machine-readable output
 
   ## Pipeline Selection
 
@@ -44,6 +46,9 @@ defmodule Mix.Tasks.TinyCi.Run do
       # Preview a named pipeline without executing
       mix tiny_ci.run deploy --dry-run
 
+      # Machine-readable JSON output
+      mix tiny_ci.run --output json
+
   ## Exit Codes
 
     * `0` — pipeline completed successfully (or `--list` / `--dry-run`)
@@ -52,7 +57,7 @@ defmodule Mix.Tasks.TinyCi.Run do
 
   use Mix.Task
 
-  alias TinyCI.{Discovery, DryRun, Executor, Hooks, Reporter}
+  alias TinyCI.{Discovery, DryRun, Executor, Hooks, Reporter, Results}
 
   @impl Mix.Task
   def run(args) do
@@ -65,7 +70,8 @@ defmodule Mix.Tasks.TinyCi.Run do
           root: :string,
           dry_run: :boolean,
           list: :boolean,
-          filter: :string
+          filter: :string,
+          output: :string
         ],
         aliases: [f: :file, r: :root]
       )
@@ -78,10 +84,7 @@ defmodule Mix.Tasks.TinyCi.Run do
       if opts[:list] do
         list_available_pipelines(root)
       else
-        case resolve_pipeline(opts, root, name) do
-          {:ok, spec} -> run_with_filter(spec, opts[:dry_run], filter)
-          {:error, reason} -> handle_error(reason)
-        end
+        run_or_error(opts, root, name, filter)
       end
 
     maybe_halt(result)
@@ -95,31 +98,45 @@ defmodule Mix.Tasks.TinyCi.Run do
     if Mix.env() != :test, do: System.halt(code)
   end
 
-  defp resolve_pipeline(opts, root, name) do
+  defp parse_output_format(nil), do: {:ok, :human}
+  defp parse_output_format("json"), do: {:ok, :json}
+
+  defp parse_output_format(other) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Unknown --output format: #{inspect(other)}.",
+      IO.ANSI.reset(),
+      " Supported formats: json"
+    ])
+
+    {:error, :no_pipeline}
+  end
+
+  defp resolve_pipeline(opts, root, name, output_format) do
     cond do
       opts[:file] ->
         Discovery.load_pipeline(opts[:file])
 
       name ->
         case Discovery.find_pipeline_by_name(root, name) do
-          {:ok, path} -> load_and_announce(path)
+          {:ok, path} -> load_and_announce(path, output_format)
           {:error, :not_found} -> {:error, {:named_not_found, name}}
         end
 
       true ->
-        discover_and_load(root)
+        discover_and_load(root, output_format)
     end
   end
 
-  defp discover_and_load(root) do
+  defp discover_and_load(root, output_format) do
     with {:ok, path} <- Discovery.find_pipeline(root) do
-      load_and_announce(path)
+      load_and_announce(path, output_format)
     end
   end
 
-  defp load_and_announce(path) do
+  defp load_and_announce(path, output_format) do
     with {:ok, spec} <- Discovery.load_pipeline(path) do
-      IO.puts("Found pipeline: #{path}")
+      if output_format != :json, do: IO.puts("Found pipeline: #{path}")
       {:ok, spec}
     end
   end
@@ -140,14 +157,25 @@ defmodule Mix.Tasks.TinyCi.Run do
     :ok
   end
 
-  defp run_with_filter(spec, dry_run, filter) do
-    with :ok <- validate_filter(filter, spec.stages) do
-      dispatch_pipeline(spec, dry_run, filter)
+  defp run_or_error(opts, root, name, filter) do
+    with {:ok, output_format} <- parse_output_format(opts[:output]) do
+      case resolve_pipeline(opts, root, name, output_format) do
+        {:ok, spec} -> run_with_filter(spec, opts[:dry_run], filter, output_format)
+        {:error, reason} -> handle_error(reason)
+      end
     end
   end
 
-  defp dispatch_pipeline(spec, true, filter), do: dry_run_pipeline(spec, filter)
-  defp dispatch_pipeline(spec, _, filter), do: execute_pipeline(spec, filter)
+  defp run_with_filter(spec, dry_run, filter, output_format) do
+    with :ok <- validate_filter(filter, spec.stages) do
+      dispatch_pipeline(spec, dry_run, filter, output_format)
+    end
+  end
+
+  defp dispatch_pipeline(spec, true, filter, _output_format), do: dry_run_pipeline(spec, filter)
+
+  defp dispatch_pipeline(spec, _, filter, output_format),
+    do: execute_pipeline(spec, filter, output_format)
 
   defp handle_error(reason) do
     print_error(reason)
@@ -201,13 +229,27 @@ defmodule Mix.Tasks.TinyCi.Run do
   end
 
   defp execute_pipeline(
-         %TinyCI.PipelineSpec{
-           stages: stages,
-           hooks: hooks,
-           root: root,
-           env: pipeline_env
-         },
-         filter
+         %TinyCI.PipelineSpec{stages: stages, hooks: hooks, root: root, env: pipeline_env},
+         filter,
+         :json
+       ) do
+    context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
+    pipeline_result = Executor.run_pipeline(stages, context, filter: filter, output: :silent)
+    stage_results = extract_stage_results(pipeline_result)
+
+    IO.puts(Results.to_json(simplify_result(pipeline_result), stage_results))
+    Hooks.run_hooks(hooks, hook_event(pipeline_result), context)
+
+    case pipeline_result do
+      {:ok, _} -> :ok
+      {:error, _, _} -> {:error, :pipeline_failed}
+    end
+  end
+
+  defp execute_pipeline(
+         %TinyCI.PipelineSpec{stages: stages, hooks: hooks, root: root, env: pipeline_env},
+         filter,
+         :human
        ) do
     context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
 
@@ -231,6 +273,15 @@ defmodule Mix.Tasks.TinyCi.Run do
         {:error, :pipeline_failed}
     end
   end
+
+  defp extract_stage_results({:ok, results}), do: results
+  defp extract_stage_results({:error, _, results}), do: results
+
+  defp simplify_result({:ok, _}), do: :ok
+  defp simplify_result({:error, reason, _}), do: {:error, reason}
+
+  defp hook_event({:ok, _}), do: :on_success
+  defp hook_event({:error, _, _}), do: :on_failure
 
   defp filter_stages(stages, nil), do: stages
   defp filter_stages(stages, []), do: stages

@@ -319,6 +319,110 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       refute output =~ ":build"
     end
 
+    test "--output json produces valid JSON with status field", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :test, mode: :serial do
+        step :unit, cmd: "echo hello"
+      end
+      """)
+
+      output =
+        capture_io(fn ->
+          result = Mix.Tasks.TinyCi.Run.run(["--file", path, "--output", "json"])
+          assert result == :ok
+        end)
+
+      assert {:ok, json} = Jason.decode(output)
+      assert json["status"] == "passed"
+      assert is_list(json["stages"])
+      assert is_integer(json["duration_ms"])
+    end
+
+    test "--output json suppresses human-readable output", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :test, mode: :serial do
+        step :unit, cmd: "echo hello"
+      end
+      """)
+
+      output =
+        capture_io(fn ->
+          Mix.Tasks.TinyCi.Run.run(["--file", path, "--output", "json"])
+        end)
+
+      refute output =~ "Pipeline completed successfully"
+      refute output =~ "Stage:"
+      refute output =~ "Found pipeline"
+    end
+
+    test "--output json on failed pipeline has status failed and returns error", %{
+      project_root: root
+    } do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :test, mode: :serial do
+        step :fail, cmd: "exit 1"
+      end
+      """)
+
+      output =
+        capture_io(fn ->
+          result = Mix.Tasks.TinyCi.Run.run(["--file", path, "--output", "json"])
+          assert result == {:error, :pipeline_failed}
+        end)
+
+      assert {:ok, json} = Jason.decode(output)
+      assert json["status"] == "failed"
+    end
+
+    test "--output json includes stage details", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :build, mode: :serial do
+        step :compile, cmd: "echo compiled"
+      end
+      """)
+
+      output =
+        capture_io(fn ->
+          Mix.Tasks.TinyCi.Run.run(["--file", path, "--output", "json"])
+        end)
+
+      {:ok, json} = Jason.decode(output)
+      stage = hd(json["stages"])
+      assert stage["name"] == "build"
+      assert stage["status"] == "passed"
+      assert hd(stage["steps"])["name"] == "compile"
+    end
+
+    test "unknown --output value prints error and returns error", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :test, mode: :serial do
+        step :unit, cmd: "echo hello"
+      end
+      """)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          _stdout =
+            capture_io(fn ->
+              result = Mix.Tasks.TinyCi.Run.run(["--file", path, "--output", "xml"])
+              assert result == {:error, :no_pipeline}
+            end)
+        end)
+
+      assert stderr =~ "xml"
+      assert stderr =~ "json"
+    end
+
     test "returns validation error for legacy defmodule format", %{project_root: root} do
       path = Path.join(root, "tiny_ci.exs")
 
