@@ -20,9 +20,14 @@ defmodule TinyCI.Executor do
   (in TTY environments) or buffered and printed after each stage completes
   (in non-TTY environments). The output mode is controlled via the `:output`
   option passed to `run_pipeline/3`.
+
+  Pipeline lifecycle events (stage started, skipped, finished) are routed
+  through a `TinyCI.Listener` implementation, defaulting to
+  `TinyCI.Listener.Human`. Pass `listener: TinyCI.Listener.Silent` to suppress
+  all progress output (e.g., when serializing results to JSON).
   """
 
-  alias TinyCI.{DAG, Matrix, MatrixRunResult, Output, Reporter, StageResult, StepResult}
+  alias TinyCI.{DAG, Matrix, MatrixRunResult, Output, StageResult, StepResult}
 
   @doc """
   Starts the task supervisor used for parallel step execution.
@@ -50,7 +55,9 @@ defmodule TinyCI.Executor do
     * `stages`  — a list of `%TinyCI.Stage{}` structs
     * `context` — an optional map of pipeline metadata (branch, commit, etc.)
     * `opts`    — keyword options:
-      * `:output` — output mode: `:streaming`, `:buffered`, or `:auto` (default `:auto`)
+      * `:output`   — output mode: `:streaming`, `:buffered`, or `:auto` (default `:auto`)
+      * `:listener` — a `TinyCI.Listener` implementation (default `TinyCI.Listener.Human`)
+      * `:filter`   — list of stage name atoms to run; others are omitted
 
   ## Returns
 
@@ -63,12 +70,13 @@ defmodule TinyCI.Executor do
     ctx = context || TinyCI.Context.build()
     ctx = Map.put_new(ctx, :store, %{})
     output_mode = Output.resolve_mode(opts[:output] || :auto)
+    listener = opts[:listener] || TinyCI.Listener.Human
     filtered = apply_filter(stages, opts[:filter])
 
     if DAG.dag_mode?(filtered) do
-      run_pipeline_dag(filtered, ctx, output_mode)
+      run_pipeline_dag(filtered, ctx, output_mode, listener)
     else
-      run_pipeline_sequential(filtered, ctx, output_mode)
+      run_pipeline_sequential(filtered, ctx, output_mode, listener)
     end
   end
 
@@ -100,15 +108,13 @@ defmodule TinyCI.Executor do
     end)
   end
 
-  defp run_pipeline_sequential(stages, ctx, output_mode) do
+  defp run_pipeline_sequential(stages, ctx, output_mode, listener) do
     result =
       Enum.reduce_while(stages, {[], ctx.store}, fn stage, {acc, current_store} ->
         ctx_with_store = Map.put(ctx, :store, current_store)
-        stage_result = execute(stage, ctx_with_store, output_mode)
+        stage_result = execute(stage, ctx_with_store, output_mode, listener)
 
-        if output_mode == :buffered do
-          Reporter.print_step_output(stage_result)
-        end
+        if output_mode == :buffered, do: listener.stage_finished(stage_result)
 
         case stage_result.status do
           :failed ->
@@ -126,17 +132,17 @@ defmodule TinyCI.Executor do
     end
   end
 
-  defp run_pipeline_dag(stages, ctx, output_mode) do
+  defp run_pipeline_dag(stages, ctx, output_mode, listener) do
     case DAG.build_levels(stages) do
       {:error, _} = error ->
         error
 
       {:ok, levels} ->
-        execute_dag_levels(levels, ctx, output_mode)
+        execute_dag_levels(levels, ctx, output_mode, listener)
     end
   end
 
-  defp execute_dag_levels(levels, ctx, output_mode) do
+  defp execute_dag_levels(levels, ctx, output_mode, listener) do
     initial = {[], ctx.store, MapSet.new()}
 
     {all_results, _store, _blocked} =
@@ -144,11 +150,9 @@ defmodule TinyCI.Executor do
         ctx_with_store = Map.put(ctx, :store, current_store)
 
         {stage_results, new_blocked} =
-          execute_dag_level(level, ctx_with_store, output_mode, blocked)
+          execute_dag_level(level, ctx_with_store, output_mode, blocked, listener)
 
-        if output_mode == :buffered do
-          Enum.each(stage_results, &Reporter.print_step_output/1)
-        end
+        if output_mode == :buffered, do: Enum.each(stage_results, &listener.stage_finished/1)
 
         new_store =
           Enum.reduce(stage_results, current_store, fn r, s -> Map.merge(s, r.store) end)
@@ -164,9 +168,9 @@ defmodule TinyCI.Executor do
     end
   end
 
-  defp execute_dag_level(stages, ctx, output_mode, blocked) do
+  defp execute_dag_level(stages, ctx, output_mode, blocked, listener) do
     caller_gl = Process.group_leader()
-    tasks = Enum.map(stages, &spawn_dag_stage(&1, ctx, output_mode, blocked, caller_gl))
+    tasks = Enum.map(stages, &spawn_dag_stage(&1, ctx, output_mode, blocked, caller_gl, listener))
     stage_results = Task.await_many(tasks, :infinity)
 
     new_blocked =
@@ -179,19 +183,17 @@ defmodule TinyCI.Executor do
     {stage_results, new_blocked}
   end
 
-  defp spawn_dag_stage(stage, ctx, output_mode, blocked, caller_gl) do
+  defp spawn_dag_stage(stage, ctx, output_mode, blocked, caller_gl, listener) do
     Task.Supervisor.async(TinyCI.TaskSupervisor, fn ->
       Process.group_leader(self(), caller_gl)
-      run_dag_stage(stage, ctx, output_mode, blocked)
+      run_dag_stage(stage, ctx, output_mode, blocked, listener)
     end)
   end
 
-  defp run_dag_stage(stage, ctx, output_mode, blocked) do
+  defp run_dag_stage(stage, ctx, output_mode, blocked, listener) do
     if Enum.any?(stage.needs, &MapSet.member?(blocked, &1)) do
-      if output_mode != :silent do
-        IO.puts("Stage: #{stage.name}")
-        IO.puts("  Skipped (dependency failed)")
-      end
+      listener.stage_started(stage.name)
+      listener.stage_skipped(stage.name, :dependency_failed)
 
       %StageResult{
         name: stage.name,
@@ -201,7 +203,7 @@ defmodule TinyCI.Executor do
         store: ctx.store
       }
     else
-      execute(stage, ctx, output_mode)
+      execute(stage, ctx, output_mode, listener)
     end
   end
 
@@ -226,18 +228,23 @@ defmodule TinyCI.Executor do
     * `stage`       — a `%TinyCI.Stage{}` struct
     * `context`     — a map of context data passed to conditions and steps
     * `output_mode` — `:streaming` or `:buffered` (default `:buffered`)
+    * `listener`    — a `TinyCI.Listener` implementation (default `TinyCI.Listener.Human`)
 
   ## Returns
 
-    * `%TinyCI.StageResult{}` with status `:passed`, `:failed`, or `:skipped`
+    * `%StageResult{}` with status `:passed`, `:failed`, or `:skipped`
   """
-  def execute(%TinyCI.Stage{} = stage, context \\ %{}, output_mode \\ :buffered) do
+  def execute(
+        %TinyCI.Stage{} = stage,
+        context \\ %{},
+        output_mode \\ :buffered,
+        listener \\ TinyCI.Listener.Human
+      ) do
     context = Map.put_new(context, :store, %{})
-
-    if output_mode != :silent, do: IO.puts("Stage: #{stage.name}")
+    listener.stage_started(stage.name)
 
     if skip_stage?(stage, context) do
-      if output_mode != :silent, do: IO.puts("  Skipped (condition not met)")
+      listener.stage_skipped(stage.name, :condition_not_met)
 
       %StageResult{
         name: stage.name,
@@ -250,16 +257,16 @@ defmodule TinyCI.Executor do
       ctx_with_stage_env = Map.put(context, :stage_env, stage.env || %{})
 
       if stage.matrix != [] do
-        execute_matrix_stage(stage, ctx_with_stage_env, output_mode)
+        execute_matrix_stage(stage, ctx_with_stage_env, output_mode, listener)
       else
-        execute_regular_stage(stage, ctx_with_stage_env, output_mode)
+        execute_regular_stage(stage, ctx_with_stage_env, output_mode, listener)
       end
     end
   end
 
-  defp execute_regular_stage(stage, context, output_mode) do
+  defp execute_regular_stage(stage, context, output_mode, listener) do
     {duration_ms, {step_results, updated_store}} =
-      measure(fn -> execute_by_mode(stage, context, output_mode) end)
+      measure(fn -> execute_by_mode(stage, context, output_mode, listener) end)
 
     status =
       if Enum.all?(step_results, &(&1.status in [:passed, :skipped] or &1.allowed_failure)),
@@ -275,7 +282,7 @@ defmodule TinyCI.Executor do
     }
   end
 
-  defp execute_matrix_stage(stage, context, output_mode) do
+  defp execute_matrix_stage(stage, context, _output_mode, listener) do
     combinations = Matrix.combinations(stage.matrix)
     max_concurrency = stage.max_parallel || length(combinations)
     caller_gl = Process.group_leader()
@@ -287,7 +294,7 @@ defmodule TinyCI.Executor do
           combinations,
           fn combo ->
             Process.group_leader(self(), caller_gl)
-            run_matrix_combination(stage, combo, context)
+            run_matrix_combination(stage, combo, context, listener)
           end,
           max_concurrency: max_concurrency,
           timeout: :infinity,
@@ -296,7 +303,7 @@ defmodule TinyCI.Executor do
         |> Enum.map(fn {:ok, result} -> result end)
       end)
 
-    if output_mode != :silent, do: Enum.each(run_results, &print_combination_output/1)
+    listener.matrix_stage_finished(run_results)
 
     any_failed = Enum.any?(run_results, &(&1.status == :failed))
     status = if any_failed and not stage.allow_failure, do: :failed, else: :passed
@@ -314,7 +321,7 @@ defmodule TinyCI.Executor do
     }
   end
 
-  defp run_matrix_combination(stage, combination, context) do
+  defp run_matrix_combination(stage, combination, context, listener) do
     combo_env = Matrix.env_vars(combination)
     combo_store = Map.new(combination)
 
@@ -326,7 +333,7 @@ defmodule TinyCI.Executor do
     stage_for_run = %{stage | matrix: [], max_parallel: nil}
 
     {duration_ms, {step_results, updated_store}} =
-      measure(fn -> execute_by_mode(stage_for_run, ctx, :buffered) end)
+      measure(fn -> execute_by_mode(stage_for_run, ctx, :buffered, listener) end)
 
     any_failed = Enum.any?(step_results, &(&1.status == :failed and not &1.allowed_failure))
 
@@ -337,17 +344,6 @@ defmodule TinyCI.Executor do
       duration_ms: duration_ms,
       store: updated_store
     }
-  end
-
-  defp print_combination_output(%MatrixRunResult{combination: combo, step_results: results}) do
-    label = Matrix.label(combo)
-    Enum.each(results, &print_combo_step_output(&1, label))
-  end
-
-  defp print_combo_step_output(%StepResult{name: name, output: output}, label) do
-    if output != "" do
-      IO.puts("  [#{label}][#{name}] #{String.trim(output)}")
-    end
   end
 
   defp skip_stage?(%{when_condition: nil}, _context), do: false
@@ -364,22 +360,30 @@ defmodule TinyCI.Executor do
     if Path.type(dir) == :absolute, do: dir, else: Path.join(root || File.cwd!(), dir)
   end
 
-  defp execute_step_or_skip(step, context, output_mode, prefix, working_dir) do
+  defp execute_step_or_skip(step, context, output_mode, prefix, working_dir, listener) do
     if skip_step?(step, context) do
       %StepResult{name: step.name, status: :skipped, duration_ms: 0}
     else
-      run_step_with_retries(step, context, output_mode, prefix, working_dir)
+      run_step_with_retries(step, context, output_mode, prefix, working_dir, listener)
     end
   end
 
-  defp run_step_with_retries(step, ctx, output_mode, prefix, working_dir) do
+  defp run_step_with_retries(step, ctx, output_mode, prefix, working_dir, listener) do
     total = (step.retry || 0) + 1
     delay = step.retry_delay || 0
-    attempt_step(step, ctx, output_mode, prefix, working_dir, {1, total, delay, 0})
+    attempt_step(step, ctx, output_mode, prefix, working_dir, {1, total, delay, 0}, listener)
   end
 
-  defp attempt_step(step, ctx, output_mode, prefix, working_dir, {attempt, total, delay, acc_ms}) do
-    log_attempt(attempt, total)
+  defp attempt_step(
+         step,
+         ctx,
+         output_mode,
+         prefix,
+         working_dir,
+         {attempt, total, delay, acc_ms},
+         listener
+       ) do
+    listener.step_attempt(attempt, total)
     result = run_step(step, ctx, output_mode, prefix, working_dir)
     total_ms = acc_ms + result.duration_ms
 
@@ -392,15 +396,13 @@ defmodule TinyCI.Executor do
         output_mode,
         prefix,
         working_dir,
-        {attempt + 1, total, delay, total_ms}
+        {attempt + 1, total, delay, total_ms},
+        listener
       )
     else
       %{result | attempts: attempt, duration_ms: total_ms}
     end
   end
-
-  defp log_attempt(_attempt, 1), do: :ok
-  defp log_attempt(attempt, total), do: IO.puts("  [attempt #{attempt}/#{total}]")
 
   defp sleep_between_attempts(0), do: :ok
   defp sleep_between_attempts(delay), do: Process.sleep(delay)
@@ -416,18 +418,20 @@ defmodule TinyCI.Executor do
   defp execute_by_mode(
          %{mode: :serial, steps: steps, working_dir: stage_wd},
          context,
-         output_mode
+         output_mode,
+         listener
        ),
-       do: execute_serial(steps, stage_wd, context, output_mode)
+       do: execute_serial(steps, stage_wd, context, output_mode, listener)
 
   defp execute_by_mode(
          %{mode: :parallel, steps: steps, working_dir: stage_wd},
          context,
-         output_mode
+         output_mode,
+         listener
        ),
-       do: execute_parallel(steps, stage_wd, context, output_mode)
+       do: execute_parallel(steps, stage_wd, context, output_mode, listener)
 
-  defp execute_serial(steps, stage_wd, context, output_mode) do
+  defp execute_serial(steps, stage_wd, context, output_mode, listener) do
     root = Map.get(context, :root)
 
     {results, final_store} =
@@ -435,7 +439,7 @@ defmodule TinyCI.Executor do
         ctx = Map.put(context, :store, current_store)
         effective_wd = resolve_working_dir(step.working_dir || stage_wd, root)
 
-        step_result = execute_step_or_skip(step, ctx, output_mode, nil, effective_wd)
+        step_result = execute_step_or_skip(step, ctx, output_mode, nil, effective_wd, listener)
 
         new_store = Map.merge(current_store, step_result.store_data)
 
@@ -450,7 +454,7 @@ defmodule TinyCI.Executor do
     {Enum.reverse(results), final_store}
   end
 
-  defp execute_parallel(steps, stage_wd, context, output_mode) do
+  defp execute_parallel(steps, stage_wd, context, output_mode, listener) do
     prefix = if output_mode == :streaming, do: :step_name, else: nil
     caller_gl = Process.group_leader()
     root = Map.get(context, :root)
@@ -462,7 +466,7 @@ defmodule TinyCI.Executor do
 
         Task.Supervisor.async(TinyCI.TaskSupervisor, fn ->
           Process.group_leader(self(), caller_gl)
-          execute_step_or_skip(step, context, output_mode, step_prefix, effective_wd)
+          execute_step_or_skip(step, context, output_mode, step_prefix, effective_wd, listener)
         end)
       end)
 

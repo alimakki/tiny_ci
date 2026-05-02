@@ -38,11 +38,10 @@ defmodule TinyCI.Output do
   `:auto` delegates to `mode/0`. Explicit `:streaming` or `:buffered`
   values pass through unchanged.
   """
-  @spec resolve_mode(:auto | :streaming | :buffered | :silent) :: :streaming | :buffered | :silent
+  @spec resolve_mode(:auto | :streaming | :buffered) :: :streaming | :buffered
   def resolve_mode(:auto), do: mode()
   def resolve_mode(:streaming), do: :streaming
   def resolve_mode(:buffered), do: :buffered
-  def resolve_mode(:silent), do: :silent
 
   @doc """
   Runs a shell command and returns `{status, output}`.
@@ -73,7 +72,6 @@ defmodule TinyCI.Output do
     case output_mode do
       :streaming -> run_streaming(cmd, env, prefix, working_dir)
       :buffered -> run_buffered(cmd, env, working_dir)
-      :silent -> run_buffered(cmd, env, working_dir)
     end
   end
 

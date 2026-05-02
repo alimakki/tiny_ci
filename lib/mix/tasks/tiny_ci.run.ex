@@ -58,6 +58,7 @@ defmodule Mix.Tasks.TinyCi.Run do
   use Mix.Task
 
   alias TinyCI.{Discovery, DryRun, Executor, Hooks, Reporter, Results}
+  alias TinyCI.Listener
 
   @impl Mix.Task
   def run(args) do
@@ -234,7 +235,14 @@ defmodule Mix.Tasks.TinyCi.Run do
          :json
        ) do
     context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
-    pipeline_result = Executor.run_pipeline(stages, context, filter: filter, output: :silent)
+
+    pipeline_result =
+      Executor.run_pipeline(stages, context,
+        filter: filter,
+        output: :buffered,
+        listener: Listener.Silent
+      )
+
     stage_results = extract_stage_results(pipeline_result)
 
     IO.puts(Results.to_json(simplify_result(pipeline_result), stage_results))
