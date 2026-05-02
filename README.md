@@ -628,6 +628,57 @@ mix tiny_ci.run ci
 mix tiny_ci.run jobs/nightly --dry-run
 ```
 
+## Event System
+
+Every phase of a pipeline run emits a typed event struct. These events are the
+foundation for the event log, run history CLI, and web dashboard (coming in Phase 1).
+
+All events live under `TinyCI.Events.*` and share two mandatory fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `run_id` | `String.t()` | Unique identifier for the pipeline run |
+| `timestamp` | `DateTime.t()` | UTC wall-clock time the event occurred |
+
+### Event Types
+
+| Struct | Emitted when |
+|--------|--------------|
+| `PipelineStarted` | A pipeline run begins |
+| `PipelineCompleted` | A pipeline run finishes (`status: :passed \| :failed`) |
+| `StageStarted` | A stage begins executing |
+| `StageSkipped` | A stage is skipped (condition or filter) |
+| `StageCompleted` | A stage finishes |
+| `StepStarted` | A step begins within a stage |
+| `StepSkipped` | A step is skipped (condition) |
+| `StepOutputLine` | One line of step output (streaming mode) |
+| `StepRetrying` | A step is about to be retried after failure |
+| `StepCompleted` | A step finishes |
+| `MatrixRunStarted` | One matrix combination begins |
+| `MatrixRunCompleted` | One matrix combination finishes |
+| `HookStarted` | A pipeline hook begins |
+| `HookCompleted` | A pipeline hook finishes |
+
+All structs implement `Jason.Encoder`. Atoms are encoded as strings; `DateTime`
+values are encoded as ISO 8601 strings. Keyword-list `combination` fields on
+matrix events are encoded as JSON objects with string keys.
+
+```elixir
+alias TinyCI.Events.StageCompleted
+
+event = %StageCompleted{
+  run_id: "20240115_103000_main_abc1234",
+  timestamp: DateTime.utc_now(),
+  stage: :test,
+  status: :passed,
+  duration_ms: 1234
+}
+
+Jason.encode!(event)
+# => {"run_id":"20240115_103000_main_abc1234","timestamp":"2024-01-15T10:30:00.000000Z",
+#     "stage":"test","status":"passed","duration_ms":1234}
+```
+
 ## Project Structure
 
 ```
@@ -645,6 +696,7 @@ lib/
       validator.ex        # AST allowlist validator
     dag.ex                # DAG level computation and cycle detection
     dsl.ex                # Macro-based DSL (internal use)
+    events.ex             # Typed event vocabulary (14 structs)
     executor.ex           # Stage/step execution engine
     hooks.ex              # Hook runner
     matrix.ex             # Matrix combination generator and helpers
@@ -666,6 +718,7 @@ test/
       interpreter_test.exs
       validator_test.exs
     dsl_test.exs
+    events_test.exs
     executor_test.exs
     integration_test.exs
     reporter_test.exs
@@ -696,6 +749,7 @@ mix credo                          # static analysis
 - **Custom DSL** — declarative pipeline format with an allowlist validator
 - **Stage dependencies (DAG)** — `needs:` for fan-out/fan-in topologies with parallel independent stages, transitive skip propagation, and cycle detection at parse time
 - **Matrix builds** — `matrix:` option for cartesian-product parallel stage runs with env var injection, `max_parallel:` concurrency cap, and `allow_failure:` for partial tolerance
+- **Event structs** — 14 typed event structs covering every execution boundary (pipeline, stage, step, matrix, hooks), each with `run_id`, `timestamp`, and `Jason.Encoder` support
 
 ### Up Next
 
