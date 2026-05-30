@@ -26,7 +26,8 @@ defmodule TinyCI.Step do
           when_condition: term() | nil,
           working_dir: String.t() | nil,
           retry: non_neg_integer() | nil,
-          retry_delay: non_neg_integer() | nil
+          retry_delay: non_neg_integer() | nil,
+          cache: %{paths: [String.t()], key: String.t()} | nil
         }
 
   defstruct name: nil,
@@ -41,7 +42,8 @@ defmodule TinyCI.Step do
             when_condition: nil,
             working_dir: nil,
             retry: nil,
-            retry_delay: nil
+            retry_delay: nil,
+            cache: nil
 end
 
 defmodule TinyCI.Stage do

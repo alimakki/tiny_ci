@@ -27,7 +27,7 @@ defmodule TinyCI.Executor do
   all progress output (e.g., when serializing results to JSON).
   """
 
-  alias TinyCI.{DAG, Matrix, MatrixRunResult, Output, StageResult, StepResult}
+  alias TinyCI.{Cache, DAG, Matrix, MatrixRunResult, Output, StageResult, StepResult}
 
   @doc """
   Starts the task supervisor used for parallel step execution.
@@ -69,6 +69,7 @@ defmodule TinyCI.Executor do
   def run_pipeline(stages, context, opts) when is_list(stages) do
     ctx = context || TinyCI.Context.build()
     ctx = Map.put_new(ctx, :store, %{})
+    ctx = Map.put(ctx, :no_cache, opts[:no_cache] || false)
     output_mode = Output.resolve_mode(opts[:output] || :auto)
     listener = opts[:listener] || TinyCI.Listener.Human
     filtered = apply_filter(stages, opts[:filter])
@@ -364,7 +365,58 @@ defmodule TinyCI.Executor do
     if skip_step?(step, context) do
       %StepResult{name: step.name, status: :skipped, duration_ms: 0}
     else
-      run_step_with_retries(step, context, output_mode, prefix, working_dir, listener)
+      execute_with_cache(step, context, output_mode, prefix, working_dir, listener)
+    end
+  end
+
+  defp execute_with_cache(
+         %{cache: nil} = step,
+         context,
+         output_mode,
+         prefix,
+         working_dir,
+         listener
+       ) do
+    run_step_with_retries(step, context, output_mode, prefix, working_dir, listener)
+  end
+
+  defp execute_with_cache(
+         %{cache: cache} = step,
+         context,
+         output_mode,
+         prefix,
+         working_dir,
+         listener
+       ) do
+    no_cache = Map.get(context, :no_cache, false)
+    root = Map.get(context, :root, File.cwd!())
+    key_file = Path.join(root, cache.key)
+
+    with false <- no_cache,
+         {:ok, key} <- Cache.compute_key(key_file) do
+      cache_ctx = %{key: key, root: root, paths: cache.paths}
+      run_cached(step, cache_ctx, context, output_mode, prefix, working_dir, listener)
+    else
+      _ -> run_step_with_retries(step, context, output_mode, prefix, working_dir, listener)
+    end
+  end
+
+  defp run_cached(
+         step,
+         %{key: key, root: root, paths: paths},
+         ctx,
+         output_mode,
+         prefix,
+         wd,
+         listener
+       ) do
+    if Cache.hit?(root, key, paths) do
+      Cache.restore(root, key, paths, wd)
+      %StepResult{name: step.name, status: :passed, duration_ms: 0, cache_status: :hit}
+    else
+      result = run_step_with_retries(step, ctx, output_mode, prefix, wd, listener)
+      if result.status == :passed, do: Cache.save(root, key, paths, wd)
+      %{result | cache_status: :miss}
     end
   end
 

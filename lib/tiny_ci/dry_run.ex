@@ -150,6 +150,7 @@ defmodule TinyCI.DryRun do
       timeout_info = if step.timeout, do: " [timeout: #{step.timeout}ms]", else: ""
       allow_failure_info = if step.allow_failure, do: " [allow_failure]", else: ""
       retry_info = format_retry_info(step.retry, step.retry_delay)
+      cache_info = format_cache_info(step.cache)
 
       wd_info =
         case resolve_working_dir(step.working_dir || stage_wd, root) do
@@ -158,7 +159,7 @@ defmodule TinyCI.DryRun do
         end
 
       IO.puts(
-        "    • :#{step.name} — #{type_info}#{timeout_info}#{allow_failure_info}#{retry_info}#{wd_info}"
+        "    • :#{step.name} — #{type_info}#{timeout_info}#{allow_failure_info}#{retry_info}#{cache_info}#{wd_info}"
       )
     end
   end
@@ -188,6 +189,13 @@ defmodule TinyCI.DryRun do
   defp format_retry_info(r, nil), do: " [retry: #{r}]"
   defp format_retry_info(r, 0), do: " [retry: #{r}]"
   defp format_retry_info(r, d), do: " [retry: #{r}, retry_delay: #{d}ms]"
+
+  defp format_cache_info(nil), do: ""
+
+  defp format_cache_info(%{paths: paths, key: key}) do
+    paths_str = Enum.join(paths, ", ")
+    " [cache: key=#{key}, paths=[#{paths_str}]]"
+  end
 
   defp format_env(env) do
     Enum.map_join(env, ", ", fn {k, v} -> "#{k}=#{v}" end)

@@ -387,6 +387,38 @@ defmodule TinyCI.DSL.InterpreterTest do
   end
 
   # Dummy modules referenced in pipeline files above
+  describe "cache option parsing" do
+    test "step with cache is parsed into a map on the Step struct" do
+      path =
+        write_pipeline("cache_step", """
+        stage :install do
+          step :deps, cmd: "mix deps.get", cache: [paths: ["deps", "_build"], key: "mix.lock"]
+        end
+        """)
+
+      {:ok, spec} = Interpreter.interpret_file(path)
+      [stage] = spec.stages
+      [step] = stage.steps
+
+      assert %{paths: ["deps", "_build"], key: "mix.lock"} = step.cache
+    end
+
+    test "step without cache has nil cache field" do
+      path =
+        write_pipeline("no_cache_step", """
+        stage :test do
+          step :unit, cmd: "mix test"
+        end
+        """)
+
+      {:ok, spec} = Interpreter.interpret_file(path)
+      [stage] = spec.stages
+      [step] = stage.steps
+
+      assert step.cache == nil
+    end
+  end
+
   defmodule DummyStep do
     @moduledoc false
     def execute(_config, _ctx), do: :ok

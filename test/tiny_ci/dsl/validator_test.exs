@@ -313,6 +313,70 @@ defmodule TinyCI.DSL.ValidatorTest do
     end
   end
 
+  describe "cache option on step" do
+    test "accepts valid cache spec" do
+      assert :ok =
+               validate("""
+               stage :install do
+                 step :deps, cmd: "mix deps.get", cache: [paths: ["deps", "_build"], key: "mix.lock"]
+               end
+               """)
+    end
+
+    test "accepts cache with single path" do
+      assert :ok =
+               validate("""
+               stage :install do
+                 step :deps, cmd: "mix deps.get", cache: [paths: ["deps"], key: "mix.lock"]
+               end
+               """)
+    end
+
+    test "rejects cache with non-list paths" do
+      assert {:error, violations} =
+               validate("""
+               stage :install do
+                 step :deps, cmd: "mix deps.get", cache: [paths: "deps", key: "mix.lock"]
+               end
+               """)
+
+      assert Enum.any?(violations, &String.contains?(&1, "paths"))
+    end
+
+    test "rejects cache with non-string path entries" do
+      assert {:error, violations} =
+               validate("""
+               stage :install do
+                 step :deps, cmd: "mix deps.get", cache: [paths: [:deps], key: "mix.lock"]
+               end
+               """)
+
+      assert Enum.any?(violations, &String.contains?(&1, "paths"))
+    end
+
+    test "rejects cache with non-string key" do
+      assert {:error, violations} =
+               validate("""
+               stage :install do
+                 step :deps, cmd: "mix deps.get", cache: [paths: ["deps"], key: :mix_lock]
+               end
+               """)
+
+      assert Enum.any?(violations, &String.contains?(&1, "key"))
+    end
+
+    test "rejects cache that is not a keyword list" do
+      assert {:error, violations} =
+               validate("""
+               stage :install do
+                 step :deps, cmd: "mix deps.get", cache: "mix.lock"
+               end
+               """)
+
+      assert Enum.any?(violations, &String.contains?(&1, "cache"))
+    end
+  end
+
   describe "multiple violations" do
     test "returns all violations at once" do
       assert {:error, violations} =

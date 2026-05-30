@@ -149,6 +149,12 @@ defmodule TinyCI.Reporter do
   defp step_label(%StepResult{status: :passed, attempts: n}) when n > 1,
     do: IO.ANSI.green() <> "✓" <> IO.ANSI.reset() <> " (passed on attempt #{n})"
 
+  defp step_label(%StepResult{cache_status: :hit, status: :passed}),
+    do: IO.ANSI.cyan() <> "✓" <> IO.ANSI.reset() <> " [cache hit]"
+
+  defp step_label(%StepResult{cache_status: :miss, status: :passed}),
+    do: IO.ANSI.green() <> "✓" <> IO.ANSI.reset() <> " [cache miss]"
+
   defp step_label(%StepResult{status: status}), do: status_icon(status)
 
   defp status_icon(:passed), do: IO.ANSI.green() <> "✓" <> IO.ANSI.reset()

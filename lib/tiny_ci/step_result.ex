@@ -17,6 +17,8 @@ defmodule TinyCI.StepResult do
 
   @type status :: :passed | :failed | :skipped
 
+  @type cache_status :: :hit | :miss | nil
+
   @type t :: %__MODULE__{
           name: atom(),
           status: status(),
@@ -24,7 +26,8 @@ defmodule TinyCI.StepResult do
           duration_ms: non_neg_integer(),
           allowed_failure: boolean(),
           store_data: map(),
-          attempts: pos_integer()
+          attempts: pos_integer(),
+          cache_status: cache_status()
         }
 
   @enforce_keys [:name, :status]
@@ -34,5 +37,6 @@ defmodule TinyCI.StepResult do
             duration_ms: 0,
             allowed_failure: false,
             store_data: %{},
-            attempts: 1
+            attempts: 1,
+            cache_status: nil
 end

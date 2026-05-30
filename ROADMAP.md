@@ -124,12 +124,12 @@ As a pipeline author, I want to cache directories between pipeline runs (keyed b
 - A `--no-cache` CLI flag disables all caching for a run.
 
 **Acceptance criteria**
-- [ ] `cache paths: ["deps", "_build"], key: "mix.lock"` is valid DSL on a step
-- [ ] Cache key is the SHA256 of the named file's contents
-- [ ] Cache hit skips the step and restores directories; reporter shows `[cache hit]`
-- [ ] Cache miss runs the step and saves directories; reporter shows `[cache miss]`
-- [ ] `mix tiny_ci.run --no-cache` bypasses all cache lookups
-- [ ] Stale cache entries can be cleared with `mix tiny_ci.cache clean`
+- [x] `cache paths: ["deps", "_build"], key: "mix.lock"` is valid DSL on a step
+- [x] Cache key is the SHA256 of the named file's contents
+- [x] Cache hit skips the step and restores directories; reporter shows `[cache hit]`
+- [x] Cache miss runs the step and saves directories; reporter shows `[cache miss]`
+- [x] `mix tiny_ci.run --no-cache` bypasses all cache lookups
+- [x] Stale cache entries can be cleared with `mix tiny_ci.cache clean`
 
 ---
 

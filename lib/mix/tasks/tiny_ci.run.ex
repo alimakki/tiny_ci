@@ -72,7 +72,8 @@ defmodule Mix.Tasks.TinyCi.Run do
           dry_run: :boolean,
           list: :boolean,
           filter: :string,
-          output: :string
+          output: :string,
+          no_cache: :boolean
         ],
         aliases: [f: :file, r: :root]
       )
@@ -161,22 +162,26 @@ defmodule Mix.Tasks.TinyCi.Run do
   defp run_or_error(opts, root, name, filter) do
     with {:ok, output_format} <- parse_output_format(opts[:output]) do
       case resolve_pipeline(opts, root, name, output_format) do
-        {:ok, spec} -> run_with_filter(spec, opts[:dry_run], filter, output_format)
-        {:error, reason} -> handle_error(reason)
+        {:ok, spec} ->
+          run_with_filter(spec, opts[:dry_run], filter, output_format, opts[:no_cache] || false)
+
+        {:error, reason} ->
+          handle_error(reason)
       end
     end
   end
 
-  defp run_with_filter(spec, dry_run, filter, output_format) do
+  defp run_with_filter(spec, dry_run, filter, output_format, no_cache) do
     with :ok <- validate_filter(filter, spec.stages) do
-      dispatch_pipeline(spec, dry_run, filter, output_format)
+      dispatch_pipeline(spec, dry_run, filter, output_format, no_cache)
     end
   end
 
-  defp dispatch_pipeline(spec, true, filter, _output_format), do: dry_run_pipeline(spec, filter)
+  defp dispatch_pipeline(spec, true, filter, _output_format, _no_cache),
+    do: dry_run_pipeline(spec, filter)
 
-  defp dispatch_pipeline(spec, _, filter, output_format),
-    do: execute_pipeline(spec, filter, output_format)
+  defp dispatch_pipeline(spec, _, filter, output_format, no_cache),
+    do: execute_pipeline(spec, filter, output_format, no_cache)
 
   defp handle_error(reason) do
     print_error(reason)
@@ -232,7 +237,8 @@ defmodule Mix.Tasks.TinyCi.Run do
   defp execute_pipeline(
          %TinyCI.PipelineSpec{stages: stages, hooks: hooks, root: root, env: pipeline_env},
          filter,
-         :json
+         :json,
+         no_cache
        ) do
     context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
 
@@ -240,7 +246,8 @@ defmodule Mix.Tasks.TinyCi.Run do
       Executor.run_pipeline(stages, context,
         filter: filter,
         output: :buffered,
-        listener: Listener.Silent
+        listener: Listener.Silent,
+        no_cache: no_cache
       )
 
     stage_results = extract_stage_results(pipeline_result)
@@ -257,11 +264,12 @@ defmodule Mix.Tasks.TinyCi.Run do
   defp execute_pipeline(
          %TinyCI.PipelineSpec{stages: stages, hooks: hooks, root: root, env: pipeline_env},
          filter,
-         :human
+         :human,
+         no_cache
        ) do
     context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
 
-    case Executor.run_pipeline(stages, context, filter: filter) do
+    case Executor.run_pipeline(stages, context, filter: filter, no_cache: no_cache) do
       {:ok, stage_results} ->
         Reporter.print_summary(stage_results)
         Hooks.run_hooks(hooks, :on_success, context)

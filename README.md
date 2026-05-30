@@ -45,6 +45,7 @@ mix tiny_ci.run [pipeline] [options]
 | `--list` | | List all available pipelines in `.tiny_ci/` |
 | `--filter STAGES` | | Run only the named stage(s) — see below |
 | `--output FORMAT` | | Output format: `json` for machine-readable output |
+| `--no-cache` | | Bypass all cache lookups for this run |
 
 The optional `pipeline` argument selects a named pipeline from `.tiny_ci/`:
 
@@ -392,6 +393,32 @@ end
 
 Relative paths are resolved from the directory containing the pipeline file. Absolute paths are used as-is. If the directory does not exist, the step fails immediately with a clear error before any command is run. `--dry-run` shows the resolved path for each step.
 
+### Dependency Caching
+
+The `cache:` option skips a step and restores its output directories when the nominated key file (e.g. `mix.lock`) has not changed since the last run. On the first run (cache miss) the step executes normally and its output is saved; subsequent runs with the same key are served from cache.
+
+```elixir
+stage :install do
+  # Skip `mix deps.get` when mix.lock hasn't changed
+  step :deps, cmd: "mix deps.get",
+    cache: [paths: ["deps", "_build"], key: "mix.lock"]
+end
+```
+
+- `paths:` — list of directories/files to cache and restore (relative to step working dir or project root)
+- `key:` — path to the file whose SHA-256 hash is used as the cache key (relative to project root)
+- Cache is stored at `~/.cache/tiny_ci/<project_id>/<key_hash>/`
+- A cache hit restores the directories **before** the step runs and skips the command; the reporter shows `[cache hit]`
+- A cache miss runs the step and saves the directories afterward; the reporter shows `[cache miss]`
+- `--dry-run` shows `[cache: key=mix.lock, paths=[deps, _build]]` in the step plan
+- `--no-cache` bypasses all cache lookups for the current run
+- `mix tiny_ci.cache clean` removes all cache entries for the current project:
+
+```bash
+mix tiny_ci.cache clean
+mix tiny_ci.cache clean --root /path/to/project
+```
+
 ### Step Retries
 
 The `retry:` option retries a failed step automatically, useful for flaky network calls, intermittent package downloads, or external service timeouts.
@@ -604,7 +631,7 @@ Pipeline files are validated against an allowlist of permitted constructs before
 
 - `name`, `stage`, `step`, `on_success`, `on_failure`, `set`
 - Stage options: `:mode`, `:needs`, `:when`, `:working_dir`, `:matrix`, `:max_parallel`, `:allow_failure`
-- Step options: `:cmd`, `:module`, `:timeout`, `:env`, `:allow_failure`, `:when`, `:working_dir`, `:retry`, `:retry_delay`
+- Step options: `:cmd`, `:module`, `:timeout`, `:env`, `:allow_failure`, `:when`, `:working_dir`, `:retry`, `:retry_delay`, `:cache`
 - Condition expressions: `branch()`, `env/1`, `file_changed?/1`, `==`, `!=`, `and`, `or`, `not`, `if/else`
 
 Constructs outside this list (e.g. `defmodule`, `System.cmd`, `File.read`) are
@@ -750,10 +777,10 @@ mix credo                          # static analysis
 - **Stage dependencies (DAG)** — `needs:` for fan-out/fan-in topologies with parallel independent stages, transitive skip propagation, and cycle detection at parse time
 - **Matrix builds** — `matrix:` option for cartesian-product parallel stage runs with env var injection, `max_parallel:` concurrency cap, and `allow_failure:` for partial tolerance
 - **Event structs** — 14 typed event structs covering every execution boundary (pipeline, stage, step, matrix, hooks), each with `run_id`, `timestamp`, and `Jason.Encoder` support
+- **Dependency caching** — `cache: [paths: [...], key: "file"]` skips steps on hash-keyed hits, stores at `~/.cache/tiny_ci/`, `--no-cache` flag, `mix tiny_ci.cache clean` to purge
 
 ### Up Next
 
 - **Secrets management** — `secret "MY_KEY"` reading from env or a local secrets file, with value masking in output
-- **Dependency caching** — skip steps when input files haven't changed, keyed by file hash
 - **Artifact persistence** — declare build outputs that downstream stages can consume
 - **Watch mode** — `mix tiny_ci.run --watch` to re-run on file changes

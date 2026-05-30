@@ -1700,4 +1700,125 @@ defmodule TinyCI.ExecutorTest do
       assert length(results) == 1
     end
   end
+
+  describe "dependency caching" do
+    setup do
+      tmp = System.tmp_dir!() |> Path.join("tiny_ci_exec_cache_#{:rand.uniform(999_999)}")
+      File.mkdir_p!(tmp)
+      Application.put_env(:tiny_ci, :cache_base_dir, Path.join(tmp, "cache"))
+
+      root = Path.join(tmp, "project")
+      File.mkdir_p!(root)
+      File.write!(Path.join(root, "mix.lock"), "# lockfile")
+
+      on_exit(fn -> File.rm_rf!(tmp) end)
+      {:ok, root: root}
+    end
+
+    test "cache miss: runs step and saves output dirs", %{root: root} do
+      output_dir = Path.join(root, "deps")
+
+      stage = %Stage{
+        name: :install,
+        mode: :serial,
+        steps: [
+          %Step{
+            name: :deps,
+            cmd: "mkdir -p #{output_dir}",
+            cache: %{paths: ["deps"], key: "mix.lock"}
+          }
+        ]
+      }
+
+      ctx = %{root: root, store: %{}, no_cache: false}
+      result = Executor.execute(stage, ctx)
+
+      assert result.status == :passed
+      [step_result] = result.step_results
+      assert step_result.cache_status == :miss
+
+      assert TinyCI.Cache.hit?(
+               root,
+               elem(TinyCI.Cache.compute_key(Path.join(root, "mix.lock")), 1),
+               ["deps"]
+             )
+    end
+
+    test "cache hit: restores dirs and skips step", %{root: root} do
+      {:ok, key} = TinyCI.Cache.compute_key(Path.join(root, "mix.lock"))
+      cached_file = Path.join([TinyCI.Cache.cache_entry_dir(root, key), "deps", "marker.txt"])
+      File.mkdir_p!(Path.dirname(cached_file))
+      File.write!(cached_file, "cached content")
+
+      stage = %Stage{
+        name: :install,
+        mode: :serial,
+        steps: [
+          %Step{
+            name: :deps,
+            cmd: "false",
+            cache: %{paths: ["deps"], key: "mix.lock"}
+          }
+        ]
+      }
+
+      ctx = %{root: root, store: %{}, no_cache: false}
+      result = Executor.execute(stage, ctx)
+
+      assert result.status == :passed
+      [step_result] = result.step_results
+      assert step_result.cache_status == :hit
+      assert File.read!(Path.join(root, "deps/marker.txt")) == "cached content"
+    end
+
+    test "no_cache: bypasses cache lookup and runs step", %{root: root} do
+      {:ok, key} = TinyCI.Cache.compute_key(Path.join(root, "mix.lock"))
+      cached_file = Path.join([TinyCI.Cache.cache_entry_dir(root, key), "deps", "marker.txt"])
+      File.mkdir_p!(Path.dirname(cached_file))
+      File.write!(cached_file, "cached content")
+
+      stage = %Stage{
+        name: :install,
+        mode: :serial,
+        steps: [
+          %Step{
+            name: :deps,
+            cmd: "true",
+            cache: %{paths: ["deps"], key: "mix.lock"}
+          }
+        ]
+      }
+
+      ctx = %{root: root, store: %{}, no_cache: true}
+      result = Executor.execute(stage, ctx)
+
+      assert result.status == :passed
+      [step_result] = result.step_results
+      assert step_result.cache_status == nil
+    end
+
+    test "failed step does not save to cache", %{root: root} do
+      stage = %Stage{
+        name: :install,
+        mode: :serial,
+        steps: [
+          %Step{
+            name: :deps,
+            cmd: "false",
+            cache: %{paths: ["deps"], key: "mix.lock"}
+          }
+        ]
+      }
+
+      ctx = %{root: root, store: %{}, no_cache: false}
+      result = Executor.execute(stage, ctx)
+
+      assert result.status == :failed
+      [step_result] = result.step_results
+      assert step_result.cache_status == :miss
+
+      {:ok, key} = TinyCI.Cache.compute_key(Path.join(root, "mix.lock"))
+      refute TinyCI.Cache.hit?(root, key, ["deps"])
+    end
+  end
 end

@@ -271,8 +271,38 @@ defmodule TinyCI.DSL.Validator do
       {:retry_delay, _} ->
         ["Step :retry_delay must be a non-negative integer (milliseconds)"]
 
+      {:cache, spec} when is_list(spec) ->
+        validate_cache_spec(spec)
+
+      {:cache, _} ->
+        [
+          "Step :cache must be a keyword list, e.g. cache: [paths: [\"deps\"], key: \"mix.lock\"]"
+        ]
+
       {key, _} ->
         ["Unknown step option: :#{key}"]
+    end)
+  end
+
+  defp validate_cache_spec(spec) do
+    Enum.flat_map(spec, fn
+      {:paths, paths} when is_list(paths) ->
+        Enum.flat_map(paths, fn
+          p when is_binary(p) -> []
+          _ -> ["cache :paths entries must be string literals"]
+        end)
+
+      {:paths, _} ->
+        ["cache :paths must be a list of string paths"]
+
+      {:key, key} when is_binary(key) ->
+        []
+
+      {:key, _} ->
+        ["cache :key must be a string file path, e.g. key: \"mix.lock\""]
+
+      {k, _} ->
+        ["Unknown cache option: :#{k}"]
     end)
   end
 

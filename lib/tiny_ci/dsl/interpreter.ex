@@ -182,6 +182,7 @@ defmodule TinyCI.DSL.Interpreter do
       working_dir: Keyword.get(opts, :working_dir),
       retry: Keyword.get(opts, :retry),
       retry_delay: Keyword.get(opts, :retry_delay),
+      cache: resolve_cache(Keyword.get(opts, :cache)),
       config_block: build_config_block(block)
     }
   end
@@ -224,6 +225,12 @@ defmodule TinyCI.DSL.Interpreter do
 
   defp kwlist_to_env(kwlist) do
     Map.new(kwlist, fn {k, v} -> {Atom.to_string(k), v} end)
+  end
+
+  defp resolve_cache(nil), do: nil
+
+  defp resolve_cache(spec) when is_list(spec) do
+    %{paths: Keyword.get(spec, :paths, []), key: Keyword.get(spec, :key)}
   end
 
   defp resolve_module(nil), do: nil
