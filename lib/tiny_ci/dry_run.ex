@@ -151,6 +151,7 @@ defmodule TinyCI.DryRun do
       allow_failure_info = if step.allow_failure, do: " [allow_failure]", else: ""
       retry_info = format_retry_info(step.retry, step.retry_delay)
       cache_info = format_cache_info(step.cache)
+      artifact_info = format_artifact_info(step.artifact, context)
 
       wd_info =
         case resolve_working_dir(step.working_dir || stage_wd, root) do
@@ -159,7 +160,7 @@ defmodule TinyCI.DryRun do
         end
 
       IO.puts(
-        "    • :#{step.name} — #{type_info}#{timeout_info}#{allow_failure_info}#{retry_info}#{cache_info}#{wd_info}"
+        "    • :#{step.name} — #{type_info}#{timeout_info}#{allow_failure_info}#{retry_info}#{cache_info}#{artifact_info}#{wd_info}"
       )
     end
   end
@@ -195,6 +196,18 @@ defmodule TinyCI.DryRun do
   defp format_cache_info(%{paths: paths, key: key}) do
     paths_str = Enum.join(paths, ", ")
     " [cache: key=#{key}, paths=[#{paths_str}]]"
+  end
+
+  defp format_artifact_info(nil, _context), do: ""
+
+  defp format_artifact_info(%{name: name, paths: paths, required: required}, context) do
+    root = Map.get(context, :root, File.cwd!())
+    run_id = Map.get(context, :run_id, "<run_id>")
+    artifact_dir = TinyCI.Artifacts.run_artifacts_dir(root, run_id)
+    resolved = Path.join(artifact_dir, name)
+    required_str = if required, do: ", required", else: ""
+    paths_str = Enum.join(paths, ", ")
+    " [artifact: name=#{name}, paths=[#{paths_str}]#{required_str}, dest=#{resolved}]"
   end
 
   defp format_env(env) do

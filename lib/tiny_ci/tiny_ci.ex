@@ -27,7 +27,8 @@ defmodule TinyCI.Step do
           working_dir: String.t() | nil,
           retry: non_neg_integer() | nil,
           retry_delay: non_neg_integer() | nil,
-          cache: %{paths: [String.t()], key: String.t()} | nil
+          cache: %{paths: [String.t()], key: String.t()} | nil,
+          artifact: %{name: String.t(), paths: [String.t()], required: boolean()} | nil
         }
 
   defstruct name: nil,
@@ -43,7 +44,8 @@ defmodule TinyCI.Step do
             working_dir: nil,
             retry: nil,
             retry_delay: nil,
-            cache: nil
+            cache: nil,
+            artifact: nil
 end
 
 defmodule TinyCI.Stage do

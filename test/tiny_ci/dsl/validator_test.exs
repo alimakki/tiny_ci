@@ -377,6 +377,90 @@ defmodule TinyCI.DSL.ValidatorTest do
     end
   end
 
+  describe "artifact option on step" do
+    test "accepts valid artifact spec with name and paths" do
+      assert :ok =
+               validate("""
+               stage :build do
+                 step :compile, cmd: "mix release", artifact: [name: "release", paths: ["_build/prod/rel"]]
+               end
+               """)
+    end
+
+    test "accepts artifact spec with required: true" do
+      assert :ok =
+               validate("""
+               stage :build do
+                 step :compile, cmd: "mix release", artifact: [name: "build", paths: ["_build"], required: true]
+               end
+               """)
+    end
+
+    test "accepts artifact spec with required: false" do
+      assert :ok =
+               validate("""
+               stage :build do
+                 step :compile, cmd: "mix release", artifact: [name: "build", paths: ["_build"], required: false]
+               end
+               """)
+    end
+
+    test "rejects artifact with non-string name" do
+      assert {:error, violations} =
+               validate("""
+               stage :build do
+                 step :compile, cmd: "mix release", artifact: [name: :build, paths: ["_build"]]
+               end
+               """)
+
+      assert Enum.any?(violations, &String.contains?(&1, "name"))
+    end
+
+    test "rejects artifact with non-list paths" do
+      assert {:error, violations} =
+               validate("""
+               stage :build do
+                 step :compile, cmd: "mix release", artifact: [name: "build", paths: "_build"]
+               end
+               """)
+
+      assert Enum.any?(violations, &String.contains?(&1, "paths"))
+    end
+
+    test "rejects artifact with non-string path entries" do
+      assert {:error, violations} =
+               validate("""
+               stage :build do
+                 step :compile, cmd: "mix release", artifact: [name: "build", paths: [:_build]]
+               end
+               """)
+
+      assert Enum.any?(violations, &String.contains?(&1, "paths"))
+    end
+
+    test "rejects artifact with non-boolean required" do
+      assert {:error, violations} =
+               validate("""
+               stage :build do
+                 step :compile, cmd: "mix release", artifact: [name: "build", paths: ["_build"], required: :yes]
+               end
+               """)
+
+      assert Enum.any?(violations, &String.contains?(&1, "required"))
+    end
+
+    test "rejects artifact that is not a keyword list" do
+      assert {:error, violations} =
+               validate("""
+               stage :build do
+                 step :compile, cmd: "mix release", artifact: "build"
+               end
+               """)
+
+      assert Enum.any?(violations, &String.contains?(&1, "artifact"))
+    end
+  end
+
   describe "multiple violations" do
     test "returns all violations at once" do
       assert {:error, violations} =

@@ -57,7 +57,7 @@ defmodule Mix.Tasks.TinyCi.Run do
 
   use Mix.Task
 
-  alias TinyCI.{Discovery, DryRun, Executor, Hooks, Reporter, Results}
+  alias TinyCI.{Artifacts, Discovery, DryRun, Executor, Hooks, Reporter, Results}
   alias TinyCI.Listener
 
   @impl Mix.Task
@@ -73,7 +73,9 @@ defmodule Mix.Tasks.TinyCi.Run do
           list: :boolean,
           filter: :string,
           output: :string,
-          no_cache: :boolean
+          no_cache: :boolean,
+          artifacts_dir: :string,
+          list_artifacts: :boolean
         ],
         aliases: [f: :file, r: :root]
       )
@@ -83,10 +85,10 @@ defmodule Mix.Tasks.TinyCi.Run do
     filter = parse_filter(opts[:filter])
 
     result =
-      if opts[:list] do
-        list_available_pipelines(root)
-      else
-        run_or_error(opts, root, name, filter)
+      cond do
+        opts[:list] -> list_available_pipelines(root)
+        opts[:list_artifacts] -> list_artifacts(root, opts[:artifacts_dir])
+        true -> run_or_error(opts, root, name, filter)
       end
 
     maybe_halt(result)
@@ -163,7 +165,9 @@ defmodule Mix.Tasks.TinyCi.Run do
     with {:ok, output_format} <- parse_output_format(opts[:output]) do
       case resolve_pipeline(opts, root, name, output_format) do
         {:ok, spec} ->
-          run_with_filter(spec, opts[:dry_run], filter, output_format, opts[:no_cache] || false)
+          artifacts_dir = opts[:artifacts_dir]
+          no_cache = opts[:no_cache] || false
+          run_with_filter(spec, opts[:dry_run], filter, output_format, no_cache, artifacts_dir)
 
         {:error, reason} ->
           handle_error(reason)
@@ -171,17 +175,17 @@ defmodule Mix.Tasks.TinyCi.Run do
     end
   end
 
-  defp run_with_filter(spec, dry_run, filter, output_format, no_cache) do
+  defp run_with_filter(spec, dry_run, filter, output_format, no_cache, artifacts_dir) do
     with :ok <- validate_filter(filter, spec.stages) do
-      dispatch_pipeline(spec, dry_run, filter, output_format, no_cache)
+      dispatch_pipeline(spec, dry_run, filter, output_format, no_cache, artifacts_dir)
     end
   end
 
-  defp dispatch_pipeline(spec, true, filter, _output_format, _no_cache),
+  defp dispatch_pipeline(spec, true, filter, _output_format, _no_cache, _artifacts_dir),
     do: dry_run_pipeline(spec, filter)
 
-  defp dispatch_pipeline(spec, _, filter, output_format, no_cache),
-    do: execute_pipeline(spec, filter, output_format, no_cache)
+  defp dispatch_pipeline(spec, _, filter, output_format, no_cache, artifacts_dir),
+    do: execute_pipeline(spec, filter, output_format, no_cache, artifacts_dir)
 
   defp handle_error(reason) do
     print_error(reason)
@@ -238,7 +242,8 @@ defmodule Mix.Tasks.TinyCi.Run do
          %TinyCI.PipelineSpec{stages: stages, hooks: hooks, root: root, env: pipeline_env},
          filter,
          :json,
-         no_cache
+         no_cache,
+         artifacts_dir
        ) do
     context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
 
@@ -247,7 +252,8 @@ defmodule Mix.Tasks.TinyCi.Run do
         filter: filter,
         output: :buffered,
         listener: Listener.Silent,
-        no_cache: no_cache
+        no_cache: no_cache,
+        artifacts_dir: artifacts_dir
       )
 
     stage_results = extract_stage_results(pipeline_result)
@@ -265,11 +271,16 @@ defmodule Mix.Tasks.TinyCi.Run do
          %TinyCI.PipelineSpec{stages: stages, hooks: hooks, root: root, env: pipeline_env},
          filter,
          :human,
-         no_cache
+         no_cache,
+         artifacts_dir
        ) do
     context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
 
-    case Executor.run_pipeline(stages, context, filter: filter, no_cache: no_cache) do
+    case Executor.run_pipeline(stages, context,
+           filter: filter,
+           no_cache: no_cache,
+           artifacts_dir: artifacts_dir
+         ) do
       {:ok, stage_results} ->
         Reporter.print_summary(stage_results)
         Hooks.run_hooks(hooks, :on_success, context)
@@ -288,6 +299,31 @@ defmodule Mix.Tasks.TinyCi.Run do
 
         {:error, :pipeline_failed}
     end
+  end
+
+  defp list_artifacts(root, artifacts_dir_override) do
+    base_root = artifacts_dir_override || root
+
+    case Artifacts.list_runs(base_root) do
+      [] -> IO.puts("No artifacts found.")
+      runs -> print_last_run_artifacts(base_root, List.last(runs))
+    end
+
+    :ok
+  end
+
+  defp print_last_run_artifacts(base_root, {last_run_id, artifact_names}) do
+    IO.puts("Artifacts from last run (#{last_run_id}):")
+    print_artifact_names(base_root, last_run_id, artifact_names)
+  end
+
+  defp print_artifact_names(_base_root, _run_id, []) do
+    IO.puts("  (none)")
+  end
+
+  defp print_artifact_names(base_root, run_id, names) do
+    run_dir = Artifacts.run_artifacts_dir(base_root, run_id)
+    Enum.each(names, fn name -> IO.puts("  #{name}: #{Path.join(run_dir, name)}") end)
   end
 
   defp extract_stage_results({:ok, results}), do: results

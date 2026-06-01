@@ -1821,4 +1821,156 @@ defmodule TinyCI.ExecutorTest do
       refute TinyCI.Cache.hit?(root, key, ["deps"])
     end
   end
+
+  describe "artifact persistence" do
+    setup do
+      tmp = System.tmp_dir!() |> Path.join("tiny_ci_art_test_#{:rand.uniform(999_999)}")
+      File.mkdir_p!(tmp)
+      Application.put_env(:tiny_ci, :artifacts_base_dir, Path.join(tmp, "artifacts"))
+      on_exit(fn -> File.rm_rf!(tmp) end)
+      {:ok, tmp: tmp}
+    end
+
+    test "persists declared artifact path after step passes", %{tmp: tmp} do
+      src = Path.join(tmp, "project")
+      File.mkdir_p!(src)
+      File.write!(Path.join(src, "app.bin"), "binary")
+
+      artifacts_dir = Path.join(tmp, "run01")
+
+      stage = %Stage{
+        name: :build,
+        mode: :serial,
+        steps: [
+          %Step{
+            name: :compile,
+            cmd: "true",
+            artifact: %{name: "release", paths: ["app.bin"], required: false}
+          }
+        ]
+      }
+
+      ctx = %{root: src, store: %{}, no_cache: false, artifacts_dir: artifacts_dir}
+      result = Executor.execute(stage, ctx)
+
+      assert result.status == :passed
+      [step_result] = result.step_results
+      assert step_result.status == :passed
+      assert Map.has_key?(step_result.store_data, :artifact_release)
+      artifact_path = step_result.store_data[:artifact_release]
+      assert File.exists?(Path.join(artifact_path, "app.bin"))
+    end
+
+    test "injects artifact path into pipeline store for downstream steps", %{tmp: tmp} do
+      src = Path.join(tmp, "project")
+      File.mkdir_p!(src)
+      File.write!(Path.join(src, "output.txt"), "data")
+      artifacts_dir = Path.join(tmp, "run01")
+
+      stages = [
+        %Stage{
+          name: :build,
+          mode: :serial,
+          steps: [
+            %Step{
+              name: :compile,
+              cmd: "true",
+              artifact: %{name: "build", paths: ["output.txt"], required: false}
+            }
+          ]
+        },
+        %Stage{
+          name: :verify,
+          mode: :serial,
+          steps: [%Step{name: :check, cmd: "true"}]
+        }
+      ]
+
+      ctx = %{root: src, store: %{}, no_cache: false, artifacts_dir: artifacts_dir}
+      assert {:ok, [build_result, _verify_result]} = Executor.run_pipeline(stages, ctx)
+      [step] = build_result.step_results
+      assert Map.has_key?(step.store_data, :artifact_build)
+    end
+
+    test "missing optional path produces warning and continues", %{tmp: tmp} do
+      src = Path.join(tmp, "project")
+      File.mkdir_p!(src)
+      artifacts_dir = Path.join(tmp, "run01")
+
+      stage = %Stage{
+        name: :build,
+        mode: :serial,
+        steps: [
+          %Step{
+            name: :compile,
+            cmd: "true",
+            artifact: %{name: "release", paths: ["nonexistent.bin"], required: false}
+          }
+        ]
+      }
+
+      ctx = %{root: src, store: %{}, no_cache: false, artifacts_dir: artifacts_dir}
+
+      # Should not raise; step should still pass
+      result = Executor.execute(stage, ctx)
+      assert result.status == :passed
+    end
+
+    test "missing required path fails the step", %{tmp: tmp} do
+      src = Path.join(tmp, "project")
+      File.mkdir_p!(src)
+      artifacts_dir = Path.join(tmp, "run01")
+
+      stage = %Stage{
+        name: :build,
+        mode: :serial,
+        steps: [
+          %Step{
+            name: :compile,
+            cmd: "true",
+            artifact: %{name: "critical", paths: ["missing.bin"], required: true}
+          }
+        ]
+      }
+
+      ctx = %{root: src, store: %{}, no_cache: false, artifacts_dir: artifacts_dir}
+      result = Executor.execute(stage, ctx)
+      assert result.status == :failed
+    end
+
+    test "artifact is not persisted when step itself fails", %{tmp: tmp} do
+      src = Path.join(tmp, "project")
+      File.mkdir_p!(src)
+      File.write!(Path.join(src, "output.txt"), "data")
+      artifacts_dir = Path.join(tmp, "run01")
+
+      stage = %Stage{
+        name: :build,
+        mode: :serial,
+        steps: [
+          %Step{
+            name: :compile,
+            cmd: "false",
+            artifact: %{name: "release", paths: ["output.txt"], required: false}
+          }
+        ]
+      }
+
+      ctx = %{root: src, store: %{}, no_cache: false, artifacts_dir: artifacts_dir}
+      result = Executor.execute(stage, ctx)
+      assert result.status == :failed
+      [step_result] = result.step_results
+      refute File.exists?(Path.join(artifacts_dir, "release/output.txt"))
+      refute Map.has_key?(step_result.store_data, :artifact_release)
+    end
+
+    test "run_pipeline sets artifacts_dir in context automatically" do
+      stages = [
+        %Stage{name: :test, mode: :serial, steps: [%Step{name: :ok, cmd: "true"}]}
+      ]
+
+      ctx = %{branch: "main", commit: "abc1234", timestamp: DateTime.utc_now(), store: %{}}
+      assert {:ok, _} = Executor.run_pipeline(stages, ctx)
+    end
+  end
 end

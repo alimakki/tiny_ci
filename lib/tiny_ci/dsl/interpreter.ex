@@ -183,6 +183,7 @@ defmodule TinyCI.DSL.Interpreter do
       retry: Keyword.get(opts, :retry),
       retry_delay: Keyword.get(opts, :retry_delay),
       cache: resolve_cache(Keyword.get(opts, :cache)),
+      artifact: resolve_artifact(Keyword.get(opts, :artifact)),
       config_block: build_config_block(block)
     }
   end
@@ -231,6 +232,16 @@ defmodule TinyCI.DSL.Interpreter do
 
   defp resolve_cache(spec) when is_list(spec) do
     %{paths: Keyword.get(spec, :paths, []), key: Keyword.get(spec, :key)}
+  end
+
+  defp resolve_artifact(nil), do: nil
+
+  defp resolve_artifact(spec) when is_list(spec) do
+    %{
+      name: Keyword.fetch!(spec, :name),
+      paths: Keyword.get(spec, :paths, []),
+      required: Keyword.get(spec, :required, false)
+    }
   end
 
   defp resolve_module(nil), do: nil

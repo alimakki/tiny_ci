@@ -46,6 +46,8 @@ mix tiny_ci.run [pipeline] [options]
 | `--filter STAGES` | | Run only the named stage(s) — see below |
 | `--output FORMAT` | | Output format: `json` for machine-readable output |
 | `--no-cache` | | Bypass all cache lookups for this run |
+| `--artifacts-dir DIR` | | Override the base directory for artifact storage |
+| `--list-artifacts` | | Show artifacts from the most recent run and exit |
 
 The optional `pipeline` argument selects a named pipeline from `.tiny_ci/`:
 
@@ -419,6 +421,42 @@ mix tiny_ci.cache clean
 mix tiny_ci.cache clean --root /path/to/project
 ```
 
+### Artifact Persistence
+
+The `artifact:` option declares build outputs that a step produces. After the step completes successfully, the declared paths are copied to a per-run storage directory so they survive the build and can be inspected or referenced by downstream steps.
+
+```elixir
+stage :build, mode: :serial do
+  step :compile, cmd: "mix release",
+    artifact: [name: "release", paths: ["_build/prod/rel"]]
+end
+
+stage :package, mode: :serial do
+  # Access the artifact path from the store
+  step :bundle, module: MyApp.Package do
+    set :source, store(:artifact_release)
+  end
+end
+```
+
+- `name:` — string identifier for this artifact (used as the directory name and store key)
+- `paths:` — list of paths (relative to the step's working directory or project root) to copy
+- `required:` — when `true`, a missing path fails the step; when `false` (default) a warning is printed and the step still passes
+- Artifacts are stored at `~/.local/share/tiny_ci/artifacts/<project_id>/<run_id>/<name>/`
+- Each run gets an isolated subdirectory (`<YYYYMMDD_HHMMSS>_<commit7>`) so runs never overwrite each other
+- After a step with `artifact:` completes, the artifact's storage path is written to the pipeline store under the key `artifact_<name>` — downstream module steps can read it via `ctx.store.artifact_release` and shell steps can use `store(:artifact_release)` in their `env:`
+- `--dry-run` shows `[artifact: name=..., paths=[...], dest=...]` in the step plan
+- `--artifacts-dir DIR` overrides the base storage location for the current run
+- `mix tiny_ci.run --list-artifacts` lists artifacts from the most recent run
+
+```bash
+# Show artifacts from the last run
+mix tiny_ci.run --list-artifacts
+
+# Store artifacts in a custom directory
+mix tiny_ci.run --artifacts-dir /tmp/ci-artifacts
+```
+
 ### Step Retries
 
 The `retry:` option retries a failed step automatically, useful for flaky network calls, intermittent package downloads, or external service timeouts.
@@ -631,7 +669,7 @@ Pipeline files are validated against an allowlist of permitted constructs before
 
 - `name`, `stage`, `step`, `on_success`, `on_failure`, `set`
 - Stage options: `:mode`, `:needs`, `:when`, `:working_dir`, `:matrix`, `:max_parallel`, `:allow_failure`
-- Step options: `:cmd`, `:module`, `:timeout`, `:env`, `:allow_failure`, `:when`, `:working_dir`, `:retry`, `:retry_delay`, `:cache`
+- Step options: `:cmd`, `:module`, `:timeout`, `:env`, `:allow_failure`, `:when`, `:working_dir`, `:retry`, `:retry_delay`, `:cache`, `:artifact`
 - Condition expressions: `branch()`, `env/1`, `file_changed?/1`, `==`, `!=`, `and`, `or`, `not`, `if/else`
 
 Constructs outside this list (e.g. `defmodule`, `System.cmd`, `File.read`) are
@@ -778,9 +816,9 @@ mix credo                          # static analysis
 - **Matrix builds** — `matrix:` option for cartesian-product parallel stage runs with env var injection, `max_parallel:` concurrency cap, and `allow_failure:` for partial tolerance
 - **Event structs** — 14 typed event structs covering every execution boundary (pipeline, stage, step, matrix, hooks), each with `run_id`, `timestamp`, and `Jason.Encoder` support
 - **Dependency caching** — `cache: [paths: [...], key: "file"]` skips steps on hash-keyed hits, stores at `~/.cache/tiny_ci/`, `--no-cache` flag, `mix tiny_ci.cache clean` to purge
+- **Artifact persistence** — `artifact: [name: "build", paths: [...]]` copies declared outputs to `~/.local/share/tiny_ci/artifacts/<project>/<run_id>/`, injects path into pipeline store, `required: true` fails the step if paths are absent, `--artifacts-dir` override, `--list-artifacts` to inspect
 
 ### Up Next
 
 - **Secrets management** — `secret "MY_KEY"` reading from env or a local secrets file, with value masking in output
-- **Artifact persistence** — declare build outputs that downstream stages can consume
 - **Watch mode** — `mix tiny_ci.run --watch` to re-run on file changes

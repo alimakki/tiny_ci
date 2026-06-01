@@ -279,6 +279,14 @@ defmodule TinyCI.DSL.Validator do
           "Step :cache must be a keyword list, e.g. cache: [paths: [\"deps\"], key: \"mix.lock\"]"
         ]
 
+      {:artifact, spec} when is_list(spec) ->
+        validate_artifact_spec(spec)
+
+      {:artifact, _} ->
+        [
+          "Step :artifact must be a keyword list, e.g. artifact: [name: \"build\", paths: [\"_build\"]]"
+        ]
+
       {key, _} ->
         ["Unknown step option: :#{key}"]
     end)
@@ -303,6 +311,34 @@ defmodule TinyCI.DSL.Validator do
 
       {k, _} ->
         ["Unknown cache option: :#{k}"]
+    end)
+  end
+
+  defp validate_artifact_spec(spec) do
+    Enum.flat_map(spec, fn
+      {:name, name} when is_binary(name) ->
+        []
+
+      {:name, _} ->
+        ["artifact :name must be a string literal, e.g. name: \"build\""]
+
+      {:paths, paths} when is_list(paths) ->
+        Enum.flat_map(paths, fn
+          p when is_binary(p) -> []
+          _ -> ["artifact :paths entries must be string literals"]
+        end)
+
+      {:paths, _} ->
+        ["artifact :paths must be a list of string paths"]
+
+      {:required, v} when is_boolean(v) ->
+        []
+
+      {:required, _} ->
+        ["artifact :required must be true or false"]
+
+      {k, _} ->
+        ["Unknown artifact option: :#{k}"]
     end)
   end
 

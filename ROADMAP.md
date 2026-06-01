@@ -147,12 +147,12 @@ As a pipeline author, I want to declare build artifacts produced by one stage so
 - `mix tiny_ci.run --list-artifacts` shows artifacts from the last run.
 
 **Acceptance criteria**
-- [ ] `artifact "build", paths: ["_build/prod/rel"]` is valid DSL
-- [ ] Downstream stage step receives artifact path via store or injected env var
-- [ ] Artifact is copied/linked to `<artifacts_dir>/<run_id>/<name>/`
-- [ ] Missing path with `required: true` fails the step
-- [ ] Missing path without `required:` emits a warning and continues
-- [ ] `--dry-run` shows artifact declarations and their resolved storage paths
+- [x] `artifact "build", paths: ["_build/prod/rel"]` is valid DSL
+- [x] Downstream stage step receives artifact path via store or injected env var
+- [x] Artifact is copied/linked to `<artifacts_dir>/<run_id>/<name>/`
+- [x] Missing path with `required: true` fails the step
+- [x] Missing path without `required:` emits a warning and continues
+- [x] `--dry-run` shows artifact declarations and their resolved storage paths
 
 ---
 

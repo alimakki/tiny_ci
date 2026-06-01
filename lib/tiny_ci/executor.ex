@@ -27,7 +27,7 @@ defmodule TinyCI.Executor do
   all progress output (e.g., when serializing results to JSON).
   """
 
-  alias TinyCI.{Cache, DAG, Matrix, MatrixRunResult, Output, StageResult, StepResult}
+  alias TinyCI.{Artifacts, Cache, DAG, Matrix, MatrixRunResult, Output, StageResult, StepResult}
 
   @doc """
   Starts the task supervisor used for parallel step execution.
@@ -70,6 +70,7 @@ defmodule TinyCI.Executor do
     ctx = context || TinyCI.Context.build()
     ctx = Map.put_new(ctx, :store, %{})
     ctx = Map.put(ctx, :no_cache, opts[:no_cache] || false)
+    ctx = put_artifacts_dir(ctx, opts)
     output_mode = Output.resolve_mode(opts[:output] || :auto)
     listener = opts[:listener] || TinyCI.Listener.Human
     filtered = apply_filter(stages, opts[:filter])
@@ -79,6 +80,21 @@ defmodule TinyCI.Executor do
     else
       run_pipeline_sequential(filtered, ctx, output_mode, listener)
     end
+  end
+
+  defp put_artifacts_dir(ctx, opts) do
+    root = Map.get(ctx, :root, File.cwd!())
+    run_id = Artifacts.generate_run_id(ctx)
+
+    artifacts_dir =
+      case opts[:artifacts_dir] do
+        nil -> Artifacts.run_artifacts_dir(root, run_id)
+        base -> Path.join(base, run_id)
+      end
+
+    ctx
+    |> Map.put(:run_id, run_id)
+    |> Map.put(:artifacts_dir, artifacts_dir)
   end
 
   defp apply_filter(stages, nil), do: stages
@@ -365,7 +381,49 @@ defmodule TinyCI.Executor do
     if skip_step?(step, context) do
       %StepResult{name: step.name, status: :skipped, duration_ms: 0}
     else
-      execute_with_cache(step, context, output_mode, prefix, working_dir, listener)
+      step
+      |> execute_with_cache(context, output_mode, prefix, working_dir, listener)
+      |> persist_step_artifacts(step, context, working_dir)
+    end
+  end
+
+  defp persist_step_artifacts(result, %{artifact: nil}, _ctx, _wd), do: result
+
+  defp persist_step_artifacts(%{status: status} = result, _, _, _) when status != :passed,
+    do: result
+
+  defp persist_step_artifacts(result, %{artifact: artifact}, ctx, working_dir) do
+    artifacts_dir = Map.get(ctx, :artifacts_dir)
+
+    if is_nil(artifacts_dir) do
+      result
+    else
+      src_base = working_dir || Map.get(ctx, :root, File.cwd!())
+
+      case Artifacts.persist(artifact, src_base, artifacts_dir) do
+        {:ok, artifact_path} ->
+          store_key = String.to_atom("artifact_#{artifact.name}")
+          %{result | store_data: Map.put(result.store_data, store_key, artifact_path)}
+
+        {:warning, artifact_path, missing} ->
+          IO.puts(:stderr, [
+            IO.ANSI.yellow(),
+            "Warning: artifact \"#{artifact.name}\" missing optional paths: #{Enum.join(missing, ", ")}",
+            IO.ANSI.reset()
+          ])
+
+          store_key = String.to_atom("artifact_#{artifact.name}")
+          %{result | store_data: Map.put(result.store_data, store_key, artifact_path)}
+
+        {:error, {:missing_required, name, missing}} ->
+          IO.puts(:stderr, [
+            IO.ANSI.red(),
+            "Error: required artifact \"#{name}\" paths not found: #{Enum.join(missing, ", ")}",
+            IO.ANSI.reset()
+          ])
+
+          %{result | status: :failed}
+      end
     end
   end
 

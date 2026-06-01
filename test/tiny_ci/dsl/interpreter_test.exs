@@ -419,6 +419,53 @@ defmodule TinyCI.DSL.InterpreterTest do
     end
   end
 
+  describe "artifact option parsing" do
+    test "step with artifact is parsed into a map on the Step struct" do
+      path =
+        write_pipeline("artifact_step", """
+        stage :build do
+          step :compile, cmd: "mix release", artifact: [name: "release", paths: ["_build/prod/rel"]]
+        end
+        """)
+
+      {:ok, spec} = Interpreter.interpret_file(path)
+      [stage] = spec.stages
+      [step] = stage.steps
+
+      assert %{name: "release", paths: ["_build/prod/rel"], required: false} = step.artifact
+    end
+
+    test "step with artifact required: true preserves the flag" do
+      path =
+        write_pipeline("artifact_required", """
+        stage :build do
+          step :compile, cmd: "mix release", artifact: [name: "build", paths: ["_build"], required: true]
+        end
+        """)
+
+      {:ok, spec} = Interpreter.interpret_file(path)
+      [stage] = spec.stages
+      [step] = stage.steps
+
+      assert step.artifact.required == true
+    end
+
+    test "step without artifact has nil artifact field" do
+      path =
+        write_pipeline("no_artifact_step", """
+        stage :test do
+          step :unit, cmd: "mix test"
+        end
+        """)
+
+      {:ok, spec} = Interpreter.interpret_file(path)
+      [stage] = spec.stages
+      [step] = stage.steps
+
+      assert step.artifact == nil
+    end
+  end
+
   defmodule DummyStep do
     @moduledoc false
     def execute(_config, _ctx), do: :ok

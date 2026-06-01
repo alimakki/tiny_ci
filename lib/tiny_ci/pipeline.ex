@@ -49,7 +49,18 @@ defmodule TinyCI.Pipeline do
       env: Keyword.get(step_opts, :env, %{}),
       config_block: step_opts[:config_block],
       timeout: step_opts[:timeout],
-      allow_failure: Keyword.get(step_opts, :allow_failure, false)
+      allow_failure: Keyword.get(step_opts, :allow_failure, false),
+      artifact: normalize_artifact(step_opts[:artifact])
+    }
+  end
+
+  defp normalize_artifact(nil), do: nil
+
+  defp normalize_artifact(spec) when is_list(spec) do
+    %{
+      name: Keyword.fetch!(spec, :name),
+      paths: Keyword.get(spec, :paths, []),
+      required: Keyword.get(spec, :required, false)
     }
   end
 
