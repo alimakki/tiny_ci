@@ -26,7 +26,7 @@ defmodule TinyCi.MixProject do
       {:jason, "~> 1.4"},
       {:tidewave, "~> 0.5", only: :dev},
       {:bandit, "~> 1.0", only: :dev},
-      {:credo, "~> 1.7", only: [:dev, :test], runtime: false}
+      {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false}
     ]
   end
 
