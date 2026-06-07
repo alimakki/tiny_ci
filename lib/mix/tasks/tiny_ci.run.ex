@@ -20,6 +20,8 @@ defmodule Mix.Tasks.TinyCi.Run do
     * `--list` — list all available pipelines in `.tiny_ci/` and exit
     * `--filter STAGES` — run only the named stage(s), comma-separated
     * `--output FORMAT` — output format: `json` for machine-readable output
+    * `--events FILE` — write the structured run event stream as NDJSON to `FILE`
+      (one JSON object per line); use `-` to write to stdout. See `docs/events.md`.
 
   ## Pipeline Selection
 
@@ -49,6 +51,10 @@ defmodule Mix.Tasks.TinyCi.Run do
       # Machine-readable JSON output
       mix tiny_ci.run --output json
 
+      # Write the structured event stream as NDJSON
+      mix tiny_ci.run --events run.ndjson
+      mix tiny_ci.run --events -            # to stdout
+
   ## Exit Codes
 
     * `0` — pipeline completed successfully (or `--list` / `--dry-run`)
@@ -75,7 +81,8 @@ defmodule Mix.Tasks.TinyCi.Run do
           output: :string,
           no_cache: :boolean,
           artifacts_dir: :string,
-          list_artifacts: :boolean
+          list_artifacts: :boolean,
+          events: :string
         ],
         aliases: [f: :file, r: :root]
       )
@@ -165,9 +172,13 @@ defmodule Mix.Tasks.TinyCi.Run do
     with {:ok, output_format} <- parse_output_format(opts[:output]) do
       case resolve_pipeline(opts, root, name, output_format) do
         {:ok, spec} ->
-          artifacts_dir = opts[:artifacts_dir]
-          no_cache = opts[:no_cache] || false
-          run_with_filter(spec, opts[:dry_run], filter, output_format, no_cache, artifacts_dir)
+          run_opts = [
+            no_cache: opts[:no_cache] || false,
+            artifacts_dir: opts[:artifacts_dir],
+            events: opts[:events]
+          ]
+
+          run_with_filter(spec, opts[:dry_run], filter, output_format, run_opts)
 
         {:error, reason} ->
           handle_error(reason)
@@ -175,17 +186,17 @@ defmodule Mix.Tasks.TinyCi.Run do
     end
   end
 
-  defp run_with_filter(spec, dry_run, filter, output_format, no_cache, artifacts_dir) do
+  defp run_with_filter(spec, dry_run, filter, output_format, run_opts) do
     with :ok <- validate_filter(filter, spec.stages) do
-      dispatch_pipeline(spec, dry_run, filter, output_format, no_cache, artifacts_dir)
+      dispatch_pipeline(spec, dry_run, filter, output_format, run_opts)
     end
   end
 
-  defp dispatch_pipeline(spec, true, filter, _output_format, _no_cache, _artifacts_dir),
+  defp dispatch_pipeline(spec, true, filter, _output_format, _run_opts),
     do: dry_run_pipeline(spec, filter)
 
-  defp dispatch_pipeline(spec, _, filter, output_format, no_cache, artifacts_dir),
-    do: execute_pipeline(spec, filter, output_format, no_cache, artifacts_dir)
+  defp dispatch_pipeline(spec, _, filter, output_format, run_opts),
+    do: execute_pipeline(spec, filter, output_format, run_opts)
 
   defp handle_error(reason) do
     print_error(reason)
@@ -239,21 +250,29 @@ defmodule Mix.Tasks.TinyCi.Run do
   end
 
   defp execute_pipeline(
-         %TinyCI.PipelineSpec{stages: stages, hooks: hooks, root: root, env: pipeline_env},
+         %TinyCI.PipelineSpec{
+           name: name,
+           stages: stages,
+           hooks: hooks,
+           root: root,
+           env: pipeline_env
+         },
          filter,
          :json,
-         no_cache,
-         artifacts_dir
+         run_opts
        ) do
     context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
 
     pipeline_result =
-      Executor.run_pipeline(stages, context,
-        filter: filter,
-        output: :buffered,
-        listener: Listener.Silent,
-        no_cache: no_cache,
-        artifacts_dir: artifacts_dir
+      Executor.run_pipeline(
+        stages,
+        context,
+        Keyword.merge(run_opts,
+          filter: filter,
+          output: :buffered,
+          listener: Listener.Silent,
+          pipeline_name: name
+        )
       )
 
     stage_results = extract_stage_results(pipeline_result)
@@ -268,19 +287,22 @@ defmodule Mix.Tasks.TinyCi.Run do
   end
 
   defp execute_pipeline(
-         %TinyCI.PipelineSpec{stages: stages, hooks: hooks, root: root, env: pipeline_env},
+         %TinyCI.PipelineSpec{
+           name: name,
+           stages: stages,
+           hooks: hooks,
+           root: root,
+           env: pipeline_env
+         },
          filter,
          :human,
-         no_cache,
-         artifacts_dir
+         run_opts
        ) do
     context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
 
-    case Executor.run_pipeline(stages, context,
-           filter: filter,
-           no_cache: no_cache,
-           artifacts_dir: artifacts_dir
-         ) do
+    run_opts = Keyword.merge(run_opts, filter: filter, pipeline_name: name)
+
+    case Executor.run_pipeline(stages, context, run_opts) do
       {:ok, stage_results} ->
         Reporter.print_summary(stage_results)
         Hooks.run_hooks(hooks, :on_success, context)

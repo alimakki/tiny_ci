@@ -13,6 +13,80 @@ defmodule TinyCI.Events do
   directly. Atoms are encoded as strings; `DateTime` values are encoded as
   ISO 8601 strings.
   """
+
+  @schema_version 1
+
+  @doc """
+  The current event-stream schema version, emitted on the `run_started` line.
+  Bump this when the event schema changes in a backwards-incompatible way.
+  """
+  @spec schema_version() :: pos_integer()
+  def schema_version, do: @schema_version
+
+  @doc """
+  Emits an event to the run's dispatcher, if one is present on the context.
+
+  The dispatcher pid is carried on the context under `:events` (set by the
+  executor at run start). When absent — e.g. a unit that builds events without a
+  running dispatcher — this is a no-op, so emitting is always safe.
+  """
+  @spec emit(map(), t()) :: :ok
+  def emit(ctx, event) do
+    case Map.get(ctx, :events) do
+      pid when is_pid(pid) -> TinyCI.Events.Dispatcher.emit(pid, event)
+      _ -> :ok
+    end
+  end
+
+  @type t ::
+          TinyCI.Events.PipelineStarted.t()
+          | TinyCI.Events.PipelineCompleted.t()
+          | TinyCI.Events.StageStarted.t()
+          | TinyCI.Events.StageSkipped.t()
+          | TinyCI.Events.StageCompleted.t()
+          | TinyCI.Events.StepStarted.t()
+          | TinyCI.Events.StepSkipped.t()
+          | TinyCI.Events.StepOutputLine.t()
+          | TinyCI.Events.StepRetrying.t()
+          | TinyCI.Events.StepCompleted.t()
+          | TinyCI.Events.MatrixRunStarted.t()
+          | TinyCI.Events.MatrixRunCompleted.t()
+          | TinyCI.Events.HookStarted.t()
+          | TinyCI.Events.HookCompleted.t()
+          | TinyCI.Events.CacheLookup.t()
+
+  @doc """
+  Returns the stable wire `type` string for an event struct.
+
+  These strings form the documented `event_type` vocabulary used in the NDJSON
+  event stream (see `docs/events.md`). The struct module is the type in Elixir;
+  this maps it to the cross-language discriminator emitted on each NDJSON line.
+
+  ## Examples
+
+      iex> TinyCI.Events.type(%TinyCI.Events.StageStarted{
+      ...>   run_id: "r", timestamp: DateTime.utc_now(), stage: :build
+      ...> })
+      "stage_started"
+  """
+  # Matches on the `__struct__` key (rather than `%Mod{}`) so this function can
+  # live at the top of the file, ahead of the struct definitions below.
+  @spec type(t()) :: String.t()
+  def type(%{__struct__: TinyCI.Events.PipelineStarted}), do: "run_started"
+  def type(%{__struct__: TinyCI.Events.PipelineCompleted}), do: "run_finished"
+  def type(%{__struct__: TinyCI.Events.StageStarted}), do: "stage_started"
+  def type(%{__struct__: TinyCI.Events.StageSkipped}), do: "stage_skipped"
+  def type(%{__struct__: TinyCI.Events.StageCompleted}), do: "stage_finished"
+  def type(%{__struct__: TinyCI.Events.StepStarted}), do: "step_started"
+  def type(%{__struct__: TinyCI.Events.StepSkipped}), do: "step_skipped"
+  def type(%{__struct__: TinyCI.Events.StepOutputLine}), do: "step_output"
+  def type(%{__struct__: TinyCI.Events.StepRetrying}), do: "step_retrying"
+  def type(%{__struct__: TinyCI.Events.StepCompleted}), do: "step_finished"
+  def type(%{__struct__: TinyCI.Events.MatrixRunStarted}), do: "matrix_run_started"
+  def type(%{__struct__: TinyCI.Events.MatrixRunCompleted}), do: "matrix_run_finished"
+  def type(%{__struct__: TinyCI.Events.HookStarted}), do: "hook_started"
+  def type(%{__struct__: TinyCI.Events.HookCompleted}), do: "hook_finished"
+  def type(%{__struct__: TinyCI.Events.CacheLookup}), do: "cache_lookup"
 end
 
 defmodule TinyCI.Events.PipelineStarted do
@@ -212,17 +286,25 @@ defmodule TinyCI.Events.StepSkipped do
 end
 
 defmodule TinyCI.Events.StepOutputLine do
-  @moduledoc "Emitted for each line of step output in streaming mode."
+  @moduledoc """
+  Emitted for a line of step output.
+
+  The `stream` field distinguishes `:stdout` from `:stderr`. The executor
+  currently merges stderr into stdout when running commands, so in practice
+  every line is `:stdout` today; the field exists so consumers can rely on it
+  once the streams are separated.
+  """
 
   @enforce_keys [:run_id, :timestamp, :stage, :step, :line]
-  defstruct [:run_id, :timestamp, :stage, :step, :line]
+  defstruct [:run_id, :timestamp, :stage, :step, :line, stream: :stdout]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
           timestamp: DateTime.t(),
           stage: atom(),
           step: atom(),
-          line: String.t()
+          line: String.t(),
+          stream: :stdout | :stderr
         }
 
   defimpl Jason.Encoder do
@@ -233,7 +315,8 @@ defmodule TinyCI.Events.StepOutputLine do
           "timestamp" => DateTime.to_iso8601(event.timestamp),
           "stage" => to_string(event.stage),
           "step" => to_string(event.step),
-          "line" => event.line
+          "line" => event.line,
+          "stream" => to_string(event.stream)
         },
         opts
       )
@@ -272,10 +355,16 @@ defmodule TinyCI.Events.StepRetrying do
 end
 
 defmodule TinyCI.Events.StepCompleted do
-  @moduledoc "Emitted when a step finishes (passed or failed)."
+  @moduledoc """
+  Emitted when a step finishes (passed or failed).
+
+  Carries the step's captured `output` so console/buffered consumers can render
+  it without reaching into executor internals. May be empty when output was
+  streamed live.
+  """
 
   @enforce_keys [:run_id, :timestamp, :stage, :step, :status, :duration_ms]
-  defstruct [:run_id, :timestamp, :stage, :step, :status, :duration_ms]
+  defstruct [:run_id, :timestamp, :stage, :step, :status, :duration_ms, output: ""]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
@@ -283,7 +372,8 @@ defmodule TinyCI.Events.StepCompleted do
           stage: atom(),
           step: atom(),
           status: :passed | :failed,
-          duration_ms: non_neg_integer()
+          duration_ms: non_neg_integer(),
+          output: String.t()
         }
 
   defimpl Jason.Encoder do
@@ -295,7 +385,8 @@ defmodule TinyCI.Events.StepCompleted do
           "stage" => to_string(event.stage),
           "step" => to_string(event.step),
           "status" => to_string(event.status),
-          "duration_ms" => event.duration_ms
+          "duration_ms" => event.duration_ms,
+          "output" => event.output
         },
         opts
       )
@@ -416,5 +507,40 @@ defmodule TinyCI.Events.HookCompleted do
         opts
       )
     end
+  end
+end
+
+defmodule TinyCI.Events.CacheLookup do
+  @moduledoc "Emitted when a cached step resolves its cache key (hit or miss)."
+
+  @enforce_keys [:run_id, :timestamp, :stage, :step, :key, :result]
+  defstruct [:run_id, :timestamp, :stage, :step, :key, :result]
+
+  @type t :: %__MODULE__{
+          run_id: String.t(),
+          timestamp: DateTime.t(),
+          stage: atom() | nil,
+          step: atom(),
+          key: String.t(),
+          result: :hit | :miss
+        }
+
+  defimpl Jason.Encoder do
+    def encode(event, opts) do
+      Jason.Encode.map(
+        %{
+          "run_id" => event.run_id,
+          "timestamp" => DateTime.to_iso8601(event.timestamp),
+          "stage" => stage_to_string(event.stage),
+          "step" => to_string(event.step),
+          "key" => event.key,
+          "result" => to_string(event.result)
+        },
+        opts
+      )
+    end
+
+    defp stage_to_string(nil), do: nil
+    defp stage_to_string(stage), do: to_string(stage)
   end
 end

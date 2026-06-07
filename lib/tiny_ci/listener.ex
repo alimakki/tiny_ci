@@ -10,6 +10,14 @@ defmodule TinyCI.Listener do
 
     * `TinyCI.Listener.Human` — prints human-readable progress to stdout
     * `TinyCI.Listener.Silent` — no-ops all callbacks (used for JSON output)
+
+  > #### Migrating to the event stream {: .info}
+  >
+  > Stage start/skip progress now flows through the structured event stream
+  > (`TinyCI.Events`) and is rendered by `TinyCI.Events.Sink.Console`. The
+  > executor still uses this behaviour for the buffered step-output, matrix, and
+  > retry-attempt renderings; the `listener:` option doubles as the selector for
+  > which console event sink is attached. See `docs/events.md`.
   """
 
   alias TinyCI.{MatrixRunResult, StageResult}

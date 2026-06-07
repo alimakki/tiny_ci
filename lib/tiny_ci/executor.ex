@@ -21,13 +21,34 @@ defmodule TinyCI.Executor do
   (in non-TTY environments). The output mode is controlled via the `:output`
   option passed to `run_pipeline/3`.
 
-  Pipeline lifecycle events (stage started, skipped, finished) are routed
-  through a `TinyCI.Listener` implementation, defaulting to
-  `TinyCI.Listener.Human`. Pass `listener: TinyCI.Listener.Silent` to suppress
-  all progress output (e.g., when serializing results to JSON).
+  Every meaningful boundary is emitted as a structured event through
+  `TinyCI.Events` to a per-run `TinyCI.Events.Dispatcher` (see `docs/events.md`).
+  The human console output is produced by `TinyCI.Events.Sink.Console` consuming
+  that stream; passing `events:` adds a `TinyCI.Events.Sink.NDJSON` sink. The
+  `listener:` option selects which console sink is attached — `TinyCI.Listener.Human`
+  (default) prints progress, `TinyCI.Listener.Silent` suppresses it (e.g. when
+  serializing results to JSON) — and still drives the buffered step-output, matrix,
+  and retry-attempt renderings that have not yet moved to the event sink.
   """
 
   alias TinyCI.{Artifacts, Cache, DAG, Matrix, MatrixRunResult, Output, StageResult, StepResult}
+  alias TinyCI.Events
+
+  alias TinyCI.Events.{
+    CacheLookup,
+    MatrixRunCompleted,
+    MatrixRunStarted,
+    PipelineCompleted,
+    PipelineStarted,
+    StageCompleted,
+    StageSkipped,
+    StageStarted,
+    StepCompleted,
+    StepOutputLine,
+    StepRetrying,
+    StepSkipped,
+    StepStarted
+  }
 
   @doc """
   Starts the task supervisor used for parallel step execution.
@@ -75,12 +96,57 @@ defmodule TinyCI.Executor do
     listener = opts[:listener] || TinyCI.Listener.Human
     filtered = apply_filter(stages, opts[:filter])
 
-    if DAG.dag_mode?(filtered) do
-      run_pipeline_dag(filtered, ctx, output_mode, listener)
-    else
-      run_pipeline_sequential(filtered, ctx, output_mode, listener)
+    {:ok, dispatcher} =
+      Events.Dispatcher.start_link(build_sink_specs(listener, output_mode, opts))
+
+    ctx = Map.put(ctx, :events, dispatcher)
+    pipeline_name = opts[:pipeline_name] || :pipeline
+
+    try do
+      Events.emit(ctx, %PipelineStarted{
+        run_id: ctx.run_id,
+        timestamp: now(),
+        pipeline_name: pipeline_name
+      })
+
+      {duration_ms, result} =
+        measure(fn ->
+          if DAG.dag_mode?(filtered) do
+            run_pipeline_dag(filtered, ctx, output_mode, listener)
+          else
+            run_pipeline_sequential(filtered, ctx, output_mode, listener)
+          end
+        end)
+
+      Events.emit(ctx, %PipelineCompleted{
+        run_id: ctx.run_id,
+        timestamp: now(),
+        status: pipeline_status(result),
+        duration_ms: duration_ms
+      })
+
+      result
+    after
+      Events.Dispatcher.stop(dispatcher)
     end
   end
+
+  # Maps the `listener:` option to a set of event sinks: the console sink unless
+  # output is silenced, plus an NDJSON sink when `events:` is given.
+  defp build_sink_specs(listener, output_mode, opts) do
+    console_specs(listener, output_mode) ++ ndjson_specs(opts[:events])
+  end
+
+  defp console_specs(TinyCI.Listener.Silent, _mode), do: []
+  defp console_specs(_listener, mode), do: [{Events.Sink.Console, [mode: mode]}]
+
+  defp ndjson_specs(nil), do: []
+  defp ndjson_specs(path), do: [{Events.Sink.NDJSON, [path: path]}]
+
+  defp pipeline_status({:ok, _}), do: :passed
+  defp pipeline_status({:error, _, _}), do: :failed
+
+  defp now, do: DateTime.utc_now()
 
   defp put_artifacts_dir(ctx, opts) do
     root = Map.get(ctx, :root, File.cwd!())
@@ -209,8 +275,14 @@ defmodule TinyCI.Executor do
 
   defp run_dag_stage(stage, ctx, output_mode, blocked, listener) do
     if Enum.any?(stage.needs, &MapSet.member?(blocked, &1)) do
-      listener.stage_started(stage.name)
-      listener.stage_skipped(stage.name, :dependency_failed)
+      Events.emit(ctx, %StageStarted{run_id: run_id(ctx), timestamp: now(), stage: stage.name})
+
+      Events.emit(ctx, %StageSkipped{
+        run_id: run_id(ctx),
+        timestamp: now(),
+        stage: stage.name,
+        reason: "dependency failed"
+      })
 
       %StageResult{
         name: stage.name,
@@ -258,10 +330,51 @@ defmodule TinyCI.Executor do
         listener \\ TinyCI.Listener.Human
       ) do
     context = Map.put_new(context, :store, %{})
-    listener.stage_started(stage.name)
+
+    case Map.get(context, :events) do
+      nil ->
+        with_ephemeral_dispatcher(context, output_mode, listener, fn ctx ->
+          do_execute(stage, ctx, output_mode, listener)
+        end)
+
+      _pid ->
+        do_execute(stage, context, output_mode, listener)
+    end
+  end
+
+  # When `execute/4` is called standalone (no run dispatcher on the context),
+  # spin up a short-lived dispatcher so its events and console output still work.
+  defp with_ephemeral_dispatcher(context, output_mode, listener, fun) do
+    {:ok, dispatcher} = Events.Dispatcher.start_link(build_sink_specs(listener, output_mode, []))
+
+    ctx =
+      context
+      |> Map.put(:events, dispatcher)
+      |> Map.put_new(:run_id, ephemeral_run_id())
+
+    try do
+      fun.(ctx)
+    after
+      Events.Dispatcher.stop(dispatcher)
+    end
+  end
+
+  defp ephemeral_run_id, do: "run_" <> Integer.to_string(System.unique_integer([:positive]))
+
+  defp do_execute(%TinyCI.Stage{} = stage, context, output_mode, listener) do
+    Events.emit(context, %StageStarted{
+      run_id: run_id(context),
+      timestamp: now(),
+      stage: stage.name
+    })
 
     if skip_stage?(stage, context) do
-      listener.stage_skipped(stage.name, :condition_not_met)
+      Events.emit(context, %StageSkipped{
+        run_id: run_id(context),
+        timestamp: now(),
+        stage: stage.name,
+        reason: "condition not met"
+      })
 
       %StageResult{
         name: stage.name,
@@ -271,15 +384,31 @@ defmodule TinyCI.Executor do
         store: context.store
       }
     else
-      ctx_with_stage_env = Map.put(context, :stage_env, stage.env || %{})
+      ctx_with_stage =
+        context
+        |> Map.put(:stage_env, stage.env || %{})
+        |> Map.put(:stage_name, stage.name)
 
-      if stage.matrix != [] do
-        execute_matrix_stage(stage, ctx_with_stage_env, output_mode, listener)
-      else
-        execute_regular_stage(stage, ctx_with_stage_env, output_mode, listener)
-      end
+      result =
+        if stage.matrix != [] do
+          execute_matrix_stage(stage, ctx_with_stage, output_mode, listener)
+        else
+          execute_regular_stage(stage, ctx_with_stage, output_mode, listener)
+        end
+
+      Events.emit(context, %StageCompleted{
+        run_id: run_id(context),
+        timestamp: now(),
+        stage: stage.name,
+        status: result.status,
+        duration_ms: result.duration_ms
+      })
+
+      result
     end
   end
+
+  defp run_id(ctx), do: Map.get(ctx, :run_id)
 
   defp execute_regular_stage(stage, context, output_mode, listener) do
     {duration_ms, {step_results, updated_store}} =
@@ -339,6 +468,13 @@ defmodule TinyCI.Executor do
   end
 
   defp run_matrix_combination(stage, combination, context, listener) do
+    Events.emit(context, %MatrixRunStarted{
+      run_id: run_id(context),
+      timestamp: now(),
+      stage: stage.name,
+      combination: combination
+    })
+
     combo_env = Matrix.env_vars(combination)
     combo_store = Map.new(combination)
 
@@ -353,10 +489,20 @@ defmodule TinyCI.Executor do
       measure(fn -> execute_by_mode(stage_for_run, ctx, :buffered, listener) end)
 
     any_failed = Enum.any?(step_results, &(&1.status == :failed and not &1.allowed_failure))
+    status = if any_failed, do: :failed, else: :passed
+
+    Events.emit(context, %MatrixRunCompleted{
+      run_id: run_id(context),
+      timestamp: now(),
+      stage: stage.name,
+      combination: combination,
+      status: status,
+      duration_ms: duration_ms
+    })
 
     %MatrixRunResult{
       combination: combination,
-      status: if(any_failed, do: :failed, else: :passed),
+      status: status,
       step_results: step_results,
       duration_ms: duration_ms,
       store: updated_store
@@ -379,12 +525,60 @@ defmodule TinyCI.Executor do
 
   defp execute_step_or_skip(step, context, output_mode, prefix, working_dir, listener) do
     if skip_step?(step, context) do
+      Events.emit(context, %StepSkipped{
+        run_id: run_id(context),
+        timestamp: now(),
+        stage: stage_name(context),
+        step: step.name,
+        reason: "condition not met"
+      })
+
       %StepResult{name: step.name, status: :skipped, duration_ms: 0}
     else
-      step
-      |> execute_with_cache(context, output_mode, prefix, working_dir, listener)
-      |> persist_step_artifacts(step, context, working_dir)
+      Events.emit(context, %StepStarted{
+        run_id: run_id(context),
+        timestamp: now(),
+        stage: stage_name(context),
+        step: step.name
+      })
+
+      result =
+        step
+        |> execute_with_cache(context, output_mode, prefix, working_dir, listener)
+        |> persist_step_artifacts(step, context, working_dir)
+
+      emit_step_output(context, step.name, result.output)
+
+      Events.emit(context, %StepCompleted{
+        run_id: run_id(context),
+        timestamp: now(),
+        stage: stage_name(context),
+        step: step.name,
+        status: result.status,
+        duration_ms: result.duration_ms,
+        output: result.output
+      })
+
+      result
     end
+  end
+
+  defp stage_name(ctx), do: Map.get(ctx, :stage_name)
+
+  defp emit_step_output(_context, _step, ""), do: :ok
+
+  defp emit_step_output(context, step, output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.each(fn line ->
+      Events.emit(context, %StepOutputLine{
+        run_id: run_id(context),
+        timestamp: now(),
+        stage: stage_name(context),
+        step: step,
+        line: line
+      })
+    end)
   end
 
   defp persist_step_artifacts(result, %{artifact: nil}, _ctx, _wd), do: result
@@ -469,13 +663,26 @@ defmodule TinyCI.Executor do
          listener
        ) do
     if Cache.hit?(root, key, paths) do
+      emit_cache_lookup(ctx, step.name, key, :hit)
       Cache.restore(root, key, paths, wd)
       %StepResult{name: step.name, status: :passed, duration_ms: 0, cache_status: :hit}
     else
+      emit_cache_lookup(ctx, step.name, key, :miss)
       result = run_step_with_retries(step, ctx, output_mode, prefix, wd, listener)
       if result.status == :passed, do: Cache.save(root, key, paths, wd)
       %{result | cache_status: :miss}
     end
+  end
+
+  defp emit_cache_lookup(ctx, step, key, result) do
+    Events.emit(ctx, %CacheLookup{
+      run_id: run_id(ctx),
+      timestamp: now(),
+      stage: stage_name(ctx),
+      step: step,
+      key: key,
+      result: result
+    })
   end
 
   defp run_step_with_retries(step, ctx, output_mode, prefix, working_dir, listener) do
@@ -494,6 +701,17 @@ defmodule TinyCI.Executor do
          listener
        ) do
     listener.step_attempt(attempt, total)
+
+    if attempt > 1 do
+      Events.emit(ctx, %StepRetrying{
+        run_id: run_id(ctx),
+        timestamp: now(),
+        stage: stage_name(ctx),
+        step: step.name,
+        attempt: attempt
+      })
+    end
+
     result = run_step(step, ctx, output_mode, prefix, working_dir)
     total_ms = acc_ms + result.duration_ms
 

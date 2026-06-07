@@ -448,4 +448,72 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       assert stderr =~ "defmodule"
     end
   end
+
+  describe "--events" do
+    test "writes a valid NDJSON event stream to a file", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+      events_path = Path.join(root, "run.ndjson")
+
+      File.write!(path, """
+      stage :greet, mode: :serial do
+        step :hello, cmd: "echo hello"
+      end
+      """)
+
+      capture_io(fn ->
+        assert :ok = Mix.Tasks.TinyCi.Run.run(["--file", path, "--events", events_path])
+      end)
+
+      lines = events_path |> File.read!() |> String.split("\n", trim: true)
+      decoded = Enum.map(lines, &Jason.decode!/1)
+
+      # Every line is valid JSON carrying the envelope fields.
+      Enum.each(decoded, fn event ->
+        assert is_integer(event["seq"])
+        assert is_binary(event["type"])
+        assert is_binary(event["run_id"])
+        assert is_binary(event["ts"])
+      end)
+
+      types = Enum.map(decoded, & &1["type"])
+      assert "run_started" in types
+      assert "run_finished" in types
+      assert "stage_started" in types
+      assert "step_finished" in types
+
+      # seq is monotonic across the stream.
+      seqs = Enum.map(decoded, & &1["seq"])
+      assert seqs == Enum.sort(seqs)
+      assert Enum.uniq(seqs) == seqs
+
+      # schema_version rides only on the run_started line.
+      run_started = Enum.find(decoded, &(&1["type"] == "run_started"))
+      assert run_started["schema_version"] == TinyCI.Events.schema_version()
+    end
+
+    test "writes the event stream to stdout with -", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :greet, mode: :serial do
+        step :hello, cmd: "echo hello"
+      end
+      """)
+
+      output =
+        capture_io(fn ->
+          assert :ok = Mix.Tasks.TinyCi.Run.run(["--file", path, "--events", "-"])
+        end)
+
+      ndjson_lines =
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.filter(&match?({:ok, %{"type" => _}}, Jason.decode(&1)))
+        |> Enum.map(&Jason.decode!/1)
+
+      types = Enum.map(ndjson_lines, & &1["type"])
+      assert "run_started" in types
+      assert "run_finished" in types
+    end
+  end
 end

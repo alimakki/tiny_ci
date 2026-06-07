@@ -1,7 +1,10 @@
 defmodule TinyCI.EventsTest do
   use ExUnit.Case, async: true
 
+  alias TinyCI.Events
+
   alias TinyCI.Events.{
+    CacheLookup,
     HookCompleted,
     HookStarted,
     MatrixRunCompleted,
@@ -749,6 +752,195 @@ defmodule TinyCI.EventsTest do
 
         assert json["timestamp"] == @timestamp_iso,
                "#{inspect(event.__struct__)} timestamp not ISO 8601"
+      end
+    end
+  end
+
+  describe "CacheLookup" do
+    test "constructs with required fields" do
+      event = %CacheLookup{
+        run_id: @run_id,
+        timestamp: @timestamp,
+        stage: :build,
+        step: :deps,
+        key: "deps-abc123",
+        result: :hit
+      }
+
+      assert event.result == :hit
+      assert event.key == "deps-abc123"
+    end
+
+    test "requires run_id" do
+      assert_raise ArgumentError, fn ->
+        struct!(CacheLookup,
+          timestamp: @timestamp,
+          stage: :build,
+          step: :deps,
+          key: "k",
+          result: :hit
+        )
+      end
+    end
+
+    test "requires result" do
+      assert_raise ArgumentError, fn ->
+        struct!(CacheLookup,
+          run_id: @run_id,
+          timestamp: @timestamp,
+          stage: :build,
+          step: :deps,
+          key: "k"
+        )
+      end
+    end
+
+    test "encodes to JSON" do
+      event = %CacheLookup{
+        run_id: @run_id,
+        timestamp: @timestamp,
+        stage: :build,
+        step: :deps,
+        key: "deps-abc123",
+        result: :miss
+      }
+
+      json = decode(event)
+      assert json["stage"] == "build"
+      assert json["step"] == "deps"
+      assert json["key"] == "deps-abc123"
+      assert json["result"] == "miss"
+      assert json["timestamp"] == @timestamp_iso
+    end
+  end
+
+  describe "StepOutputLine stream field" do
+    test "defaults to :stdout" do
+      event = %StepOutputLine{
+        run_id: @run_id,
+        timestamp: @timestamp,
+        stage: :test,
+        step: :unit,
+        line: "x"
+      }
+
+      assert event.stream == :stdout
+    end
+
+    test "encodes the stream as a string" do
+      event = %StepOutputLine{
+        run_id: @run_id,
+        timestamp: @timestamp,
+        stage: :test,
+        step: :unit,
+        line: "boom",
+        stream: :stderr
+      }
+
+      json = decode(event)
+      assert json["stream"] == "stderr"
+      assert json["line"] == "boom"
+    end
+  end
+
+  describe "StepCompleted output field" do
+    test "defaults to an empty string" do
+      event = %StepCompleted{
+        run_id: @run_id,
+        timestamp: @timestamp,
+        stage: :test,
+        step: :unit,
+        status: :passed,
+        duration_ms: 1
+      }
+
+      assert event.output == ""
+    end
+
+    test "encodes the output" do
+      event = %StepCompleted{
+        run_id: @run_id,
+        timestamp: @timestamp,
+        stage: :test,
+        step: :unit,
+        status: :passed,
+        duration_ms: 1,
+        output: "1 test, 0 failures"
+      }
+
+      json = decode(event)
+      assert json["output"] == "1 test, 0 failures"
+    end
+  end
+
+  describe "type/1" do
+    test "maps each event struct to its build-plan vocabulary string" do
+      mapping = [
+        {%PipelineStarted{run_id: @run_id, timestamp: @timestamp, pipeline_name: :app},
+         "run_started"},
+        {%PipelineCompleted{
+           run_id: @run_id,
+           timestamp: @timestamp,
+           status: :passed,
+           duration_ms: 0
+         }, "run_finished"},
+        {%StageStarted{run_id: @run_id, timestamp: @timestamp, stage: :t}, "stage_started"},
+        {%StageSkipped{run_id: @run_id, timestamp: @timestamp, stage: :t, reason: "x"},
+         "stage_skipped"},
+        {%StageCompleted{
+           run_id: @run_id,
+           timestamp: @timestamp,
+           stage: :t,
+           status: :passed,
+           duration_ms: 0
+         }, "stage_finished"},
+        {%StepStarted{run_id: @run_id, timestamp: @timestamp, stage: :t, step: :u},
+         "step_started"},
+        {%StepSkipped{run_id: @run_id, timestamp: @timestamp, stage: :t, step: :u, reason: "x"},
+         "step_skipped"},
+        {%StepOutputLine{run_id: @run_id, timestamp: @timestamp, stage: :t, step: :u, line: "x"},
+         "step_output"},
+        {%StepRetrying{run_id: @run_id, timestamp: @timestamp, stage: :t, step: :u, attempt: 2},
+         "step_retrying"},
+        {%StepCompleted{
+           run_id: @run_id,
+           timestamp: @timestamp,
+           stage: :t,
+           step: :u,
+           status: :passed,
+           duration_ms: 0
+         }, "step_finished"},
+        {%MatrixRunStarted{run_id: @run_id, timestamp: @timestamp, stage: :t, combination: []},
+         "matrix_run_started"},
+        {%MatrixRunCompleted{
+           run_id: @run_id,
+           timestamp: @timestamp,
+           stage: :t,
+           combination: [],
+           status: :passed,
+           duration_ms: 0
+         }, "matrix_run_finished"},
+        {%HookStarted{run_id: @run_id, timestamp: @timestamp, hook: :on_success}, "hook_started"},
+        {%HookCompleted{
+           run_id: @run_id,
+           timestamp: @timestamp,
+           hook: :on_success,
+           status: :passed,
+           duration_ms: 0
+         }, "hook_finished"},
+        {%CacheLookup{
+           run_id: @run_id,
+           timestamp: @timestamp,
+           stage: :t,
+           step: :u,
+           key: "k",
+           result: :hit
+         }, "cache_lookup"}
+      ]
+
+      for {event, expected} <- mapping do
+        assert Events.type(event) == expected,
+               "#{inspect(event.__struct__)} should map to #{expected}"
       end
     end
   end
