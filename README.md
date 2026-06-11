@@ -502,17 +502,27 @@ Hook failures are logged to stderr but do not change the pipeline exit code.
 
 ### Module Steps and Hooks
 
-Module steps implement `execute/2`; module hooks implement `run/2`. Both receive the
-config keyword list (from `set/2` calls) and the pipeline context map:
+Module steps implement the **`TinyCI.Action` behaviour** (`execute/2`); module hooks
+implement `run/2`. Both receive the config keyword list (from `set/2` calls) and the
+pipeline context (`%TinyCI.Context{}`):
 
 ```elixir
 defmodule MyApp.Deploy do
+  use TinyCI.Action
+
+  @impl TinyCI.Action
   def execute(config, context) do
     region = Keyword.fetch!(config, :region)
     branch = context.branch
 
     # deploy logic...
-    :ok        # or {:error, reason}
+    :ok        # or {:ok, map} to write to the store, or {:error, reason}
+  end
+
+  # Optional — advertises identity and the capabilities the action needs.
+  @impl TinyCI.Action
+  def metadata do
+    %TinyCI.Action.Metadata{name: "my_app.deploy", version: "1.0.0", capabilities: [:network]}
   end
 end
 
@@ -536,6 +546,22 @@ end
 
 Module steps return `:ok` or `{:ok, map}` to merge data into the pipeline store.
 Module hooks return `:ok` or `{:error, reason}`.
+
+Scaffold a new action (module + passing test stub) with the generator:
+
+```sh
+mix tiny_ci.gen.action MyApp.Deploy
+# creates lib/my_app/deploy.ex and test/my_app/deploy_test.exs
+```
+
+The loader verifies, **before any step runs**, that each `module:` step
+implements `TinyCI.Action` (exports `execute/2`) and each module hook exports
+`run/2`, failing with a descriptive error otherwise. See
+[`docs/actions.md`](docs/actions.md) for the full contract.
+
+> **Deprecated:** modules that export `execute/2` without `use TinyCI.Action`
+> still run by convention, but adopting the behaviour is recommended so the
+> compiler verifies your callbacks via `@impl`.
 
 > **Note:** Module steps and hooks must be pre-compiled and available on the Elixir
 > load path before TinyCI runs. They cannot be defined inside the `.exs` pipeline file.

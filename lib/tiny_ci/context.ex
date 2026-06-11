@@ -1,22 +1,32 @@
 defmodule TinyCI.Context do
   @moduledoc """
-  Builds a pipeline context map from the current git environment.
+  The pipeline context — metadata that flows through every stage and step.
 
-  The context provides metadata — branch name, commit SHA, changed files,
-  and timestamp — that stages and steps can use for conditional logic and
-  reporting.
+  The context carries git metadata (branch name, commit SHA, changed files),
+  a `:timestamp`, and the pipeline `:store` (a key-value map accumulated across
+  steps). Stages inspect it in their `when_condition`, and module-based actions
+  receive it as the second argument to `c:TinyCI.Action.execute/2`.
 
-  ## Default context keys
+  ## Guaranteed fields
 
     * `:branch`        — the current git branch (e.g. `"main"`)
     * `:commit`        — the full 40-character commit SHA
     * `:changed_files` — list of file paths changed since the last commit
+    * `:store`         — the pipeline store (defaults to `%{}`)
     * `:timestamp`     — a `DateTime` captured when the context is built
+
+  ## Extra fields
+
+  `Context` is a struct, but `build/1` preserves arbitrary override keys (and
+  the executor adds dynamic keys such as `:run_id`, `:artifacts_dir`, `:events`,
+  and `:stage_env` as a run progresses). These extra keys are readable via map
+  access (`ctx.pr_number`) while the value remains a `%TinyCI.Context{}` struct.
+  The guaranteed fields above are the stable, documented surface.
 
   ## Examples
 
       iex> ctx = TinyCI.Context.build()
-      iex> is_binary(ctx.branch) and is_binary(ctx.commit)
+      iex> is_struct(ctx, TinyCI.Context) and is_binary(ctx.branch)
       true
 
       iex> ctx = TinyCI.Context.build(branch: "custom", pr_number: 42)
@@ -26,11 +36,27 @@ defmodule TinyCI.Context do
       42
   """
 
+  @type t :: %__MODULE__{
+          branch: String.t(),
+          commit: String.t(),
+          changed_files: [String.t()],
+          store: map(),
+          timestamp: DateTime.t() | nil
+        }
+
+  defstruct branch: "unknown",
+            commit: "unknown",
+            changed_files: [],
+            store: %{},
+            timestamp: nil
+
   @doc """
-  Builds a context map from the current git state.
+  Builds a context from the current git state.
 
   Any key-value pairs in `overrides` are merged on top of the detected
-  values, so callers can inject test doubles or additional metadata.
+  values, so callers can inject test doubles or additional metadata. Override
+  keys that are not struct fields are preserved as extra map keys while the
+  result stays a `%TinyCI.Context{}`.
 
   ## Parameters
 
@@ -38,15 +64,16 @@ defmodule TinyCI.Context do
 
   ## Returns
 
-  A map with at least `:branch`, `:commit`, `:changed_files`, and
-  `:timestamp` keys.
+  A `%TinyCI.Context{}` with at least `:branch`, `:commit`, `:changed_files`,
+  `:store`, and `:timestamp` populated.
   """
-  @spec build(keyword()) :: map()
+  @spec build(keyword()) :: t()
   def build(overrides \\ []) do
-    %{
+    %__MODULE__{
       branch: branch(),
       commit: commit(),
       changed_files: changed_files(),
+      store: %{},
       timestamp: DateTime.utc_now()
     }
     |> Map.merge(Map.new(overrides))

@@ -4,6 +4,17 @@ defmodule TinyCI.ContextTest do
   alias TinyCI.Context
 
   describe "build/0" do
+    test "returns a TinyCI.Context struct" do
+      context = Context.build()
+      assert %Context{} = context
+      assert is_struct(context, Context)
+    end
+
+    test "defaults :store to an empty map" do
+      context = Context.build()
+      assert context.store == %{}
+    end
+
     test "returns a map with :branch key" do
       context = Context.build()
       assert is_binary(context.branch)
@@ -58,10 +69,16 @@ defmodule TinyCI.ContextTest do
       assert context.commit == expected_commit
     end
 
-    test "accepts arbitrary metadata keys" do
+    test "accepts arbitrary metadata keys while remaining a struct" do
       context = Context.build(pr_number: 42, author: "dev")
+      assert is_struct(context, Context)
       assert context.pr_number == 42
       assert context.author == "dev"
+    end
+
+    test "allows overriding the store" do
+      context = Context.build(store: %{image_tag: "v1"})
+      assert context.store == %{image_tag: "v1"}
     end
   end
 

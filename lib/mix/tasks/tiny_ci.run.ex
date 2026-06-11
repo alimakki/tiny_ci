@@ -419,6 +419,11 @@ defmodule Mix.Tasks.TinyCi.Run do
     Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
   end
 
+  defp print_error({:invalid_action, errors}) do
+    IO.puts(:stderr, [IO.ANSI.red(), "Invalid module step or hook:", IO.ANSI.reset()])
+    Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
+  end
+
   defp print_error(reason) do
     IO.puts(:stderr, [
       IO.ANSI.red(),
