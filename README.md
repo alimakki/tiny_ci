@@ -701,6 +701,27 @@ Pipeline files are validated against an allowlist of permitted constructs before
 Constructs outside this list (e.g. `defmodule`, `System.cmd`, `File.read`) are
 rejected at load time with a descriptive error.
 
+## Language Server (live diagnostics)
+
+The same validation can run **live in your editor**. `tiny_ci_lsp/` is a separate
+package (it depends on core, never the other way around) that implements a
+Language Server Protocol server over stdio. As you edit a pipeline file, a
+disallowed construct, unknown option, dependency cycle, or syntax error is
+underlined at the offending range, and the squiggle clears when you fix it.
+
+It never executes your file — it calls the same controlled-AST path the runner
+uses (`TinyCI.DSL.Interpreter.diagnose_string/2`), so the in-editor message is
+identical to what `mix tiny_ci.run` prints at load time.
+
+```bash
+cd tiny_ci_lsp
+mix deps.get
+mix escript.build      # produces ./tiny_ci_lsp — point your editor at it
+```
+
+See **[docs/lsp.md](docs/lsp.md)** for architecture and editor setup (Neovim and
+VS Code).
+
 ## Multiple Pipelines
 
 Organize multiple pipelines in `.tiny_ci/`:
@@ -843,6 +864,7 @@ mix credo                          # static analysis
 - **Event structs** — 14 typed event structs covering every execution boundary (pipeline, stage, step, matrix, hooks), each with `run_id`, `timestamp`, and `Jason.Encoder` support
 - **Dependency caching** — `cache: [paths: [...], key: "file"]` skips steps on hash-keyed hits, stores at `~/.cache/tiny_ci/`, `--no-cache` flag, `mix tiny_ci.cache clean` to purge
 - **Artifact persistence** — `artifact: [name: "build", paths: [...]]` copies declared outputs to `~/.local/share/tiny_ci/artifacts/<project>/<run_id>/`, injects path into pipeline store, `required: true` fails the step if paths are absent, `--artifacts-dir` override, `--list-artifacts` to inspect
+- **Language server (live diagnostics)** — `tiny_ci_lsp`, a separate stdio LSP package that surfaces the validator's load-time errors live in-editor with accurate ranges, debounced as you type, over a shared code path with the runner ([docs/lsp.md](docs/lsp.md))
 
 ### Up Next
 

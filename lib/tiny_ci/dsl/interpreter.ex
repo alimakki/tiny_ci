@@ -32,7 +32,7 @@ defmodule TinyCI.DSL.Interpreter do
     * `{:validation_error, [String.t()]}` — AST contains disallowed constructs
   """
 
-  alias TinyCI.{DSL.Validator, Hook, PipelineSpec, Stage, Step}
+  alias TinyCI.{DSL.Diagnostic, DSL.Validator, Hook, PipelineSpec, Stage, Step}
 
   @doc """
   Reads, validates, and interprets a pipeline file.
@@ -48,15 +48,34 @@ defmodule TinyCI.DSL.Interpreter do
   """
   @spec interpret_file(String.t()) :: {:ok, PipelineSpec.t()} | {:error, term()}
   def interpret_file(path) do
-    with {:ok, content} <- File.read(path),
-         {:ok, ast} <- parse(content, path),
+    case File.read(path) do
+      {:ok, content} -> interpret_string(content, path)
+      {:error, :enoent} -> {:error, :file_not_found}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Validates and interprets pipeline source already held in memory.
+
+  Identical to `interpret_file/1` but operates on a string buffer, never
+  touching the filesystem to read the source. `path` is used only for naming and
+  diagnostics; it does not need to exist.
+
+  ## Returns
+
+    * `{:ok, %TinyCI.PipelineSpec{}}` on success
+    * `{:error, reason}` on failure
+  """
+  @spec interpret_string(String.t(), String.t()) :: {:ok, PipelineSpec.t()} | {:error, term()}
+  def interpret_string(content, path) do
+    with {:ok, ast} <- parse(content, path),
          :ok <- Validator.validate(ast),
          spec = build_spec(ast, path),
          :ok <- TinyCI.DAG.validate(spec.stages),
          :ok <- TinyCI.Action.validate_spec(spec) do
       {:ok, spec}
     else
-      {:error, :enoent} -> {:error, :file_not_found}
       {:error, {:parse_error, _} = e} -> {:error, e}
       {:error, {:validation_error, _} = e} -> {:error, e}
       {:error, {:circular_dependency, _} = e} -> {:error, e}
@@ -65,6 +84,85 @@ defmodule TinyCI.DSL.Interpreter do
       {:error, violations} when is_list(violations) -> {:error, {:validation_error, violations}}
     end
   end
+
+  @doc """
+  Analyzes pipeline source and returns a list of diagnostics with source spans.
+
+  Shares the parse + validate + graph-check code path with `interpret_string/2`,
+  so messages shown in an editor match what the runner prints at load time. The
+  buffer is **never executed** — only the restricted AST grammar is inspected.
+
+  Reports, in order:
+
+    1. a syntax error (parse failure), if any; or
+    2. allowlist violations from `TinyCI.DSL.Validator`; or
+    3. dependency-graph problems (unknown stage references, cycles) when the
+       grammar is otherwise valid.
+
+  An empty list means the buffer is a valid pipeline.
+
+  ## Parameters
+
+    * `content` — the buffer text
+    * `path` — used for naming/diagnostics only (defaults to `"nofile"`)
+
+  ## Returns
+
+    * `[%TinyCI.DSL.Diagnostic{}]`
+  """
+  @spec diagnose_string(String.t(), String.t()) :: [Diagnostic.t()]
+  def diagnose_string(content, path \\ "nofile") do
+    case Code.string_to_quoted(content, columns: true, file: path) do
+      {:ok, ast} -> analyze_ast(ast, path)
+      {:error, {location, message, token}} -> [parse_diagnostic(location, message, token)]
+    end
+  end
+
+  defp analyze_ast(ast, path) do
+    case Validator.diagnostics(ast) do
+      [] -> graph_diagnostics(ast, path)
+      diagnostics -> diagnostics
+    end
+  end
+
+  # Graph-level checks run only when the grammar is valid. Wrapped defensively:
+  # building a spec from a grammatically-valid-but-degenerate buffer should never
+  # crash the language server. Module-existence (action) checks are intentionally
+  # skipped here — a step's module is often not compiled while editing.
+  defp graph_diagnostics(ast, path) do
+    ast |> build_spec(path) |> dag_diagnostics()
+  rescue
+    e -> [Diagnostic.new(Exception.message(e))]
+  end
+
+  defp dag_diagnostics(%PipelineSpec{stages: stages}) do
+    case TinyCI.DAG.validate(stages) do
+      :ok ->
+        []
+
+      {:error, {:unknown_stages, errors}} ->
+        Enum.map(errors, &Diagnostic.new/1)
+
+      {:error, {:circular_dependency, cycle}} ->
+        [
+          Diagnostic.new(
+            "Circular dependency detected. " <>
+              "Stages involved: #{Enum.map_join(cycle, ", ", &":#{&1}")}"
+          )
+        ]
+    end
+  end
+
+  defp parse_diagnostic(location, message, token) do
+    Diagnostic.new(parse_error_message(message, token), normalize_location(location))
+  end
+
+  defp parse_error_message(message, token) when is_binary(message), do: "#{message}#{token}"
+  defp parse_error_message({pre, post}, token), do: "#{pre}#{token}#{post}"
+
+  defp normalize_location(location) when is_list(location), do: location
+  defp normalize_location(line) when is_integer(line), do: [line: line]
+  defp normalize_location(_), do: []
 
   # ---------------------------------------------------------------------------
   # Parse

@@ -466,6 +466,87 @@ defmodule TinyCI.DSL.InterpreterTest do
     end
   end
 
+  describe "interpret_string/2" do
+    test "returns a PipelineSpec without touching the filesystem" do
+      assert {:ok, %PipelineSpec{stages: [%Stage{name: :test}]}} =
+               Interpreter.interpret_string(
+                 """
+                 stage :test do
+                   step :unit, cmd: "mix test"
+                 end
+                 """,
+                 "buffer.exs"
+               )
+    end
+
+    test "returns the same errors as interpret_file" do
+      assert {:error, {:validation_error, _}} =
+               Interpreter.interpret_string("defmodule Foo do\nend\n", "buffer.exs")
+
+      assert {:error, {:parse_error, _}} =
+               Interpreter.interpret_string("stage :x do end end", "buffer.exs")
+    end
+  end
+
+  describe "diagnose_string/2" do
+    alias TinyCI.DSL.Diagnostic
+
+    test "returns an empty list for a valid pipeline" do
+      assert [] =
+               Interpreter.diagnose_string("""
+               stage :test do
+                 step :unit, cmd: "mix test"
+               end
+               """)
+    end
+
+    test "reports a syntax error with a span" do
+      assert [%Diagnostic{line: line, message: msg}] =
+               Interpreter.diagnose_string("stage :x do\n  step :a, cmd: \"ok\"\n")
+
+      assert line == 1
+      assert msg =~ "missing terminator"
+    end
+
+    test "reports an allowlist violation with an accurate column" do
+      assert [%Diagnostic{line: 1, column: col, message: msg}] =
+               Interpreter.diagnose_string(~S"""
+               stage :deploy, when: dangerous() == 0 do
+                 step :release, cmd: "make release"
+               end
+               """)
+
+      assert msg =~ "Invalid condition expression"
+      assert col == 22
+    end
+
+    test "reports dependency-graph problems when the grammar is valid" do
+      assert [%Diagnostic{message: msg}] =
+               Interpreter.diagnose_string("""
+               stage :build, needs: [:missing] do
+                 step :compile, cmd: "mix compile"
+               end
+               """)
+
+      assert msg =~ "needs unknown stage :missing"
+    end
+
+    test "messages match the runner's load-time validation messages" do
+      source = """
+      stage :test do
+        step :unit, cmd: "mix test", bogus: true
+      end
+      """
+
+      [%Diagnostic{message: lsp_message}] = Interpreter.diagnose_string(source)
+
+      assert {:error, {:validation_error, [runner_message]}} =
+               Interpreter.interpret_string(source, "buffer.exs")
+
+      assert lsp_message == runner_message
+    end
+  end
+
   defmodule DummyStep do
     @moduledoc false
     def execute(_config, _ctx), do: :ok

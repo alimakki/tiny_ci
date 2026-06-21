@@ -1,10 +1,16 @@
 defmodule TinyCI.DSL.ValidatorTest do
   use ExUnit.Case, async: true
 
-  alias TinyCI.DSL.Validator
+  alias TinyCI.DSL.{Diagnostic, Validator}
 
   defp parse!(source), do: Code.string_to_quoted!(source)
   defp validate(source), do: source |> parse!() |> Validator.validate()
+
+  defp diagnostics(source) do
+    source
+    |> Code.string_to_quoted!(columns: true)
+    |> Validator.diagnostics()
+  end
 
   describe "valid pipelines" do
     test "minimal pipeline with one stage and one step" do
@@ -472,6 +478,68 @@ defmodule TinyCI.DSL.ValidatorTest do
                """)
 
       assert length(violations) >= 2
+    end
+  end
+
+  describe "diagnostics/1" do
+    test "returns an empty list for a valid pipeline" do
+      assert [] =
+               diagnostics("""
+               stage :test do
+                 step :unit, cmd: "mix test"
+               end
+               """)
+    end
+
+    test "returns Diagnostic structs carrying the violation message" do
+      assert [%Diagnostic{message: msg, severity: :error}] =
+               diagnostics("""
+               stage :test, unknown_opt: true do
+                 step :unit, cmd: "mix test"
+               end
+               """)
+
+      assert msg =~ "Unknown stage option"
+    end
+
+    test "points a disallowed condition construct at its source column" do
+      assert [%Diagnostic{line: 1, column: col, message: msg}] =
+               diagnostics(~S"""
+               stage :deploy, when: dangerous() == 0 do
+                 step :release, cmd: "make release"
+               end
+               """)
+
+      assert msg =~ "Invalid condition expression"
+      # `dangerous()` begins right after `when: ` on the first line.
+      assert col == 22
+    end
+
+    test "points an unknown step option at the offending step line" do
+      assert [%Diagnostic{line: 3, message: msg}] =
+               diagnostics("""
+               stage :test do
+                 step :unit, cmd: "mix test"
+                 step :lint, bogus: true
+               end
+               """)
+
+      assert msg =~ "Unknown step option"
+    end
+
+    test "reports every violation with its own span" do
+      diags =
+        diagnostics("""
+        stage :test, mode: :concurrent do
+          step :unit, cmd: :not_a_string
+        end
+        """)
+
+      assert length(diags) == 2
+      assert Enum.all?(diags, &match?(%Diagnostic{}, &1))
+      lines = Enum.map(diags, & &1.line)
+      assert 1 in lines
+      assert 2 in lines
     end
   end
 end
