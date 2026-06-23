@@ -9,3 +9,6 @@ tiny_ci_lsp
 *.beam
 /config/*.secret.exs
 .elixir_ls/
+
+# transient build lock from mise enter hook
+.build.lock

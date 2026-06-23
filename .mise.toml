@@ -15,9 +15,36 @@ enter = "mise run build-lsp"
 description = "Build the tiny_ci_lsp escript if its sources changed"
 dir = "{{config_root}}"
 run = """
-bin=tiny_ci_lsp/tiny_ci_lsp
-if [ ! -f "$bin" ] || [ -n "$(find lib tiny_ci_lsp/lib tiny_ci_lsp/mix.exs -newer "$bin" -type f 2>/dev/null)" ]; then
-  echo "[mise] building tiny_ci_lsp escript…"
-  (cd tiny_ci_lsp && mix deps.get --quiet && mix escript.build)
+root="$PWD"
+bin="$root/tiny_ci_lsp/tiny_ci_lsp"
+lock="$root/tiny_ci_lsp/.build.lock"
+
+# Already up to date? Nothing to do (the fast, lock-free common case).
+if [ -f "$bin" ] && [ -z "$(find "$root/lib" "$root/tiny_ci_lsp/lib" "$root/tiny_ci_lsp/mix.exs" -newer "$bin" -type f 2>/dev/null)" ]; then
+  exit 0
+fi
+
+# Clear a stale lock (>10 min) left behind by a build that was killed.
+if [ -d "$lock" ] && [ -z "$(find "$lock" -mmin -10 2>/dev/null)" ]; then
+  rmdir "$lock" 2>/dev/null || true
+fi
+
+# Serialize: an editor can spawn several shells on launch, each firing this
+# hook. Concurrent `mix escript.build` runs corrupt the shared _build dir
+# (protocol consolidation replaces the consolidated/ directory wholesale).
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "[mise] tiny_ci_lsp build already in progress, skipping"
+  exit 0
+fi
+trap 'rmdir "$lock" 2>/dev/null || true' EXIT
+
+echo "[mise] building tiny_ci_lsp escript…"
+cd "$root/tiny_ci_lsp" && mix deps.get --quiet
+
+# A previously interrupted build can leave _build without its consolidated
+# protocols; retry once with a forced recompile to self-heal.
+if ! mix escript.build; then
+  echo "[mise] escript build failed, retrying with a forced recompile…"
+  mix compile --force && mix escript.build
 fi
 """
