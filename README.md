@@ -733,8 +733,11 @@ mix deps.get
 mix escript.build      # produces ./tiny_ci_lsp — point your editor at it
 ```
 
-See **[docs/lsp.md](docs/lsp.md)** for architecture and editor setup (Neovim and
-VS Code).
+The server binary alone does nothing — your editor needs a client to launch it.
+A ready-to-build VS Code extension lives in **[editors/vscode/](editors/vscode/)**
+(`npm install`, then <kbd>F5</kbd> or package a `.vsix`); Neovim's built-in LSP
+needs only a few lines of config. See **[docs/lsp.md](docs/lsp.md)** for both, plus
+architecture.
 
 ## Multiple Pipelines
 

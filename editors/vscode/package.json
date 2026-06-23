@@ -1,0 +1,41 @@
+{
+  "name": "tiny-ci-lsp",
+  "displayName": "TinyCI Pipeline",
+  "description": "Diagnostics, completion, and hover for TinyCI pipeline files (.tiny_ci/*.exs).",
+  "version": "0.1.0",
+  "publisher": "tiny-ci",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alimakki/tiny_ci.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "workspaceContains:**/.tiny_ci/*.exs",
+    "workspaceContains:**/tiny_ci.exs"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "TinyCI",
+      "properties": {
+        "tinyCi.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to the tiny_ci_lsp executable. When empty, the extension looks for <workspace>/tiny_ci_lsp/tiny_ci_lsp, then `tiny_ci_lsp` on PATH."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

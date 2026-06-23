@@ -1,0 +1,4 @@
+.gitignore
+.vscodeignore
+README.md
+node_modules/.bin/**

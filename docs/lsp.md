@@ -155,46 +155,32 @@ definition (`cmd = { "tiny_ci_lsp" }`).
 
 ### VS Code (thin extension)
 
-A minimal `vscode-languageclient` extension is enough — no language-specific
-features beyond launching the server are required:
+A ready-to-build client lives in **[`editors/vscode/`](../editors/vscode/)**. The
+server binary alone does nothing in VS Code — the editor needs a client extension
+to launch it and attach it to pipeline files. Quick start:
 
-```ts
-import { workspace, ExtensionContext } from "vscode";
-import {
-  LanguageClient,
-  LanguageClientOptions,
-  ServerOptions,
-} from "vscode-languageclient/node";
-
-let client: LanguageClient;
-
-export function activate(_context: ExtensionContext) {
-  const serverOptions: ServerOptions = {
-    command: "tiny_ci_lsp", // absolute path if not on $PATH
-    args: [],
-  };
-
-  const clientOptions: LanguageClientOptions = {
-    // Attach only to pipeline files.
-    documentSelector: [
-      { scheme: "file", pattern: "**/.tiny_ci/**/*.exs" },
-      { scheme: "file", pattern: "**/tiny_ci.exs" },
-    ],
-  };
-
-  client = new LanguageClient(
-    "tinyCi",
-    "TinyCI",
-    serverOptions,
-    clientOptions,
-  );
-  client.start();
-}
-
-export function deactivate(): Thenable<void> | undefined {
-  return client?.stop();
-}
+```bash
+cd tiny_ci_lsp && mix escript.build     # build the server (mise does this on enter)
+cd ../editors/vscode && npm install     # the client's one dependency
 ```
+
+Then either press <kbd>F5</kbd> with `editors/vscode/` open (Extension Development
+Host), or package and install it:
+
+```bash
+cd editors/vscode
+npx --yes @vscode/vsce package
+code --install-extension tiny-ci-lsp-0.1.0.vsix
+```
+
+The extension finds the server at `<workspace>/tiny_ci_lsp/tiny_ci_lsp`, falls
+back to `tiny_ci_lsp` on `PATH`, and honours a `tinyCi.serverPath` setting. It
+attaches only to `**/.tiny_ci/**/*.exs` and `tiny_ci.exs`. See
+[`editors/vscode/README.md`](../editors/vscode/README.md) for details and
+troubleshooting.
+
+> Note: a server binary is not enough on its own — without this client (or the
+> Neovim config above) VS Code shows no diagnostics, completion, or hover.
 
 ## Notes for contributors
 
