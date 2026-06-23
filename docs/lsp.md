@@ -1,11 +1,16 @@
-# Language server — live diagnostics
+# Language server — diagnostics, completion, hover
 
 `tiny_ci_lsp` is a [Language Server Protocol](https://microsoft.github.io/language-server-protocol/)
-server that surfaces the pipeline validator's load-time errors **live in your
-editor** as you type a `.exs` pipeline file. A disallowed construct
-(`System.cmd(...)`, an unknown stage option, a dependency cycle, a syntax error)
-is underlined at the offending range, and the squiggle clears the moment you fix
-it.
+server that gives `.exs` pipeline files a full editing experience **live in your
+editor**:
+
+- **Diagnostics** — a disallowed construct (`System.cmd(...)`, an unknown stage
+  option, a dependency cycle, a syntax error) is underlined at the offending
+  range, and the squiggle clears the moment you fix it.
+- **Completion** (`textDocument/completion`) — context-aware suggestions for
+  directives, option keys, and condition primitives.
+- **Hover** (`textDocument/hover`) — a one-line description plus an example for
+  the symbol under the cursor.
 
 It ships as a **separate package** (`tiny_ci_lsp/`) that depends on core — the
 core runtime never depends on the language server, keeping the CLI lean.
@@ -47,16 +52,65 @@ Module-existence checks are intentionally **not** run in the editor: a step's
 `:module` is often uncompiled while you are still editing, so flagging it would
 be noise. The runner still checks it at load time.
 
+## Completion and hover
+
+Completion and hover read from a single, machine-readable description of the DSL
+in core, **`TinyCI.DSL.Spec`** — every directive, every option key with its type,
+and every condition primitive, each with a one-line summary and an example. The
+validator derives its allowlist of permitted option keys from the same Spec, so
+what the editor offers is exactly what the validator accepts. There is no second
+list to keep in sync.
+
+```
+editor ──completion/hover──▶ TinyCI.LSP.Server
+                                  │
+              ┌───────────────────┴───────────────────┐
+              ▼                                         ▼
+   TinyCI.LSP.Context                          TinyCI.LSP.Hover
+   (walks the AST around the cursor)           (symbol under cursor)
+              │                                         │
+              ▼                                         ▼
+   TinyCI.LSP.Completion ───▶ TinyCI.DSL.Spec ◀─── TinyCI.DSL.Spec.lookup
+                              (single source of truth)
+```
+
+- **`TinyCI.DSL.Spec`** (core) — the directive/option/primitive catalogue.
+- **`TinyCI.LSP.Context`** — determines the cursor context by walking the AST
+  (`Code.Fragment.container_cursor_to_quoted/1`), **not** by matching text. The
+  buffer is usually incomplete while typing, so the fragment API closes the open
+  containers and inserts a cursor marker we walk to.
+- **`TinyCI.LSP.Completion`** — turns a context into `CompletionItem`s from the Spec.
+- **`TinyCI.LSP.Hover`** — finds the symbol under the cursor with
+  `Code.Fragment.surround_context/2`, looks it up in the Spec, and renders Markdown.
+
+### What completion offers, by cursor context
+
+| Cursor is …                              | Suggestions                                                            |
+|------------------------------------------|------------------------------------------------------------------------|
+| at file scope                            | `name`, `env`, `stage`, `on_success`, `on_failure`                     |
+| inside `stage do … end`                  | `step`, `env`                                                          |
+| inside `step` / hook `do … end`          | `set`                                                                  |
+| in a `stage` option list                 | `mode:`, `needs:`, `when:`, `working_dir:`, `matrix:`, `max_parallel:`, `allow_failure:` |
+| in a `step` option list                  | `cmd:`, `module:`, `env:`, `timeout:`, `when:`, `retry:`, `cache:`, … |
+| in a hook option list                    | `cmd:`, `module:`, `env:`, `timeout:`                                  |
+| inside a `when:` value                   | `branch()`, `env(...)`, `file_changed?(...)`                           |
+
 ## Lifecycle handled
 
 | Notification / request        | Behaviour                                            |
 |-------------------------------|------------------------------------------------------|
-| `initialize` / `initialized`  | Handshake; advertises full-text sync + save text     |
-| `textDocument/didOpen`        | Analyze and publish immediately                      |
-| `textDocument/didChange`      | Analyze and publish, **debounced** (`200ms` default) |
-| `textDocument/didSave`        | Analyze and publish immediately                      |
-| `textDocument/didClose`       | Clear diagnostics for the document                   |
-| `shutdown` / `exit`           | Graceful shutdown                                     |
+| `initialize` / `initialized`  | Handshake; advertises sync, completion, hover        |
+| `textDocument/didOpen`        | Track buffer; analyze and publish immediately        |
+| `textDocument/didChange`      | Track buffer; analyze and publish, **debounced** (`200ms`) |
+| `textDocument/didSave`        | Track buffer; analyze and publish immediately        |
+| `textDocument/didClose`       | Drop the buffer; clear diagnostics                   |
+| `textDocument/completion`     | Context-aware suggestions from the DSL spec          |
+| `textDocument/hover`          | Description + example for the symbol under the cursor |
+| `shutdown` / `exit`           | Graceful shutdown                                    |
+
+The server keeps the latest text of each open document (updated immediately on
+`didChange`, before the debounced diagnostic publish) so completion and hover
+always see the live buffer.
 
 `didChange` is debounced so a burst of keystrokes results in a single analysis
 once typing settles. The delay is configurable via the `:debounce_ms` start

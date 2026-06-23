@@ -35,7 +35,7 @@ defmodule TinyCI.DSL.Validator do
   not in the allowlist.
   """
 
-  alias TinyCI.DSL.Diagnostic
+  alias TinyCI.DSL.{Diagnostic, Spec}
 
   @doc """
   Validates a quoted AST and returns `:ok` or `{:error, messages}`.
@@ -141,60 +141,51 @@ defmodule TinyCI.DSL.Validator do
   defp validate_stage_call(_, meta), do: [diag("stage requires a keyword options list", meta)]
 
   defp validate_stage_opts(opts, meta) do
-    Enum.flat_map(opts, fn
-      {:mode, mode} when mode in [:serial, :parallel] ->
-        []
-
-      {:mode, _} ->
-        [diag("Stage :mode must be :serial or :parallel", meta)]
-
-      {:when, condition} ->
-        validate_condition(condition, meta)
-
-      {:working_dir, v} when is_binary(v) ->
-        []
-
-      {:working_dir, _} ->
-        [diag("Stage :working_dir must be a string literal", meta)]
-
-      {:needs, v} when is_list(v) ->
-        validate_needs_list(v, meta)
-
-      {:needs, _} ->
-        [
-          diag(
-            "Stage :needs must be a list of stage name atoms, e.g. needs: [:build, :test]",
-            meta
-          )
-        ]
-
-      {:matrix, v} when is_list(v) ->
-        validate_matrix_spec(v, meta)
-
-      {:matrix, _} ->
-        [
-          diag(
-            "Stage :matrix must be a keyword list, e.g. matrix: [elixir: [\"1.17\", \"1.18\"]]",
-            meta
-          )
-        ]
-
-      {:max_parallel, v} when is_integer(v) and v > 0 ->
-        []
-
-      {:max_parallel, _} ->
-        [diag("Stage :max_parallel must be a positive integer", meta)]
-
-      {:allow_failure, v} when is_boolean(v) ->
-        []
-
-      {:allow_failure, _} ->
-        [diag("Stage :allow_failure must be true or false", meta)]
-
-      {key, _} ->
-        [diag("Unknown stage option: :#{key}", meta)]
-    end)
+    unknown_option_diags(opts, :stage, "stage", meta) ++
+      Enum.flat_map(opts, &validate_stage_opt(&1, meta))
   end
+
+  defp validate_stage_opt({:mode, mode}, _meta) when mode in [:serial, :parallel], do: []
+
+  defp validate_stage_opt({:mode, _}, meta),
+    do: [diag("Stage :mode must be :serial or :parallel", meta)]
+
+  defp validate_stage_opt({:when, condition}, meta), do: validate_condition(condition, meta)
+
+  defp validate_stage_opt({:working_dir, v}, _meta) when is_binary(v), do: []
+
+  defp validate_stage_opt({:working_dir, _}, meta),
+    do: [diag("Stage :working_dir must be a string literal", meta)]
+
+  defp validate_stage_opt({:needs, v}, meta) when is_list(v), do: validate_needs_list(v, meta)
+
+  defp validate_stage_opt({:needs, _}, meta),
+    do: [
+      diag("Stage :needs must be a list of stage name atoms, e.g. needs: [:build, :test]", meta)
+    ]
+
+  defp validate_stage_opt({:matrix, v}, meta) when is_list(v), do: validate_matrix_spec(v, meta)
+
+  defp validate_stage_opt({:matrix, _}, meta),
+    do: [
+      diag(
+        "Stage :matrix must be a keyword list, e.g. matrix: [elixir: [\"1.17\", \"1.18\"]]",
+        meta
+      )
+    ]
+
+  defp validate_stage_opt({:max_parallel, v}, _meta) when is_integer(v) and v > 0, do: []
+
+  defp validate_stage_opt({:max_parallel, _}, meta),
+    do: [diag("Stage :max_parallel must be a positive integer", meta)]
+
+  defp validate_stage_opt({:allow_failure, v}, _meta) when is_boolean(v), do: []
+
+  defp validate_stage_opt({:allow_failure, _}, meta),
+    do: [diag("Stage :allow_failure must be true or false", meta)]
+
+  # Keys outside the allowlist are reported by unknown_option_diags/4.
+  defp validate_stage_opt(_opt, _meta), do: []
 
   defp validate_needs_list(items, meta) do
     Enum.flat_map(items, fn
@@ -267,87 +258,75 @@ defmodule TinyCI.DSL.Validator do
   defp validate_step_call(_, meta), do: [diag("step requires a keyword options list", meta)]
 
   defp validate_step_opts(opts, meta) do
-    Enum.flat_map(opts, fn
-      {:cmd, v} when is_binary(v) ->
-        []
-
-      {:cmd, _} ->
-        [diag("Step :cmd must be a string literal", meta)]
-
-      {:module, {:__aliases__, _, _}} ->
-        []
-
-      {:module, m} when is_atom(m) and not is_nil(m) ->
-        []
-
-      {:module, _} ->
-        [diag("Step :module must be a module alias (e.g. MyModule)", meta)]
-
-      {:env, {:%{}, _, pairs}} ->
-        validate_env_pairs(pairs, meta)
-
-      {:env, _} ->
-        [diag("Step :env must be a map literal with string keys and values", meta)]
-
-      {:timeout, v} when is_integer(v) and v > 0 ->
-        []
-
-      {:timeout, _} ->
-        [diag("Step :timeout must be a positive integer (milliseconds)", meta)]
-
-      {:allow_failure, v} when is_boolean(v) ->
-        []
-
-      {:allow_failure, _} ->
-        [diag("Step :allow_failure must be true or false", meta)]
-
-      {:when, condition} ->
-        validate_condition(condition, meta)
-
-      {:working_dir, v} when is_binary(v) ->
-        []
-
-      {:working_dir, _} ->
-        [diag("Step :working_dir must be a string literal", meta)]
-
-      {:retry, v} when is_integer(v) and v > 0 ->
-        []
-
-      {:retry, _} ->
-        [diag("Step :retry must be a positive integer (number of retries)", meta)]
-
-      {:retry_delay, v} when is_integer(v) and v >= 0 ->
-        []
-
-      {:retry_delay, _} ->
-        [diag("Step :retry_delay must be a non-negative integer (milliseconds)", meta)]
-
-      {:cache, spec} when is_list(spec) ->
-        validate_cache_spec(spec, meta)
-
-      {:cache, _} ->
-        [
-          diag(
-            "Step :cache must be a keyword list, e.g. cache: [paths: [\"deps\"], key: \"mix.lock\"]",
-            meta
-          )
-        ]
-
-      {:artifact, spec} when is_list(spec) ->
-        validate_artifact_spec(spec, meta)
-
-      {:artifact, _} ->
-        [
-          diag(
-            "Step :artifact must be a keyword list, e.g. artifact: [name: \"build\", paths: [\"_build\"]]",
-            meta
-          )
-        ]
-
-      {key, _} ->
-        [diag("Unknown step option: :#{key}", meta)]
-    end)
+    unknown_option_diags(opts, :step, "step", meta) ++
+      Enum.flat_map(opts, &validate_step_opt(&1, meta))
   end
+
+  defp validate_step_opt({:cmd, v}, _meta) when is_binary(v), do: []
+  defp validate_step_opt({:cmd, _}, meta), do: [diag("Step :cmd must be a string literal", meta)]
+
+  defp validate_step_opt({:module, {:__aliases__, _, _}}, _meta), do: []
+  defp validate_step_opt({:module, m}, _meta) when is_atom(m) and not is_nil(m), do: []
+
+  defp validate_step_opt({:module, _}, meta),
+    do: [diag("Step :module must be a module alias (e.g. MyModule)", meta)]
+
+  defp validate_step_opt({:env, {:%{}, _, pairs}}, meta), do: validate_env_pairs(pairs, meta)
+
+  defp validate_step_opt({:env, _}, meta),
+    do: [diag("Step :env must be a map literal with string keys and values", meta)]
+
+  defp validate_step_opt({:timeout, v}, _meta) when is_integer(v) and v > 0, do: []
+
+  defp validate_step_opt({:timeout, _}, meta),
+    do: [diag("Step :timeout must be a positive integer (milliseconds)", meta)]
+
+  defp validate_step_opt({:allow_failure, v}, _meta) when is_boolean(v), do: []
+
+  defp validate_step_opt({:allow_failure, _}, meta),
+    do: [diag("Step :allow_failure must be true or false", meta)]
+
+  defp validate_step_opt({:when, condition}, meta), do: validate_condition(condition, meta)
+
+  defp validate_step_opt({:working_dir, v}, _meta) when is_binary(v), do: []
+
+  defp validate_step_opt({:working_dir, _}, meta),
+    do: [diag("Step :working_dir must be a string literal", meta)]
+
+  defp validate_step_opt({:retry, v}, _meta) when is_integer(v) and v > 0, do: []
+
+  defp validate_step_opt({:retry, _}, meta),
+    do: [diag("Step :retry must be a positive integer (number of retries)", meta)]
+
+  defp validate_step_opt({:retry_delay, v}, _meta) when is_integer(v) and v >= 0, do: []
+
+  defp validate_step_opt({:retry_delay, _}, meta),
+    do: [diag("Step :retry_delay must be a non-negative integer (milliseconds)", meta)]
+
+  defp validate_step_opt({:cache, spec}, meta) when is_list(spec),
+    do: validate_cache_spec(spec, meta)
+
+  defp validate_step_opt({:cache, _}, meta),
+    do: [
+      diag(
+        "Step :cache must be a keyword list, e.g. cache: [paths: [\"deps\"], key: \"mix.lock\"]",
+        meta
+      )
+    ]
+
+  defp validate_step_opt({:artifact, spec}, meta) when is_list(spec),
+    do: validate_artifact_spec(spec, meta)
+
+  defp validate_step_opt({:artifact, _}, meta),
+    do: [
+      diag(
+        "Step :artifact must be a keyword list, e.g. artifact: [name: \"build\", paths: [\"_build\"]]",
+        meta
+      )
+    ]
+
+  # Keys outside the allowlist are reported by unknown_option_diags/4.
+  defp validate_step_opt(_opt, _meta), do: []
 
   defp validate_cache_spec(spec, meta) do
     Enum.flat_map(spec, fn
@@ -429,38 +408,31 @@ defmodule TinyCI.DSL.Validator do
     do: [diag("on_success/on_failure requires a keyword options list", meta)]
 
   defp validate_hook_opts(opts, meta) do
-    Enum.flat_map(opts, fn
-      {:cmd, v} when is_binary(v) ->
-        []
-
-      {:cmd, _} ->
-        [diag("Hook :cmd must be a string literal", meta)]
-
-      {:module, {:__aliases__, _, _}} ->
-        []
-
-      {:module, m} when is_atom(m) and not is_nil(m) ->
-        []
-
-      {:module, _} ->
-        [diag("Hook :module must be a module alias (e.g. MyNotifier)", meta)]
-
-      {:env, {:%{}, _, pairs}} ->
-        validate_env_pairs(pairs, meta)
-
-      {:env, _} ->
-        [diag("Hook :env must be a map literal with string keys and values", meta)]
-
-      {:timeout, v} when is_integer(v) and v > 0 ->
-        []
-
-      {:timeout, _} ->
-        [diag("Hook :timeout must be a positive integer (milliseconds)", meta)]
-
-      {key, _} ->
-        [diag("Unknown hook option: :#{key}", meta)]
-    end)
+    unknown_option_diags(opts, :hook, "hook", meta) ++
+      Enum.flat_map(opts, &validate_hook_opt(&1, meta))
   end
+
+  defp validate_hook_opt({:cmd, v}, _meta) when is_binary(v), do: []
+  defp validate_hook_opt({:cmd, _}, meta), do: [diag("Hook :cmd must be a string literal", meta)]
+
+  defp validate_hook_opt({:module, {:__aliases__, _, _}}, _meta), do: []
+  defp validate_hook_opt({:module, m}, _meta) when is_atom(m) and not is_nil(m), do: []
+
+  defp validate_hook_opt({:module, _}, meta),
+    do: [diag("Hook :module must be a module alias (e.g. MyNotifier)", meta)]
+
+  defp validate_hook_opt({:env, {:%{}, _, pairs}}, meta), do: validate_env_pairs(pairs, meta)
+
+  defp validate_hook_opt({:env, _}, meta),
+    do: [diag("Hook :env must be a map literal with string keys and values", meta)]
+
+  defp validate_hook_opt({:timeout, v}, _meta) when is_integer(v) and v > 0, do: []
+
+  defp validate_hook_opt({:timeout, _}, meta),
+    do: [diag("Hook :timeout must be a positive integer (milliseconds)", meta)]
+
+  # Keys outside the allowlist are reported by unknown_option_diags/4.
+  defp validate_hook_opt(_opt, _meta), do: []
 
   defp validate_hook_body(nil), do: []
 
@@ -550,6 +522,17 @@ defmodule TinyCI.DSL.Validator do
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
+
+  # The set of permitted option keys is the single source of truth in
+  # `TinyCI.DSL.Spec`; anything outside it is flagged here, while the per-key
+  # type checks live in the `validate_*_opt/2` clauses above.
+  defp unknown_option_diags(opts, context, label, meta) do
+    allowed = Spec.option_keys(context)
+
+    for {key, _value} <- opts, is_atom(key), key not in allowed do
+      diag("Unknown #{label} option: :#{key}", meta)
+    end
+  end
 
   defp diag(message, meta), do: Diagnostic.new(message, meta)
 

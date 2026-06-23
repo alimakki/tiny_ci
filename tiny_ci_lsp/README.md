@@ -1,13 +1,18 @@
 # tiny_ci_lsp
 
 A [Language Server Protocol](https://microsoft.github.io/language-server-protocol/)
-server for [`tiny_ci`](../) pipeline files. It surfaces the pipeline validator's
-load-time errors live in your editor as you type — without ever executing the
-file.
+server for [`tiny_ci`](../) pipeline files. As you type — without ever executing
+the file — it provides:
+
+- **diagnostics** — the pipeline validator's load-time errors, live;
+- **completion** — context-aware directives, option keys, and condition primitives;
+- **hover** — a one-line description and example for the symbol under the cursor.
 
 This package depends on core (`{:tiny_ci, path: ".."}`); core never depends on
 it. Diagnostics come from the shared `TinyCI.DSL.Interpreter.diagnose_string/2`
-path, so in-editor messages match what `mix tiny_ci.run` prints.
+path, so in-editor messages match what `mix tiny_ci.run` prints. Completion and
+hover read from `TinyCI.DSL.Spec`, the same single source of truth the
+validator's allowlist derives from.
 
 ## Build
 

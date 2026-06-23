@@ -542,4 +542,42 @@ defmodule TinyCI.DSL.ValidatorTest do
       assert 2 in lines
     end
   end
+
+  describe "allowlist stays in sync with TinyCI.DSL.Spec" do
+    # The validator derives its set of permitted option keys from the Spec, so a
+    # key the validator type-checks must be described in the Spec and vice versa.
+    for {context, opts} <- [
+          stage: [
+            "stage :build, %KEY%: :x do\n  step :s, cmd: \"ok\"\nend",
+            :stage
+          ],
+          step: [
+            "stage :build do\n  step :s, cmd: \"ok\", %KEY%: :x\nend",
+            :step
+          ],
+          hook: [
+            "on_success :h, cmd: \"ok\", %KEY%: :x",
+            :hook
+          ]
+        ] do
+      [template, spec_context] = opts
+
+      test "every #{context} key the validator accepts is in the Spec" do
+        template = unquote(template)
+        spec_keys = TinyCI.DSL.Spec.option_keys(unquote(spec_context))
+
+        # A made-up key must be rejected as unknown.
+        source = String.replace(template, "%KEY%", "definitely_unknown_key")
+        assert Enum.any?(diagnostics(source), &(&1.message =~ "Unknown"))
+
+        # Every Spec key must NOT be reported as unknown.
+        for key <- spec_keys do
+          source = String.replace(template, "%KEY%", Atom.to_string(key))
+
+          refute Enum.any?(diagnostics(source), &(&1.message =~ "Unknown")),
+                 "Spec key :#{key} was rejected as unknown by the validator"
+        end
+      end
+    end
+  end
 end

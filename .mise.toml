@@ -1,3 +1,23 @@
 [tools]
 erlang = "29.0.1"
 elixir = "1.20.1-otp-29"
+
+# Hooks are an experimental mise feature; opt in (scoped to this project).
+[settings]
+experimental = true
+
+# Build the language-server escript when entering the project, so editors find
+# an up-to-date `tiny_ci_lsp/tiny_ci_lsp` binary to launch.
+[hooks]
+enter = "mise run build-lsp"
+
+[tasks.build-lsp]
+description = "Build the tiny_ci_lsp escript if its sources changed"
+dir = "{{config_root}}"
+run = """
+bin=tiny_ci_lsp/tiny_ci_lsp
+if [ ! -f "$bin" ] || [ -n "$(find lib tiny_ci_lsp/lib tiny_ci_lsp/mix.exs -newer "$bin" -type f 2>/dev/null)" ]; then
+  echo "[mise] building tiny_ci_lsp escript…"
+  (cd tiny_ci_lsp && mix deps.get --quiet && mix escript.build)
+fi
+"""

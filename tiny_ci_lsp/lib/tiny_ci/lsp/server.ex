@@ -31,14 +31,24 @@ defmodule TinyCI.LSP.Server do
     TextDocumentPublishDiagnostics
   }
 
-  alias GenLSP.Requests.{Initialize, Shutdown}
+  alias GenLSP.Requests.{
+    Initialize,
+    Shutdown,
+    TextDocumentCompletion,
+    TextDocumentHover
+  }
 
   alias GenLSP.Structures.{
+    CompletionList,
+    CompletionOptions,
+    CompletionParams,
     DidChangeTextDocumentParams,
     DidCloseTextDocumentParams,
     DidOpenTextDocumentParams,
     DidSaveTextDocumentParams,
+    HoverParams,
     InitializeResult,
+    Position,
     PublishDiagnosticsParams,
     SaveOptions,
     ServerCapabilities,
@@ -49,7 +59,7 @@ defmodule TinyCI.LSP.Server do
   }
 
   alias TinyCI.DSL.Interpreter
-  alias TinyCI.LSP.DiagnosticMapper
+  alias TinyCI.LSP.{Completion, Context, DiagnosticMapper, Hover}
 
   @default_debounce_ms 200
   @server_name "tiny_ci_lsp"
@@ -71,7 +81,7 @@ defmodule TinyCI.LSP.Server do
   @impl true
   def init(lsp, args) do
     debounce_ms = Keyword.get(args, :debounce_ms, @default_debounce_ms)
-    {:ok, assign(lsp, debounce_ms: debounce_ms, timers: %{}, exit_code: 1)}
+    {:ok, assign(lsp, debounce_ms: debounce_ms, timers: %{}, documents: %{}, exit_code: 1)}
   end
 
   # ---------------------------------------------------------------------------
@@ -87,7 +97,9 @@ defmodule TinyCI.LSP.Server do
            open_close: true,
            change: TextDocumentSyncKind.full(),
            save: %SaveOptions{include_text: true}
-         }
+         },
+         completion_provider: %CompletionOptions{trigger_characters: [":", " "]},
+         hover_provider: true
        },
        server_info: %{name: @server_name}
      }, lsp}
@@ -97,9 +109,41 @@ defmodule TinyCI.LSP.Server do
     {:reply, nil, assign(lsp, exit_code: 0)}
   end
 
+  def handle_request(
+        %TextDocumentCompletion{
+          params: %CompletionParams{
+            text_document: %TextDocumentIdentifier{uri: uri},
+            position: %Position{line: line, character: character}
+          }
+        },
+        lsp
+      ) do
+    items =
+      lsp
+      |> document(uri)
+      |> Context.at(line, character)
+      |> Completion.items()
+
+    {:reply, %CompletionList{is_incomplete: false, items: items}, lsp}
+  end
+
+  def handle_request(
+        %TextDocumentHover{
+          params: %HoverParams{
+            text_document: %TextDocumentIdentifier{uri: uri},
+            position: %Position{line: line, character: character}
+          }
+        },
+        lsp
+      ) do
+    {:reply, Hover.at(document(lsp, uri), line, character), lsp}
+  end
+
   def handle_request(_request, lsp) do
     {:noreply, lsp}
   end
+
+  defp document(lsp, uri), do: Map.get(assigns(lsp).documents, uri, "")
 
   # ---------------------------------------------------------------------------
   # Notifications
@@ -120,7 +164,7 @@ defmodule TinyCI.LSP.Server do
         lsp
       ) do
     publish(lsp, uri, text)
-    {:noreply, lsp}
+    {:noreply, put_document(lsp, uri, text)}
   end
 
   def handle_notification(
@@ -132,7 +176,10 @@ defmodule TinyCI.LSP.Server do
         },
         lsp
       ) do
-    {:noreply, schedule_publish(lsp, uri, latest_text(changes))}
+    text = latest_text(changes)
+    # Track the buffer immediately so completion/hover see the live text;
+    # only the diagnostic publish is debounced.
+    {:noreply, lsp |> put_document(uri, text) |> schedule_publish(uri, text)}
   end
 
   def handle_notification(
@@ -144,8 +191,9 @@ defmodule TinyCI.LSP.Server do
         },
         lsp
       ) do
-    publish(lsp, uri, text || read_uri(uri))
-    {:noreply, lsp}
+    text = text || read_uri(uri)
+    publish(lsp, uri, text)
+    {:noreply, put_document(lsp, uri, text)}
   end
 
   def handle_notification(
@@ -155,7 +203,7 @@ defmodule TinyCI.LSP.Server do
         lsp
       ) do
     publish_diagnostics(lsp, uri, [])
-    {:noreply, lsp}
+    {:noreply, delete_document(lsp, uri)}
   end
 
   def handle_notification(%Exit{}, lsp) do
@@ -180,6 +228,14 @@ defmodule TinyCI.LSP.Server do
 
   def handle_info(_message, lsp) do
     {:noreply, lsp}
+  end
+
+  defp put_document(lsp, uri, text) do
+    assign(lsp, documents: Map.put(assigns(lsp).documents, uri, text))
+  end
+
+  defp delete_document(lsp, uri) do
+    assign(lsp, documents: Map.delete(assigns(lsp).documents, uri))
   end
 
   defp schedule_publish(lsp, uri, text) do

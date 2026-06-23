@@ -42,7 +42,9 @@ defmodule TinyCI.LSP.ServerTest do
             "openClose" => true,
             "change" => 1,
             "save" => %{"includeText" => true}
-          }
+          },
+          "completionProvider" => %{"triggerCharacters" => [":", " "]},
+          "hoverProvider" => true
         },
         "serverInfo" => %{"name" => "tiny_ci_lsp"}
       },
@@ -50,6 +52,30 @@ defmodule TinyCI.LSP.ServerTest do
     )
 
     notify(client, %{method: "initialized", jsonrpc: "2.0", params: %{}})
+  end
+
+  defp completion(client, id, line, character) do
+    request(client, %{
+      method: "textDocument/completion",
+      id: id,
+      jsonrpc: "2.0",
+      params: %{
+        textDocument: %{uri: @uri},
+        position: %{line: line, character: character}
+      }
+    })
+  end
+
+  defp hover(client, id, line, character) do
+    request(client, %{
+      method: "textDocument/hover",
+      id: id,
+      jsonrpc: "2.0",
+      params: %{
+        textDocument: %{uri: @uri},
+        position: %{line: line, character: character}
+      }
+    })
   end
 
   defp did_open(client, text) do
@@ -145,5 +171,57 @@ defmodule TinyCI.LSP.ServerTest do
     )
 
     assert diagnostic["message"] =~ "missing terminator"
+  end
+
+  test "offers stage-body directives on completion", %{client: client} do
+    initialize(client)
+    did_open(client, "stage :test do\n  \nend")
+
+    assert_notification("textDocument/publishDiagnostics", %{"uri" => @uri}, @timeout)
+
+    completion(client, 2, 1, 2)
+
+    assert_result(2, %{"isIncomplete" => false, "items" => items}, @timeout)
+    labels = Enum.map(items, & &1["label"])
+    assert "step" in labels
+    assert "env" in labels
+  end
+
+  test "offers condition primitives inside a when value", %{client: client} do
+    initialize(client)
+    did_open(client, "stage :deploy, when: \nend")
+
+    assert_notification("textDocument/publishDiagnostics", %{"uri" => @uri}, @timeout)
+
+    completion(client, 2, 0, 21)
+
+    assert_result(2, %{"items" => items}, @timeout)
+    labels = Enum.map(items, & &1["label"])
+    assert "branch()" in labels
+    assert "file_changed?(...)" in labels
+  end
+
+  test "documents the symbol under the cursor on hover", %{client: client} do
+    initialize(client)
+    did_open(client, @valid)
+
+    assert_notification("textDocument/publishDiagnostics", %{"uri" => @uri}, @timeout)
+
+    hover(client, 2, 0, 2)
+
+    assert_result(2, %{"contents" => %{"value" => value}}, @timeout)
+    assert value =~ "**stage**"
+  end
+
+  test "returns null hover when no DSL symbol is under the cursor", %{client: client} do
+    initialize(client)
+    did_open(client, @valid)
+
+    assert_notification("textDocument/publishDiagnostics", %{"uri" => @uri}, @timeout)
+
+    # Column 0 of the blank line below the pipeline — nothing to document.
+    hover(client, 3, 2, 0)
+
+    assert_result(3, nil, @timeout)
   end
 end

@@ -701,17 +701,31 @@ Pipeline files are validated against an allowlist of permitted constructs before
 Constructs outside this list (e.g. `defmodule`, `System.cmd`, `File.read`) are
 rejected at load time with a descriptive error.
 
-## Language Server (live diagnostics)
+This allowlist is described once, machine-readably, in **`TinyCI.DSL.Spec`** —
+every directive, option key (with its type), and condition primitive. The
+validator derives its permitted-key set from the Spec, and the language server's
+completion and hover read from the same source, so the three can never drift.
 
-The same validation can run **live in your editor**. `tiny_ci_lsp/` is a separate
-package (it depends on core, never the other way around) that implements a
-Language Server Protocol server over stdio. As you edit a pipeline file, a
-disallowed construct, unknown option, dependency cycle, or syntax error is
-underlined at the offending range, and the squiggle clears when you fix it.
+## Language Server (diagnostics, completion, hover)
 
-It never executes your file — it calls the same controlled-AST path the runner
-uses (`TinyCI.DSL.Interpreter.diagnose_string/2`), so the in-editor message is
-identical to what `mix tiny_ci.run` prints at load time.
+A full editing experience runs **live in your editor**. `tiny_ci_lsp/` is a
+separate package (it depends on core, never the other way around) that implements
+a Language Server Protocol server over stdio:
+
+- **Diagnostics** — a disallowed construct, unknown option, dependency cycle, or
+  syntax error is underlined at the offending range and clears when you fix it.
+- **Completion** — context-aware suggestions: directives at the right scope,
+  stage/step/hook option keys inside their calls, and `branch()` / `env(...)` /
+  `file_changed?(...)` inside a `when:` condition.
+- **Hover** — a one-line description plus an example for the symbol under the
+  cursor.
+
+It never executes your file. Diagnostics call the same controlled-AST path the
+runner uses (`TinyCI.DSL.Interpreter.diagnose_string/2`), so the in-editor
+message is identical to what `mix tiny_ci.run` prints at load time. Completion and
+hover read from `TinyCI.DSL.Spec`, the same source the validator's allowlist
+derives from. Cursor context is determined by walking the AST (via
+`Code.Fragment.container_cursor_to_quoted/1`), not by matching text.
 
 ```bash
 cd tiny_ci_lsp
