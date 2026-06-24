@@ -6,11 +6,12 @@ defmodule TinyCI.Action.MetadataTest do
   doctest TinyCI.Action.Metadata
 
   describe "struct defaults" do
-    test "inputs and capabilities default to empty lists" do
+    test "inputs, outputs, and capabilities default to empty lists" do
       meta = %Metadata{}
       assert meta.name == nil
       assert meta.version == nil
       assert meta.inputs == []
+      assert meta.outputs == []
       assert meta.capabilities == []
     end
   end
@@ -41,7 +42,13 @@ defmodule TinyCI.Action.MetadataTest do
     test "fills in defaults for omitted fields" do
       meta = Metadata.new(name: "x")
       assert meta.inputs == []
+      assert meta.outputs == []
       assert meta.capabilities == []
+    end
+
+    test "captures declared store outputs" do
+      meta = Metadata.new(name: "build", version: "1.0.0", outputs: [:image_tag, :digest])
+      assert meta.outputs == [:image_tag, :digest]
     end
 
     test "raises when given an unknown capability" do

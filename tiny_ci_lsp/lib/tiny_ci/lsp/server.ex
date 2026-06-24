@@ -35,6 +35,7 @@ defmodule TinyCI.LSP.Server do
     Initialize,
     Shutdown,
     TextDocumentCompletion,
+    TextDocumentDefinition,
     TextDocumentHover
   }
 
@@ -42,6 +43,7 @@ defmodule TinyCI.LSP.Server do
     CompletionList,
     CompletionOptions,
     CompletionParams,
+    DefinitionParams,
     DidChangeTextDocumentParams,
     DidCloseTextDocumentParams,
     DidOpenTextDocumentParams,
@@ -59,7 +61,7 @@ defmodule TinyCI.LSP.Server do
   }
 
   alias TinyCI.DSL.Interpreter
-  alias TinyCI.LSP.{Completion, Context, DiagnosticMapper, Hover}
+  alias TinyCI.LSP.{Completion, Context, Definition, DiagnosticMapper, Hover}
 
   @default_debounce_ms 200
   @server_name "tiny_ci_lsp"
@@ -99,7 +101,8 @@ defmodule TinyCI.LSP.Server do
            save: %SaveOptions{include_text: true}
          },
          completion_provider: %CompletionOptions{trigger_characters: [":", " "]},
-         hover_provider: true
+         hover_provider: true,
+         definition_provider: true
        },
        server_info: %{name: @server_name}
      }, lsp}
@@ -137,6 +140,18 @@ defmodule TinyCI.LSP.Server do
         lsp
       ) do
     {:reply, Hover.at(document(lsp, uri), line, character), lsp}
+  end
+
+  def handle_request(
+        %TextDocumentDefinition{
+          params: %DefinitionParams{
+            text_document: %TextDocumentIdentifier{uri: uri},
+            position: %Position{line: line, character: character}
+          }
+        },
+        lsp
+      ) do
+    {:reply, Definition.at(uri, document(lsp, uri), line, character), lsp}
   end
 
   def handle_request(_request, lsp) do

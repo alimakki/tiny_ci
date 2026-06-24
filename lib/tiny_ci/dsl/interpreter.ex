@@ -32,7 +32,7 @@ defmodule TinyCI.DSL.Interpreter do
     * `{:validation_error, [String.t()]}` — AST contains disallowed constructs
   """
 
-  alias TinyCI.{DSL.Diagnostic, DSL.Validator, Hook, PipelineSpec, Stage, Step}
+  alias TinyCI.{DSL.Diagnostic, DSL.FlowAnalysis, DSL.Validator, Hook, PipelineSpec, Stage, Step}
 
   @doc """
   Reads, validates, and interprets a pipeline file.
@@ -125,32 +125,14 @@ defmodule TinyCI.DSL.Interpreter do
     end
   end
 
-  # Graph-level checks run only when the grammar is valid. Wrapped defensively:
+  # Flow-level checks run only when the grammar is valid. Wrapped defensively:
   # building a spec from a grammatically-valid-but-degenerate buffer should never
   # crash the language server. Module-existence (action) checks are intentionally
   # skipped here — a step's module is often not compiled while editing.
   defp graph_diagnostics(ast, path) do
-    ast |> build_spec(path) |> dag_diagnostics()
+    FlowAnalysis.diagnostics(ast, build_spec(ast, path))
   rescue
     e -> [Diagnostic.new(Exception.message(e))]
-  end
-
-  defp dag_diagnostics(%PipelineSpec{stages: stages}) do
-    case TinyCI.DAG.validate(stages) do
-      :ok ->
-        []
-
-      {:error, {:unknown_stages, errors}} ->
-        Enum.map(errors, &Diagnostic.new/1)
-
-      {:error, {:circular_dependency, cycle}} ->
-        [
-          Diagnostic.new(
-            "Circular dependency detected. " <>
-              "Stages involved: #{Enum.map_join(cycle, ", ", &":#{&1}")}"
-          )
-        ]
-    end
   end
 
   defp parse_diagnostic(location, message, token) do

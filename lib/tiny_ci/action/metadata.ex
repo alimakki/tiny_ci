@@ -13,6 +13,10 @@ defmodule TinyCI.Action.Metadata do
     * `:version`      — semantic version string (e.g. `"1.2.0"`)
     * `:inputs`       — list of input descriptors, each a map with `:name`,
       `:type`, and `:required` keys (see `input/3`)
+    * `:outputs`      — list of store keys (atoms) the action writes via its
+      `{:ok, map}` return. Declaring them lets the language server reason about
+      store dataflow (`store(:k)` readers vs. writers); an empty list means the
+      action writes nothing to the store.
     * `:capabilities` — list of capability atoms the action requires (see
       `known_capabilities/0`)
 
@@ -30,6 +34,7 @@ defmodule TinyCI.Action.Metadata do
         name: "deploy",
         version: "1.0.0",
         inputs: [],
+        outputs: [],
         capabilities: [:network]
       }
   """
@@ -48,10 +53,11 @@ defmodule TinyCI.Action.Metadata do
           name: String.t() | nil,
           version: String.t() | nil,
           inputs: [input()],
+          outputs: [atom()],
           capabilities: [capability()]
         }
 
-  defstruct name: nil, version: nil, inputs: [], capabilities: []
+  defstruct name: nil, version: nil, inputs: [], outputs: [], capabilities: []
 
   @known_capabilities [
     :network,
@@ -95,6 +101,7 @@ defmodule TinyCI.Action.Metadata do
       name: Map.get(attrs, :name),
       version: Map.get(attrs, :version),
       inputs: Map.get(attrs, :inputs, []),
+      outputs: Map.get(attrs, :outputs, []),
       capabilities: capabilities
     }
   end

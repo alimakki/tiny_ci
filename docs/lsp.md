@@ -46,7 +46,10 @@ editor ──stdio──▶ TinyCI.LSP.Server ──▶ TinyCI.DSL.Interpreter.d
 2. **Allowlist violations** — every disallowed construct or bad option, each at
    its own span (see the [DSL Allowlist](../README.md#dsl-allowlist)).
 3. **Dependency-graph problems** — unknown `needs:` references and cycles, once
-   the grammar is otherwise valid.
+   the grammar is otherwise valid, anchored to the offending `stage`.
+4. **Store dataflow problems** — a `store(:k)` read with no writer, and the same
+   store key written by steps that may run in parallel (see
+   [Navigation and flow analysis](#navigation-and-flow-analysis)).
 
 Module-existence checks are intentionally **not** run in the editor: a step's
 `:module` is often uncompiled while you are still editing, so flagging it would
@@ -95,17 +98,54 @@ editor ──completion/hover──▶ TinyCI.LSP.Server
 | in a hook option list                    | `cmd:`, `module:`, `env:`, `timeout:`                                  |
 | inside a `when:` value                   | `branch()`, `env(...)`, `file_changed?(...)`                           |
 
+## Navigation and flow analysis
+
+Beyond syntax, the server reasons about how stages and the pipeline store are
+wired together — catching mistakes the line-by-line validator can't see. The
+semantic pass lives in core (**`TinyCI.DSL.FlowAnalysis`**) so it is testable
+without the editor, and runs only when the buffer is grammatically valid.
+
+### Go-to-definition (`textDocument/definition`)
+
+**`TinyCI.LSP.Definition`** resolves the symbol under the cursor (via
+`Code.Fragment.surround_context/2`):
+
+- a **`needs:` atom** (or any atom naming a stage) jumps to that `stage`
+  declaration in the same file;
+- a **`module:` alias** jumps to the module's source file, when the module is
+  loadable on the server's code path (compiled actions). Uncompiled modules
+  simply don't resolve.
+
+### Flow diagnostics
+
+| Check                          | Severity | Anchored at                          |
+|--------------------------------|----------|--------------------------------------|
+| `needs:` a non-existent stage  | error    | the depending `stage`                |
+| dependency cycle (`dag.ex`)    | error    | each stage in the cycle              |
+| `store(:k)` read, no writer    | warning  | the `store(:k)` call                 |
+| …read, but some writer unknown | **info** | the `store(:k)` call                 |
+| same key written in parallel   | warning  | each conflicting step                |
+
+Writers are read from each `module:` action's `c:TinyCI.Action.metadata/0`
+`:outputs`. When a module step doesn't declare `outputs` (or isn't compiled),
+its writes can't be known statically, so an otherwise-unsatisfied `store(:k)`
+read is **downgraded to an info hint** rather than a false-positive warning —
+which is the common case in-editor, where action modules are often uncompiled.
+"May run in parallel" means two steps in the same `mode: :parallel` stage, or in
+two stages with no `needs:` ordering between them (in DAG mode).
+
 ## Lifecycle handled
 
 | Notification / request        | Behaviour                                            |
 |-------------------------------|------------------------------------------------------|
-| `initialize` / `initialized`  | Handshake; advertises sync, completion, hover        |
+| `initialize` / `initialized`  | Handshake; advertises sync, completion, hover, definition |
 | `textDocument/didOpen`        | Track buffer; analyze and publish immediately        |
 | `textDocument/didChange`      | Track buffer; analyze and publish, **debounced** (`200ms`) |
 | `textDocument/didSave`        | Track buffer; analyze and publish immediately        |
 | `textDocument/didClose`       | Drop the buffer; clear diagnostics                   |
 | `textDocument/completion`     | Context-aware suggestions from the DSL spec          |
 | `textDocument/hover`          | Description + example for the symbol under the cursor |
+| `textDocument/definition`     | Jump to a stage declaration or a module's source     |
 | `shutdown` / `exit`           | Graceful shutdown                                    |
 
 The server keeps the latest text of each open document (updated immediately on

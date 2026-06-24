@@ -719,6 +719,11 @@ a Language Server Protocol server over stdio:
   `file_changed?(...)` inside a `when:` condition.
 - **Hover** — a one-line description plus an example for the symbol under the
   cursor.
+- **Go-to-definition** — jump from a `needs:` atom to its `stage` declaration, or
+  from a `module:` alias to the module's source.
+- **Flow diagnostics** — undefined `needs:` targets and dependency cycles inline,
+  plus pipeline-store dataflow warnings (`store(:k)` read with no writer; the same
+  key written by steps that may run in parallel).
 
 It never executes your file. Diagnostics call the same controlled-AST path the
 runner uses (`TinyCI.DSL.Interpreter.diagnose_string/2`), so the in-editor

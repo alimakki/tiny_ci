@@ -44,7 +44,8 @@ defmodule TinyCI.LSP.ServerTest do
             "save" => %{"includeText" => true}
           },
           "completionProvider" => %{"triggerCharacters" => [":", " "]},
-          "hoverProvider" => true
+          "hoverProvider" => true,
+          "definitionProvider" => true
         },
         "serverInfo" => %{"name" => "tiny_ci_lsp"}
       },
@@ -69,6 +70,18 @@ defmodule TinyCI.LSP.ServerTest do
   defp hover(client, id, line, character) do
     request(client, %{
       method: "textDocument/hover",
+      id: id,
+      jsonrpc: "2.0",
+      params: %{
+        textDocument: %{uri: @uri},
+        position: %{line: line, character: character}
+      }
+    })
+  end
+
+  defp definition(client, id, line, character) do
+    request(client, %{
+      method: "textDocument/definition",
       id: id,
       jsonrpc: "2.0",
       params: %{
@@ -223,5 +236,47 @@ defmodule TinyCI.LSP.ServerTest do
     hover(client, 3, 2, 0)
 
     assert_result(3, nil, @timeout)
+  end
+
+  test "go-to-definition on a needs atom jumps to the stage declaration", %{client: client} do
+    initialize(client)
+
+    source = """
+    stage :build do
+      step :c, cmd: "x"
+    end
+
+    stage :deploy, needs: [:build] do
+      step :s, cmd: "x"
+    end
+    """
+
+    did_open(client, source)
+    assert_notification("textDocument/publishDiagnostics", %{"uri" => @uri}, @timeout)
+
+    # `:build` inside needs is on line 4 (0-based); the `b` sits at character 24.
+    definition(client, 2, 4, 25)
+
+    assert_result(
+      2,
+      %{"uri" => @uri, "range" => %{"start" => %{"line" => 0, "character" => 0}}},
+      @timeout
+    )
+  end
+
+  test "publishes a flow diagnostic for an undefined needs target", %{client: client} do
+    initialize(client)
+
+    did_open(client, "stage :build, needs: [:missing] do\n  step :c, cmd: \"x\"\nend\n")
+
+    assert_notification(
+      "textDocument/publishDiagnostics",
+      %{"uri" => @uri, "diagnostics" => [diagnostic]},
+      @timeout
+    )
+
+    assert diagnostic["message"] =~ "needs unknown stage :missing"
+    # Anchored to the stage declaration, not line 1 column 1 by default.
+    assert %{"start" => %{"line" => 0}} = diagnostic["range"]
   end
 end
