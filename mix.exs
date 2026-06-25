@@ -24,7 +24,7 @@ defmodule TinyCi.MixProject do
   defp deps do
     [
       {:jason, "~> 1.4"},
-      {:tidewave, "~> 0.6.1"},
+      {:tidewave, "~> 0.6.1", only: :dev},
       {:bandit, "~> 1.12", only: :dev},
       {:credo, "~> 1.7.19", only: [:dev, :test], runtime: false}
     ]
