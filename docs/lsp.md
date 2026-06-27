@@ -164,6 +164,12 @@ mix deps.get
 mix escript.build      # produces ./tiny_ci_lsp (a self-contained executable)
 ```
 
+The build always runs in `MIX_ENV=prod` (enforced by `cli/0` in
+`tiny_ci_lsp/mix.exs`). This is deliberate: core's dev-only deps (`tidewave`,
+`bandit`) print startup output that would land on stdout and corrupt the LSP
+JSON-RPC stream the editor reads — a prod build leaves them out entirely. Do not
+build the server with `MIX_ENV=dev`.
+
 Copy the resulting `tiny_ci_lsp` binary somewhere on your `PATH`, or reference it
 by absolute path in your editor config. It requires only an Erlang/Elixir
 runtime compatible with the build (Elixir `~> 1.19`).

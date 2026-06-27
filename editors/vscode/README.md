@@ -18,6 +18,9 @@ The extension is intentionally minimal: every feature comes from the server.
    cd tiny_ci_lsp && mix escript.build      # → tiny_ci_lsp/tiny_ci_lsp
    ```
    (The repo's `.mise.toml` builds this automatically when you enter the project.)
+   The build always runs in `MIX_ENV=prod` (enforced by `cli/0` in
+   `tiny_ci_lsp/mix.exs`); a dev build would bundle `tidewave`/`bandit`, whose
+   startup output corrupts the LSP stream and prevents the server from starting.
 
 ## Install the client dependency
 

@@ -172,6 +172,12 @@ defmodule Mix.Tasks.TinyCi.Run do
     with {:ok, output_format} <- parse_output_format(opts[:output]) do
       case resolve_pipeline(opts, root, name, output_format) do
         {:ok, spec} ->
+          # Anchor working_dir/artifact/cache resolution to the project root the
+          # user invoked from, not the pipeline file's own directory. Otherwise a
+          # pipeline in `.tiny_ci/` would resolve relative paths against
+          # `.tiny_ci/` rather than the repo root.
+          spec = %{spec | root: Path.expand(root)}
+
           run_opts = [
             no_cache: opts[:no_cache] || false,
             artifacts_dir: opts[:artifacts_dir],

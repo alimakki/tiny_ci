@@ -12,6 +12,13 @@ defmodule TinyCI.LSP.MixProject do
     ]
   end
 
+  # Always build the escript in :prod so dev-only transitive deps of core
+  # (tidewave, bandit) stay out of the shipped server. Those apps emit startup
+  # output that would corrupt the LSP stdio stream the editor reads.
+  def cli do
+    [preferred_envs: ["escript.build": :prod]]
+  end
+
   def application do
     [extra_applications: [:logger]]
   end

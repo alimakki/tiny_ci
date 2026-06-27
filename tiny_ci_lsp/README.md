@@ -21,6 +21,11 @@ mix deps.get
 mix escript.build   # produces ./tiny_ci_lsp
 ```
 
+The build always runs in `MIX_ENV=prod` (enforced by `cli/0` in `mix.exs`) so
+core's dev-only deps (`tidewave`, `bandit`) stay out of the binary — their
+startup output would otherwise corrupt the LSP stdio stream. Don't build with
+`MIX_ENV=dev`.
+
 ## Test
 
 ```bash

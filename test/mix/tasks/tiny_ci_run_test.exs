@@ -140,6 +140,29 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       assert output =~ "Pipeline completed successfully"
     end
 
+    test "resolves working_dir relative to the project root, not the pipeline file's dir",
+         %{project_root: root} do
+      # Regression: a pipeline in `.tiny_ci/` must resolve relative paths against
+      # the project root, not `.tiny_ci/`. A `working_dir` that exists under root
+      # (but not under `.tiny_ci/`) proves the anchor.
+      File.mkdir_p!(Path.join(root, ".tiny_ci"))
+      File.mkdir_p!(Path.join(root, "subproject"))
+
+      File.write!(Path.join(root, ".tiny_ci/wd.exs"), """
+      stage :wd, mode: :serial do
+        step :pwd, cmd: "pwd", working_dir: "subproject"
+      end
+      """)
+
+      output =
+        capture_io(fn ->
+          result = Mix.Tasks.TinyCi.Run.run(["--root", root, "wd"])
+          assert result == :ok
+        end)
+
+      assert output =~ "Pipeline completed successfully"
+    end
+
     test "returns error when named pipeline does not exist", %{project_root: root} do
       stderr =
         capture_io(:stderr, fn ->

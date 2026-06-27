@@ -6,21 +6,24 @@ elixir = "1.20.1-otp-29"
 [settings]
 experimental = true
 
-# Build the language-server escript when entering the project, so editors find
-# an up-to-date `tiny_ci_lsp/tiny_ci_lsp` binary to launch.
+# Build the project when entering, so editors find an up-to-date
+# `tiny_ci_lsp/tiny_ci_lsp` binary to launch. Dogfooding: the actual build is
+# orchestrated by tiny_ci itself (`mix tiny_ci.run build`, see .tiny_ci/build.exs).
+# This wrapper only adds the concerns tiny_ci can't yet express — an up-to-date
+# skip, a concurrency lock, and a self-heal retry.
 [hooks]
-enter = "mise run build-lsp"
+enter = "mise run build"
 
-[tasks.build-lsp]
-description = "Build the tiny_ci_lsp escript if its sources changed"
+[tasks.build]
+description = "Build core + the tiny_ci_lsp escript (via tiny_ci) if sources changed"
 dir = "{{config_root}}"
 run = """
 root="$PWD"
 bin="$root/tiny_ci_lsp/tiny_ci_lsp"
-lock="$root/tiny_ci_lsp/.build.lock"
+lock="$root/.build.lock"
 
 # Already up to date? Nothing to do (the fast, lock-free common case).
-if [ -f "$bin" ] && [ -z "$(find "$root/lib" "$root/tiny_ci_lsp/lib" "$root/tiny_ci_lsp/mix.exs" -newer "$bin" -type f 2>/dev/null)" ]; then
+if [ -f "$bin" ] && [ -z "$(find "$root/lib" "$root/tiny_ci_lsp/lib" "$root/tiny_ci_lsp/mix.exs" "$root/.tiny_ci/build.exs" -newer "$bin" -type f 2>/dev/null)" ]; then
   exit 0
 fi
 
@@ -33,18 +36,17 @@ fi
 # hook. Concurrent `mix escript.build` runs corrupt the shared _build dir
 # (protocol consolidation replaces the consolidated/ directory wholesale).
 if ! mkdir "$lock" 2>/dev/null; then
-  echo "[mise] tiny_ci_lsp build already in progress, skipping"
+  echo "[mise] tiny_ci build already in progress, skipping"
   exit 0
 fi
 trap 'rmdir "$lock" 2>/dev/null || true' EXIT
 
-echo "[mise] building tiny_ci_lsp escript…"
-cd "$root/tiny_ci_lsp" && mix deps.get --quiet
+echo "[mise] building tiny_ci with tiny_ci (mix tiny_ci.run build)…"
 
 # A previously interrupted build can leave _build without its consolidated
 # protocols; retry once with a forced recompile to self-heal.
-if ! mix escript.build; then
-  echo "[mise] escript build failed, retrying with a forced recompile…"
-  mix compile --force && mix escript.build
+if ! mix tiny_ci.run build; then
+  echo "[mise] dogfooded build failed, retrying escript with a forced recompile…"
+  cd "$root/tiny_ci_lsp" && mix deps.get --quiet && mix compile --force && mix escript.build
 fi
 """
