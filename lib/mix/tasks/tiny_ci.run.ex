@@ -64,6 +64,7 @@ defmodule Mix.Tasks.TinyCi.Run do
   use Mix.Task
 
   alias TinyCI.{Artifacts, Discovery, DryRun, Executor, Hooks, Reporter, Results}
+  alias TinyCI.Action.Audit
   alias TinyCI.Listener
 
   @impl Mix.Task
@@ -171,25 +172,37 @@ defmodule Mix.Tasks.TinyCi.Run do
   defp run_or_error(opts, root, name, filter) do
     with {:ok, output_format} <- parse_output_format(opts[:output]) do
       case resolve_pipeline(opts, root, name, output_format) do
-        {:ok, spec} ->
-          # Anchor working_dir/artifact/cache resolution to the project root the
-          # user invoked from, not the pipeline file's own directory. Otherwise a
-          # pipeline in `.tiny_ci/` would resolve relative paths against
-          # `.tiny_ci/` rather than the repo root.
-          spec = %{spec | root: Path.expand(root)}
-
-          run_opts = [
-            no_cache: opts[:no_cache] || false,
-            artifacts_dir: opts[:artifacts_dir],
-            events: opts[:events]
-          ]
-
-          run_with_filter(spec, opts[:dry_run], filter, output_format, run_opts)
-
-        {:error, reason} ->
-          handle_error(reason)
+        {:ok, spec} -> run_resolved(spec, opts, root, filter, output_format)
+        {:error, reason} -> handle_error(reason)
       end
     end
+  end
+
+  defp run_resolved(spec, opts, root, filter, output_format) do
+    # Anchor working_dir/artifact/cache resolution to the project root the user
+    # invoked from, not the pipeline file's own directory. Otherwise a pipeline in
+    # `.tiny_ci/` would resolve relative paths against `.tiny_ci/` rather than the
+    # repo root.
+    spec = %{spec | root: Path.expand(root)}
+
+    run_opts = [
+      no_cache: opts[:no_cache] || false,
+      artifacts_dir: opts[:artifacts_dir],
+      events: opts[:events]
+    ]
+
+    case verify_actions(spec, opts[:dry_run]) do
+      :ok -> run_with_filter(spec, opts[:dry_run], filter, output_format, run_opts)
+      {:error, reason} -> handle_error(reason)
+    end
+  end
+
+  # Supply-chain gate: before executing, verify every module action is pinned in
+  # the lockfile and matches the locked version (T6). Skipped for --dry-run.
+  defp verify_actions(_spec, true), do: :ok
+
+  defp verify_actions(spec, _dry_run) do
+    Audit.verify(spec, spec.root, root_app: Mix.Project.config()[:app])
   end
 
   defp run_with_filter(spec, dry_run, filter, output_format, run_opts) do
@@ -428,6 +441,12 @@ defmodule Mix.Tasks.TinyCi.Run do
   defp print_error({:invalid_action, errors}) do
     IO.puts(:stderr, [IO.ANSI.red(), "Invalid module step or hook:", IO.ANSI.reset()])
     Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
+  end
+
+  defp print_error({:action_lock, errors}) do
+    IO.puts(:stderr, [IO.ANSI.red(), "Action supply-chain check failed:", IO.ANSI.reset()])
+    Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
+    IO.puts(:stderr, "Run `mix tiny_ci.actions.audit` to inspect the resolved action tree.")
   end
 
   defp print_error(reason) do

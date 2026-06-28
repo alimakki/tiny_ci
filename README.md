@@ -566,6 +566,25 @@ implements `TinyCI.Action` (exports `execute/2`) and each module hook exports
 > **Note:** Module steps and hooks must be pre-compiled and available on the Elixir
 > load path before TinyCI runs. They cannot be defined inside the `.exs` pipeline file.
 
+### Third-party actions & the lockfile
+
+Third-party actions are ordinary **Hex dependencies** declared in your `mix.exs`,
+so **`mix.lock` is the action lockfile** — every action is pinned to an exact
+version and checksum, with no mutable-tag supply-chain risk.
+
+Before any step runs, `mix tiny_ci.run` verifies every `module:` action against
+the lockfile and **fails closed**: an action whose package is absent from
+`mix.lock`, or whose loaded version has drifted from the locked one, aborts the
+run with a descriptive error. Your own (first-party) modules need no pin.
+
+```sh
+mix tiny_ci.actions.audit          # print the resolved action tree (package, version, checksum, status)
+```
+
+The lockfile covers the **BEAM automation layer**, not binaries pulled by
+`cmd:`/actions (apt, Docker images, npm) — pin those with their own ecosystems.
+See [`docs/actions.md`](docs/actions.md#supply-chain-action-resolution--the-lockfile).
+
 ## Sharing Data Between Steps
 
 The **pipeline store** is a key-value map that accumulates data across steps and stages

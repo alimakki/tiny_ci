@@ -1,3 +1,8 @@
+defmodule RunTaskLocalAction do
+  @moduledoc false
+  def execute(_config, _ctx), do: {:ok, %{ran: true}}
+end
+
 defmodule Mix.Tasks.TinyCi.RunTest do
   use ExUnit.Case
 
@@ -21,6 +26,25 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       File.write!(path, """
       stage :greet, mode: :serial do
         step :hello, cmd: "echo hello"
+      end
+      """)
+
+      output =
+        capture_io(fn ->
+          result = Mix.Tasks.TinyCi.Run.run(["--file", path])
+          assert result == :ok
+        end)
+
+      assert output =~ "Pipeline completed successfully"
+    end
+
+    test "supply-chain verification allows a first-party/local module action",
+         %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :build, mode: :serial do
+        step :run, module: RunTaskLocalAction
       end
       """)
 
