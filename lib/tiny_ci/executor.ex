@@ -132,9 +132,11 @@ defmodule TinyCI.Executor do
   end
 
   # Maps the `listener:` option to a set of event sinks: the console sink unless
-  # output is silenced, plus an NDJSON sink when `events:` is given.
+  # output is silenced, an NDJSON sink when `events:` is given, plus any caller-
+  # supplied `extra_sinks` (e.g. the provenance collector).
   defp build_sink_specs(listener, output_mode, opts) do
-    console_specs(listener, output_mode) ++ ndjson_specs(opts[:events])
+    console_specs(listener, output_mode) ++
+      ndjson_specs(opts[:events]) ++ Keyword.get(opts, :extra_sinks, [])
   end
 
   defp console_specs(TinyCI.Listener.Silent, _mode), do: []

@@ -63,7 +63,7 @@ defmodule Mix.Tasks.TinyCi.Run do
 
   use Mix.Task
 
-  alias TinyCI.{Artifacts, Discovery, DryRun, Executor, Hooks, Reporter, Results}
+  alias TinyCI.{Artifacts, Discovery, DryRun, Executor, Hooks, Provenance, Reporter, Results}
   alias TinyCI.Action.Audit
   alias TinyCI.Listener
 
@@ -83,7 +83,9 @@ defmodule Mix.Tasks.TinyCi.Run do
           no_cache: :boolean,
           artifacts_dir: :string,
           list_artifacts: :boolean,
-          events: :string
+          events: :string,
+          attest: :string,
+          signing_key: :string
         ],
         aliases: [f: :file, r: :root]
       )
@@ -185,15 +187,87 @@ defmodule Mix.Tasks.TinyCi.Run do
     # repo root.
     spec = %{spec | root: Path.expand(root)}
 
-    run_opts = [
+    case verify_actions(spec, opts[:dry_run]) do
+      :ok -> run_and_attest(spec, opts, root, filter, output_format)
+      {:error, reason} -> handle_error(reason)
+    end
+  end
+
+  # Runs the pipeline and, when `--attest` is given, writes a signed provenance
+  # attestation built from the run's event stream (skipped for --dry-run).
+  defp run_and_attest(spec, opts, root, filter, output_format) do
+    attest_path = if opts[:dry_run], do: nil, else: opts[:attest]
+    {run_opts, agent} = maybe_collector(base_run_opts(opts), attest_path)
+
+    result = run_with_filter(spec, opts[:dry_run], filter, output_format, run_opts)
+
+    finalize_attest(agent, attest_path, spec, opts, root, result)
+  end
+
+  defp base_run_opts(opts) do
+    [
       no_cache: opts[:no_cache] || false,
       artifacts_dir: opts[:artifacts_dir],
       events: opts[:events]
     ]
+  end
 
-    case verify_actions(spec, opts[:dry_run]) do
-      :ok -> run_with_filter(spec, opts[:dry_run], filter, output_format, run_opts)
-      {:error, reason} -> handle_error(reason)
+  defp maybe_collector(run_opts, nil), do: {run_opts, nil}
+
+  defp maybe_collector(run_opts, _attest_path) do
+    {:ok, agent} = Agent.start_link(fn -> [] end)
+    {run_opts ++ [extra_sinks: [{Provenance.Collector, agent: agent}]], agent}
+  end
+
+  defp finalize_attest(nil, _path, _spec, _opts, _root, result), do: result
+
+  defp finalize_attest(agent, path, spec, opts, root, result) do
+    events = Provenance.Collector.events(agent)
+    Agent.stop(agent)
+
+    case write_attestation(path, spec, opts, root, events) do
+      # A pipeline failure dominates; otherwise a failed attestation surfaces.
+      :ok -> result
+      {:error, _} = attest_error -> if result == :ok, do: attest_error, else: result
+    end
+  end
+
+  defp write_attestation(path, spec, opts, root, events) do
+    with {:ok, private} <- signing_key(opts),
+         {:ok, actions} <- Audit.analyze(spec, root, root_app: Mix.Project.config()[:app]),
+         ctx = TinyCI.Context.build(root: root),
+         statement =
+           Provenance.build(
+             events: events,
+             spec: spec,
+             actions: actions,
+             commit: ctx.commit,
+             branch: ctx.branch,
+             tool_version: to_string(Mix.Project.config()[:version])
+           ),
+         {:ok, envelope} <- Provenance.Attestation.sign(statement, private: private),
+         :ok <- File.write(path, Jason.encode!(envelope, pretty: true)) do
+      IO.puts(:stderr, "Wrote signed attestation to #{path}")
+      :ok
+    else
+      {:error, reason} ->
+        print_error({:attestation, reason})
+        {:error, :attestation_failed}
+    end
+  end
+
+  defp signing_key(opts) do
+    cond do
+      path = opts[:signing_key] -> read_signing_key(path)
+      key = System.get_env("TINY_CI_SIGNING_KEY") -> {:ok, String.trim(key)}
+      true -> {:error, :no_signing_key}
+    end
+  end
+
+  defp read_signing_key(path) do
+    case File.read(path) do
+      {:ok, content} -> {:ok, String.trim(content)}
+      {:error, _} -> {:error, {:key_unreadable, path}}
     end
   end
 
@@ -447,6 +521,25 @@ defmodule Mix.Tasks.TinyCi.Run do
     IO.puts(:stderr, [IO.ANSI.red(), "Action supply-chain check failed:", IO.ANSI.reset()])
     Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
     IO.puts(:stderr, "Run `mix tiny_ci.actions.audit` to inspect the resolved action tree.")
+  end
+
+  defp print_error({:attestation, :no_signing_key}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Cannot write attestation: no signing key.",
+      IO.ANSI.reset(),
+      " Pass --signing-key PATH or set TINY_CI_SIGNING_KEY. ",
+      "Generate one with `mix tiny_ci.attest.gen_key`."
+    ])
+  end
+
+  defp print_error({:attestation, reason}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Failed to write attestation: ",
+      IO.ANSI.reset(),
+      inspect(reason)
+    ])
   end
 
   defp print_error(reason) do

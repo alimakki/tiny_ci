@@ -585,6 +585,23 @@ The lockfile covers the **BEAM automation layer**, not binaries pulled by
 `cmd:`/actions (apt, Docker images, npm) — pin those with their own ecosystems.
 See [`docs/actions.md`](docs/actions.md#supply-chain-action-resolution--the-lockfile).
 
+### Signed run attestations (provenance)
+
+A run can emit a **signed attestation** of exactly what executed — pipeline,
+commit, per-step outcome/duration, and every action at its locked
+version/checksum — as a tamper-evident, in-toto/SLSA-style record.
+
+```bash
+mix tiny_ci.attest.gen_key --out ci_key                       # one-time keypair
+mix tiny_ci.run --attest run.att.json --signing-key ci_key    # run + attest
+mix tiny_ci.attest.verify run.att.json --key ci_key.pub       # verify (fails if modified)
+```
+
+"What ran" is sourced from the [event stream](docs/events.md) and action
+versions/checksums from the lockfile, so the attestation ties *what was pinned*
+to *what actually ran*. Signing is pluggable (Ed25519 local keypair by default).
+See [`docs/provenance.md`](docs/provenance.md).
+
 ## Sharing Data Between Steps
 
 The **pipeline store** is a key-value map that accumulates data across steps and stages
