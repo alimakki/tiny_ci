@@ -23,6 +23,7 @@ defmodule TinyCI.Hooks do
   """
 
   alias TinyCI.Hook
+  alias TinyCI.Output
 
   @default_timeout 30_000
 
@@ -62,23 +63,20 @@ defmodule TinyCI.Hooks do
     pipeline_env = Map.get(context, :pipeline_env, %{})
     hook_env = build_hook_env(context)
     resolved_env = resolve_env(env, store)
-    merged_env = pipeline_env |> Map.merge(hook_env) |> Map.merge(resolved_env) |> Map.to_list()
+    merged_env = pipeline_env |> Map.merge(hook_env) |> Map.merge(resolved_env)
     actual_timeout = timeout || @default_timeout
 
-    task =
-      Task.Supervisor.async_nolink(TinyCI.TaskSupervisor, fn ->
-        System.cmd("sh", ["-c", cmd], env: merged_env, stderr_to_stdout: true)
-      end)
-
-    case Task.yield(task, actual_timeout) || Task.shutdown(task, :brutal_kill) do
-      {:ok, {_output, 0}} ->
+    # Buffered so hook output does not interleave with pipeline output, and with a
+    # timeout that kills the hook's process subtree rather than orphaning it.
+    case Output.run_cmd(cmd, mode: :buffered, env: merged_env, timeout: actual_timeout) do
+      {:passed, _output} ->
         :ok
 
-      {:ok, {output, _status}} ->
+      {:failed, output} ->
         IO.puts(:stderr, "Hook #{name} failed: #{String.trim(output)}")
         :ok
 
-      nil ->
+      {:timeout, _output} ->
         IO.puts(:stderr, "Hook #{name} timed out after #{actual_timeout}ms")
         :ok
     end

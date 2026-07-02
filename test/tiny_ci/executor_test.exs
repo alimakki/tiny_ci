@@ -501,6 +501,27 @@ defmodule TinyCI.ExecutorTest do
       # Duration should be roughly around the timeout, not the full sleep
       assert step.duration_ms < 2_000
     end
+
+    test "timed out step leaves no orphaned OS processes (including descendants)" do
+      # Unique marker so pgrep only matches processes this test spawned. The `&&`
+      # keeps the shell alive with the sleep as a child, exercising subtree kill.
+      marker = "sleep 61.#{System.unique_integer([:positive])}"
+
+      stage = %Stage{
+        name: :test,
+        mode: :serial,
+        steps: [%Step{name: :slow, cmd: "#{marker} && echo done", timeout: 200}]
+      }
+
+      assert %StageResult{status: :failed, step_results: [step]} = Executor.execute(stage)
+      assert step.status == :failed
+
+      # Give the TERM -> KILL grace period time to complete.
+      Process.sleep(300)
+
+      {out, _} = System.cmd("pgrep", ["-f", marker], stderr_to_stdout: true)
+      assert String.trim(out) == "", "expected no surviving processes matching #{marker}"
+    end
   end
 
   describe "execute/2 with generic set config" do

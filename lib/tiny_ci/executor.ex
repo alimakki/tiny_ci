@@ -891,14 +891,11 @@ defmodule TinyCI.Executor do
   end
 
   defp run_cmd_with_timeout(cmd, output_opts, timeout) when is_integer(timeout) do
-    task =
-      Task.Supervisor.async_nolink(TinyCI.TaskSupervisor, fn ->
-        Output.run_cmd(cmd, output_opts)
-      end)
-
-    case Task.yield(task, timeout) || Task.shutdown(task, :brutal_kill) do
-      {:ok, result} -> result
-      nil -> {:failed, "Step timed out after #{timeout}ms"}
+    # Output.run_cmd enforces the timeout at the OS-process level, killing the
+    # command's entire subtree so nothing is left orphaned when it elapses.
+    case Output.run_cmd(cmd, Keyword.put(output_opts, :timeout, timeout)) do
+      {:timeout, _output} -> {:failed, "Step timed out after #{timeout}ms"}
+      result -> result
     end
   end
 
