@@ -602,6 +602,24 @@ versions/checksums from the lockfile, so the attestation ties *what was pinned*
 to *what actually ran*. Signing is pluggable (Ed25519 local keypair by default).
 See [`docs/provenance.md`](docs/provenance.md).
 
+### Discovering actions (registry)
+
+The registry is a **curated index over the action packages you already depend
+on** — small and verifiable, not a vast marketplace. A package self-identifies by
+listing its action modules in its `:tiny_ci_actions` application env, so the index
+builds programmatically from installed deps.
+
+```bash
+mix tiny_ci.actions.search deploy                 # find actions by name/summary
+mix tiny_ci.actions.search --capability network   # filter by blast radius
+mix tiny_ci.actions.index --out actions.json      # generate a static JSON index
+```
+
+Each result surfaces the package, version, declared **capabilities** (blast
+radius), and a **review tier** (`verified` / `community` / `unreviewed`). Tiers
+come from a checked-in curated overlay merged onto the scan. See
+[`docs/action-registry.md`](docs/action-registry.md).
+
 ## Sharing Data Between Steps
 
 The **pipeline store** is a key-value map that accumulates data across steps and stages
