@@ -620,6 +620,26 @@ radius), and a **review tier** (`verified` / `community` / `unreviewed`). Tiers
 come from a checked-in curated overlay merged onto the scan. See
 [`docs/action-registry.md`](docs/action-registry.md).
 
+### Sandboxed execution of third-party actions
+
+Because the BEAM is not a security boundary, **third-party** module actions (code
+shipped by a dependency) run inside an **OS sandbox** with only the capabilities
+they declared, while your own first-party code runs inline. Driver selection is
+automatic and **fails closed** — inline execution refuses untrusted code, and the
+sandbox refuses to run if no OS backend is available.
+
+An action's `TinyCI.Action.Metadata` capabilities (`:network`,
+`:filesystem_read/write`, `:env_read`, `:process_spawn`), intersected with the
+run's grants, become a **deny-by-default** policy the OS enforces. Config and a
+sanitized context cross the boundary as plain serialized data (no shared
+PIDs/handles); the `{:ok, store_delta}` result merges back exactly as an inline
+step's would, with granted secrets masked.
+
+The reference backend is macOS **Seatbelt** (`sandbox-exec`); an OCI-container
+backend for Linux/CI fits the same contract. Confinement extends to native code
+and subprocesses, so a NIF or `System.cmd/3` that tries to reach the network or
+write outside its grant is blocked. See [`docs/sandbox.md`](docs/sandbox.md).
+
 ## Sharing Data Between Steps
 
 The **pipeline store** is a key-value map that accumulates data across steps and stages

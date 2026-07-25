@@ -33,6 +33,7 @@ defmodule TinyCI.Executor do
 
   alias TinyCI.{Artifacts, Cache, DAG, Matrix, MatrixRunResult, Output, StageResult, StepResult}
   alias TinyCI.Events
+  alias TinyCI.Executor.Driver
 
   alias TinyCI.Events.{
     CacheLookup,
@@ -860,24 +861,38 @@ defmodule TinyCI.Executor do
     stage_env = Map.get(ctx, :stage_env, %{})
     ctx = Map.put(ctx, :env, Map.merge(pipeline_env, stage_env))
 
-    {duration_ms, {status, store_data}} =
-      measure(fn ->
-        case apply(module, :execute, [config, ctx]) do
-          :ok -> {:passed, %{}}
-          {:ok, data} when is_map(data) -> {:passed, data}
-          {:error, _reason} -> {:failed, %{}}
-        end
-      end)
+    driver = Driver.select(module, ctx)
+
+    {duration_ms, outcome} =
+      measure(fn -> driver.run(module, config, ctx, Driver.opts(ctx)) end)
+
+    {status, store_data, output} = interpret_outcome(outcome)
 
     %StepResult{
       name: name,
       status: status,
-      output: "",
+      output: output,
       duration_ms: duration_ms,
       allowed_failure: allow_failure and status == :failed,
       store_data: store_data
     }
   end
+
+  defp interpret_outcome({:ok, delta}) when is_map(delta), do: {:passed, delta, ""}
+  defp interpret_outcome({:error, reason}), do: {:failed, %{}, driver_error_message(reason)}
+
+  defp driver_error_message({:untrusted_action, module}) do
+    "Refused to run untrusted action #{inspect(module)} inline: it belongs to a " <>
+      "dependency and must run in a sandbox (no sandbox driver selected)."
+  end
+
+  defp driver_error_message({:sandbox_unavailable, backend}) do
+    "No sandbox backend available (#{inspect(backend)}); refusing to run an " <>
+      "untrusted action unsandboxed."
+  end
+
+  defp driver_error_message(reason) when is_binary(reason), do: reason
+  defp driver_error_message(reason), do: inspect(reason)
 
   defp resolve_env(env, store) do
     Map.new(env, fn

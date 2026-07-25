@@ -44,6 +44,13 @@ defmodule TinyCI.Action.Resolver do
                    crypto ssl public_key inets sasl runtime_tools os_mon
                    syntax_tools tools asn1)a
 
+  @doc """
+  Returns `true` if `app` ships with Erlang/OTP or Elixir (never a lockfile
+  entry, and always trusted for sandbox purposes).
+  """
+  @spec builtin?(atom()) :: boolean()
+  def builtin?(app) when is_atom(app), do: app in @builtin_apps
+
   @doc "Distinct `module:` targets referenced by a spec's steps and hooks."
   @spec references(PipelineSpec.t()) :: [module()]
   def references(%PipelineSpec{stages: stages, hooks: hooks}) do
