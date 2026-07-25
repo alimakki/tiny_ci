@@ -635,10 +635,11 @@ sanitized context cross the boundary as plain serialized data (no shared
 PIDs/handles); the `{:ok, store_delta}` result merges back exactly as an inline
 step's would, with granted secrets masked.
 
-The reference backend is macOS **Seatbelt** (`sandbox-exec`); an OCI-container
-backend for Linux/CI fits the same contract. Confinement extends to native code
-and subprocesses, so a NIF or `System.cmd/3` that tries to reach the network or
-write outside its grant is blocked. See [`docs/sandbox.md`](docs/sandbox.md).
+The backend is chosen per host: macOS **Seatbelt** (`sandbox-exec`) or Linux
+**Bubblewrap** (`bwrap`); an OCI-container backend for CI fits the same contract.
+Confinement extends to native code and subprocesses, so a NIF or `System.cmd/3`
+that tries to reach the network or write outside its grant is blocked. See
+[`docs/sandbox.md`](docs/sandbox.md).
 
 ## Sharing Data Between Steps
 

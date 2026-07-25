@@ -1,16 +1,16 @@
-defmodule TinyCI.Sandbox.SeatbeltTest do
+defmodule TinyCI.Sandbox.BubblewrapTest do
   @moduledoc """
-  Integration tests that exercise the real macOS Seatbelt backend: a confined
-  child BEAM actually runs each action, and the kernel enforces the policy.
+  Integration tests that exercise the real Linux Bubblewrap backend: a confined
+  child BEAM actually runs each action, and the kernel enforces the namespaces.
 
-  Tagged `:seatbelt` and skipped automatically where `sandbox-exec` is not
-  available (non-macOS CI).
+  Tagged `:bubblewrap` and excluded automatically where `bwrap` is not available
+  (see `test/test_helper.exs`).
   """
   use ExUnit.Case, async: false
 
   alias TinyCI.Context
   alias TinyCI.Executor.Driver.Sandbox
-  alias TinyCI.Sandbox.Backend.Seatbelt
+  alias TinyCI.Sandbox.Backend.Bubblewrap
 
   alias TinyCI.SandboxFixtures.{
     Echo,
@@ -22,11 +22,11 @@ defmodule TinyCI.Sandbox.SeatbeltTest do
     WriteProbeAllowed
   }
 
-  @moduletag :seatbelt
+  @moduletag :bubblewrap
 
   defp run(module, config, opts \\ []) do
     context = Context.build(branch: "main", store: %{seed: 1})
-    Sandbox.run(module, config, context, Keyword.put(opts, :backend, Seatbelt))
+    Sandbox.run(module, config, context, Keyword.put(opts, :backend, Bubblewrap))
   end
 
   defp listener do

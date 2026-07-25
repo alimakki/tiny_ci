@@ -76,34 +76,43 @@ the event stream or the console.
 
 ## Backends
 
-The OS mechanism is pluggable behind `TinyCI.Sandbox.Backend`:
+The OS mechanism is pluggable behind `TinyCI.Sandbox.Backend`, and
+`Backend.default/0` picks the one available on the host:
 
-- **`Backend.Seatbelt`** (macOS, reference implementation) — confines a child
-  BEAM with `sandbox-exec`. The child is launched with `env -i`, so it inherits
-  **no** environment except a minimal runtime base and the granted vars: an
-  ungranted secret is simply *absent*, not merely hidden. The kernel enforces
-  the generated `TinyCI.Sandbox.Profile`, so network, filesystem, and native
-  bypass attempts are all caught.
-- An **OCI-container** backend for Linux/CI fits the same one-function contract
-  (`run/3`) and shares the protocol — the same envelope the future orchestrator/
-  runner split (T16) sends over the wire.
+- **`Backend.Seatbelt`** (macOS) — confines a child BEAM with `sandbox-exec`,
+  launched with `env -i`.
+- **`Backend.Bubblewrap`** (Linux) — confines a child BEAM with `bwrap` in fresh
+  mount/PID/network namespaces, launched with `--clearenv`. It needs no root
+  (unprivileged user namespaces), so it runs the same in a dev shell and in CI.
 
-### Seatbelt profile (v1)
+Either way the child inherits **no** environment except a minimal runtime base
+and the granted vars: an ungranted secret is simply *absent*, not merely hidden.
+The kernel enforces the generated `TinyCI.Sandbox.Profile`, so network,
+filesystem, and native bypass attempts are all caught. An **OCI-container**
+backend fits the same one-function contract (`run/3`) and shares the protocol —
+the same envelope the future orchestrator/runner split (T16) sends over the wire.
+
+### Profile (v1)
 
 Fully denying reads is impractical for a BEAM (it must read the runtime and
-every `.beam`), so v1 enforces a targeted, kernel-backed policy:
+every `.beam`), so v1 enforces a targeted, kernel-backed policy on both
+platforms:
 
-- **network** denied unless `:network` is declared;
+- **network** denied unless `:network` is declared (Seatbelt `(deny network*)`;
+  Bubblewrap an isolated net namespace via `--unshare-net`);
 - **writes** denied by default, allowed only under the sandbox scratch dir, the
-  temp locations the runtime needs, and explicitly granted paths;
+  temp locations the runtime needs, and explicitly granted paths (Bubblewrap
+  starts from a read-only `--ro-bind / /` and binds just those paths writable);
 - **explicit read denials** for any path the run marks secret.
 
-Because Seatbelt confines a process *and all its descendants*, these controls
+Because the sandbox confines a process *and all its descendants*, these controls
 hold for native code too — a NIF or a `System.cmd/3` subprocess that tries to
 open a socket or write outside the grant is blocked exactly as BEAM code is.
-This is verified by the enforcement tests in
-[`test/tiny_ci/sandbox/seatbelt_test.exs`](../test/tiny_ci/sandbox/seatbelt_test.exs),
-including a native-subprocess escape attempt that fails to break out.
+This is verified by the per-backend enforcement tests in
+[`test/tiny_ci/sandbox/seatbelt_test.exs`](../test/tiny_ci/sandbox/seatbelt_test.exs)
+and
+[`test/tiny_ci/sandbox/bubblewrap_test.exs`](../test/tiny_ci/sandbox/bubblewrap_test.exs),
+each including a native-subprocess escape attempt that fails to break out.
 
 ## Scope
 

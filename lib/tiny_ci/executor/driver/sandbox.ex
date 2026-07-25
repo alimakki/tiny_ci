@@ -4,9 +4,9 @@ defmodule TinyCI.Executor.Driver.Sandbox do
 
   It derives a `TinyCI.Sandbox.Policy` from the action's
   `TinyCI.Action.Metadata`, serializes a request (config + a sanitized context)
-  with `TinyCI.Sandbox.Protocol`, hands it to a `TinyCI.Sandbox.Backend`
-  (Seatbelt by default), and decodes the response — masking any granted secrets
-  on the way out (`TinyCI.Sandbox.Redaction`).
+  with `TinyCI.Sandbox.Protocol`, hands it to the host's `TinyCI.Sandbox.Backend`
+  (Seatbelt on macOS, Bubblewrap on Linux), and decodes the response — masking
+  any granted secrets on the way out (`TinyCI.Sandbox.Redaction`).
 
   Only the documented action-facing context fields cross the boundary; executor
   handles (`:events`, `:run_id`, …) never leave the runner. If no backend is
@@ -16,19 +16,23 @@ defmodule TinyCI.Executor.Driver.Sandbox do
   @behaviour TinyCI.Executor.Driver
 
   alias TinyCI.Action
+  alias TinyCI.Sandbox.Backend
   alias TinyCI.Sandbox.{Policy, Protocol, Redaction}
-  alias TinyCI.Sandbox.Backend.Seatbelt
 
   @context_keys [:branch, :commit, :changed_files, :store, :timestamp]
 
   @impl TinyCI.Executor.Driver
   def run(module, config, context, opts) do
-    backend = Keyword.get(opts, :backend, Seatbelt)
+    case Keyword.get(opts, :backend) || Backend.default() do
+      nil ->
+        {:error, {:sandbox_unavailable, :no_backend}}
 
-    if backend.available?() do
-      confine(backend, module, config, context, opts)
-    else
-      {:error, {:sandbox_unavailable, backend}}
+      backend ->
+        if backend.available?() do
+          confine(backend, module, config, context, opts)
+        else
+          {:error, {:sandbox_unavailable, backend}}
+        end
     end
   end
 
