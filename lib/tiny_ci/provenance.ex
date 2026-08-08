@@ -17,9 +17,24 @@ defmodule TinyCI.Provenance do
 
   `build/1` is pure; signing and envelope wrapping live in
   `TinyCI.Provenance.Attestation`.
+
+  ## Divergent runs
+
+  A run that execution control altered (T10 — `set_store`, a forced `skip`, a
+  forced `retry`) is flagged `divergent` in the predicate, with each change listed
+  under `divergences`. `divergent?/1` exposes the same judgement, and
+  `mix tiny_ci.run --attest` refuses to sign such a run: it records what an
+  operator made happen, not what the pipeline does.
   """
 
-  alias TinyCI.Events.{PipelineCompleted, PipelineStarted, StepCompleted, StepSkipped}
+  alias TinyCI.Events.{
+    PipelineCompleted,
+    PipelineStarted,
+    RunDiverged,
+    StepCompleted,
+    StepSkipped
+  }
+
   alias TinyCI.PipelineSpec
 
   @statement_type "https://in-toto.io/Statement/v1"
@@ -66,11 +81,54 @@ defmodule TinyCI.Provenance do
         "startedAt" => started_at(events),
         "finishedAt" => finished_at(events),
         "builder" => %{"tool" => @tool, "version" => tool_version},
+        "divergent" => divergent?(events),
+        "divergences" => build_divergences(events),
         "actions" => build_actions(actions, executed, steps),
         "steps" => steps
       }
     }
   end
+
+  @doc """
+  Returns `true` when execution control altered the run (T10).
+
+  A `set_store`, a forced `skip`, or a forced `retry` each emit
+  `TinyCI.Events.RunDiverged`. Such a run describes what an operator made happen,
+  not what the pipeline does, so `mix tiny_ci.run --attest` refuses to sign it —
+  the statement is still buildable so the divergence can be inspected.
+
+  ## Examples
+
+      iex> TinyCI.Provenance.divergent?([])
+      false
+
+      iex> event = %TinyCI.Events.RunDiverged{
+      ...>   run_id: "r", timestamp: DateTime.utc_now(), reason: :set_store
+      ...> }
+      iex> TinyCI.Provenance.divergent?([event])
+      true
+  """
+  @spec divergent?([TinyCI.Events.t()]) :: boolean()
+  def divergent?(events), do: Enum.any?(events, &match?(%RunDiverged{}, &1))
+
+  # ---------------------------------------------------------------------------
+  # Divergences (from the event stream)
+  # ---------------------------------------------------------------------------
+
+  defp build_divergences(events) do
+    for %RunDiverged{} = event <- events do
+      %{
+        "reason" => to_string(event.reason),
+        "stage" => stage_or_step(event.stage),
+        "step" => stage_or_step(event.step),
+        "detail" => event.detail,
+        "at" => iso(event.timestamp)
+      }
+    end
+  end
+
+  defp stage_or_step(nil), do: nil
+  defp stage_or_step(name), do: to_string(name)
 
   # ---------------------------------------------------------------------------
   # Steps (from the event stream)

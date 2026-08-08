@@ -4,6 +4,8 @@ defmodule TinyCI.EventsTest do
   alias TinyCI.Events
 
   alias TinyCI.Events.{
+    BreakpointHit,
+    BreakpointResumed,
     CacheLookup,
     HookCompleted,
     HookStarted,
@@ -11,6 +13,7 @@ defmodule TinyCI.EventsTest do
     MatrixRunStarted,
     PipelineCompleted,
     PipelineStarted,
+    RunDiverged,
     StageCompleted,
     StageSkipped,
     StageStarted,
@@ -935,13 +938,197 @@ defmodule TinyCI.EventsTest do
            step: :u,
            key: "k",
            result: :hit
-         }, "cache_lookup"}
+         }, "cache_lookup"},
+        {%BreakpointHit{
+           run_id: @run_id,
+           timestamp: @timestamp,
+           pause_id: "pause_1",
+           phase: :before,
+           scope: :step,
+           stage: :t
+         }, "breakpoint_hit"},
+        {%BreakpointResumed{
+           run_id: @run_id,
+           timestamp: @timestamp,
+           pause_id: "pause_1",
+           command: :continue,
+           waited_ms: 0
+         }, "breakpoint_resumed"},
+        {%RunDiverged{run_id: @run_id, timestamp: @timestamp, reason: :set_store}, "run_diverged"}
       ]
 
       for {event, expected} <- mapping do
         assert Events.type(event) == expected,
                "#{inspect(event.__struct__)} should map to #{expected}"
       end
+    end
+  end
+
+  describe "BreakpointHit" do
+    defp hit(overrides \\ %{}) do
+      Map.merge(
+        %BreakpointHit{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          pause_id: "pause_1",
+          phase: :before,
+          scope: :step,
+          stage: :test,
+          step: :unit,
+          breakpoint: "before:test.unit",
+          working_dir: "/repo",
+          branch: "main",
+          commit: "abc",
+          env: %{"MIX_ENV" => "test"},
+          store: %{"tag" => "v1"}
+        },
+        overrides
+      )
+    end
+
+    test "encodes the whole inspectable payload" do
+      json = decode(hit())
+
+      assert json["run_id"] == @run_id
+      assert json["timestamp"] == @timestamp_iso
+      assert json["pause_id"] == "pause_1"
+      assert json["phase"] == "before"
+      assert json["scope"] == "step"
+      assert json["stage"] == "test"
+      assert json["step"] == "unit"
+      assert json["breakpoint"] == "before:test.unit"
+      assert json["working_dir"] == "/repo"
+      assert json["branch"] == "main"
+      assert json["commit"] == "abc"
+      assert json["env"] == %{"MIX_ENV" => "test"}
+      assert json["store"] == %{"tag" => "v1"}
+    end
+
+    test "encodes a stage boundary with a null step" do
+      assert decode(hit(%{scope: :stage, step: nil}))["step"] == nil
+    end
+
+    test "encodes the matrix combination as an object" do
+      json = decode(hit(%{matrix_combination: [elixir: "1.18", otp: "27"]}))
+      assert json["matrix_combination"] == %{"elixir" => "1.18", "otp" => "27"}
+    end
+
+    test "omits the matrix combination when there is none" do
+      assert decode(hit())["matrix_combination"] == nil
+    end
+
+    test "carries the pending result on an :after boundary" do
+      result = %{"status" => "failed", "duration_ms" => 12, "output" => "boom"}
+      assert decode(hit(%{phase: :after, result: result}))["result"] == result
+    end
+
+    test "requires the fields that identify a pause" do
+      assert_raise ArgumentError, fn ->
+        struct!(BreakpointHit, run_id: @run_id, timestamp: @timestamp)
+      end
+    end
+  end
+
+  describe "BreakpointResumed" do
+    test "encodes the command, wait, and whether a timeout released it" do
+      json =
+        decode(%BreakpointResumed{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          pause_id: "pause_1",
+          command: :abort,
+          waited_ms: 1234,
+          stage: :test,
+          step: :unit,
+          timed_out: true
+        })
+
+      assert json["pause_id"] == "pause_1"
+      assert json["command"] == "abort"
+      assert json["waited_ms"] == 1234
+      assert json["stage"] == "test"
+      assert json["step"] == "unit"
+      assert json["timed_out"] == true
+    end
+
+    test "defaults timed_out to false" do
+      json =
+        decode(%BreakpointResumed{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          pause_id: "pause_1",
+          command: :continue,
+          waited_ms: 0
+        })
+
+      assert json["timed_out"] == false
+      assert json["stage"] == nil
+    end
+  end
+
+  describe "RunDiverged" do
+    test "encodes the reason and what changed" do
+      json =
+        decode(%RunDiverged{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          reason: :set_store,
+          stage: :deploy,
+          step: :push,
+          detail: ~s(tag = "v2")
+        })
+
+      assert json["reason"] == "set_store"
+      assert json["stage"] == "deploy"
+      assert json["step"] == "push"
+      assert json["detail"] == ~s(tag = "v2")
+    end
+
+    test "a run-level divergence carries no stage or step" do
+      json = decode(%RunDiverged{run_id: @run_id, timestamp: @timestamp, reason: :skip})
+
+      assert json["reason"] == "skip"
+      assert json["stage"] == nil
+      assert json["step"] == nil
+      assert json["detail"] == nil
+    end
+  end
+
+  describe "aborted status" do
+    test "run_finished can report an aborted run" do
+      json =
+        decode(%PipelineCompleted{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          status: :aborted,
+          duration_ms: 5
+        })
+
+      assert json["status"] == "aborted"
+    end
+
+    test "stage_finished and step_finished can report an aborted unit" do
+      stage =
+        decode(%StageCompleted{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          stage: :t,
+          status: :aborted,
+          duration_ms: 0
+        })
+
+      step =
+        decode(%StepCompleted{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          stage: :t,
+          step: :u,
+          status: :aborted,
+          duration_ms: 0
+        })
+
+      assert stage["status"] == "aborted"
+      assert step["status"] == "aborted"
     end
   end
 end

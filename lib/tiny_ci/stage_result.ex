@@ -11,7 +11,7 @@ defmodule TinyCI.StageResult do
   stages receive this store via the pipeline context.
   """
 
-  @type status :: :passed | :failed | :skipped
+  @type status :: :passed | :failed | :skipped | :aborted
 
   @type t :: %__MODULE__{
           name: atom(),

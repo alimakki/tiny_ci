@@ -48,6 +48,13 @@ mix tiny_ci.run [pipeline] [options]
 | `--no-cache` | | Bypass all cache lookups for this run |
 | `--artifacts-dir DIR` | | Override the base directory for artifact storage |
 | `--list-artifacts` | | Show artifacts from the most recent run and exit |
+| `--events FILE` | | Write the run's NDJSON event stream to `FILE` (`-` for stdout) |
+| `--attest FILE` | | Write a signed provenance attestation for the run |
+| `--signing-key PATH` | | Ed25519 private key used by `--attest` |
+| `--break SPEC` | | Pause at a boundary — `before:STAGE[.STEP]` / `after:STAGE[.STEP]`. Repeatable |
+| `--break-timeout MS` | | Auto-resolve a breakpoint after `MS`; required when no terminal can answer |
+| `--break-timeout-action ACT` | | `abort` (default) or `continue` on timeout |
+| `--debug-serial` | | Force serial scheduling while breakpoints are armed |
 
 The optional `pipeline` argument selects a named pipeline from `.tiny_ci/`:
 
@@ -641,6 +648,50 @@ Confinement extends to native code and subprocesses, so a NIF or `System.cmd/3`
 that tries to reach the network or write outside its grant is blocked. See
 [`docs/sandbox.md`](docs/sandbox.md).
 
+### Breakpoints (execution control)
+
+Pause a run at a step or stage boundary, inspect the live store and resolved
+environment, and take a command — instead of editing the `.exs`, re-pushing, and
+waiting.
+
+```bash
+mix tiny_ci.run --break before:deploy              # pause before the deploy stage
+mix tiny_ci.run --break after:test.unit            # pause on a specific step's result
+mix tiny_ci.run --break before:deploy --debug-serial
+```
+
+```
+⏸  breakpoint before deploy.push
+   stage:  deploy
+   step:   push
+   wd:     /repo
+   git:    main @ 4f1c8a2b
+   store:
+     image_tag = "v1.4.2"
+   env:
+     MIX_ENV = "prod"
+(tiny_ci) set image_tag v1.4.3
+   store.image_tag = "v1.4.3" — run marked divergent (not attestable)
+(tiny_ci) retry
+```
+
+Commands are `continue`, `skip`, `retry` (re-runs the body, bypassing the cache),
+`abort`, and `set KEY VALUE`. Because every step and DAG stage runs in its own
+process, **pausing one branch does not freeze the independent ones** — use
+`--debug-serial` when you want predictable stepping instead.
+
+Editing the store, or forcing a skip or retry, marks the run **divergent**: it emits
+`run_diverged` into the event stream and `--attest` refuses to sign it, because it
+records what an operator made happen rather than what the pipeline does. An
+`abort` is reported as `aborted` rather than `failed`, so a JSON consumer can tell
+"somebody stopped this" from "the code is broken".
+
+`--break` is refused outright when nothing can answer the prompt (non-TTY, or
+`--output json`) unless `--break-timeout` is given, so a stray breakpoint can never
+hang CI. The control surface is transport-agnostic — the terminal REPL is just one
+subscriber — so an editor debugger or web UI drives the same protocol. See
+[`docs/execution-control.md`](docs/execution-control.md).
+
 ## Sharing Data Between Steps
 
 The **pipeline store** is a key-value map that accumulates data across steps and stages
@@ -854,7 +905,7 @@ All events live under `TinyCI.Events.*` and share two mandatory fields:
 | Struct | Emitted when |
 |--------|--------------|
 | `PipelineStarted` | A pipeline run begins |
-| `PipelineCompleted` | A pipeline run finishes (`status: :passed \| :failed`) |
+| `PipelineCompleted` | A pipeline run finishes (`status: :passed \| :failed \| :aborted`) |
 | `StageStarted` | A stage begins executing |
 | `StageSkipped` | A stage is skipped (condition or filter) |
 | `StageCompleted` | A stage finishes |
@@ -867,6 +918,10 @@ All events live under `TinyCI.Events.*` and share two mandatory fields:
 | `MatrixRunCompleted` | One matrix combination finishes |
 | `HookStarted` | A pipeline hook begins |
 | `HookCompleted` | A pipeline hook finishes |
+| `CacheLookup` | A cached step resolves its cache key (hit or miss) |
+| `BreakpointHit` | Execution pauses at an armed breakpoint, carrying the inspectable boundary |
+| `BreakpointResumed` | A paused boundary is released by a control command |
+| `RunDiverged` | Manual control altered the run (`set_store`, forced skip/retry) |
 
 All structs implement `Jason.Encoder`. Atoms are encoded as strings; `DateTime`
 values are encoded as ISO 8601 strings. Keyword-list `combination` fields on
@@ -895,8 +950,14 @@ lib/
   mix/tasks/
     tiny_ci.run.ex        # CLI entry point (mix tiny_ci.run)
   tiny_ci/
-    application.ex        # OTP application / task supervisor
+    application.ex        # OTP application / task + control-registry supervisor
     context.ex            # Git context builder
+    control.ex            # Execution control: checkpoint / subscribe / resume
+    control/
+      breakpoint.ex       # --break grammar: parse, format, match, validate
+      console.ex          # Terminal REPL driver for paused boundaries
+      server.ex           # Per-run control plane (armed breaks, paused sessions)
+      session.ex          # A paused boundary and its inspectable payload
     discovery.ex          # Pipeline file discovery
     dry_run.ex            # --dry-run plan printer
     dsl/
@@ -905,8 +966,10 @@ lib/
       validator.ex        # AST allowlist validator
     dag.ex                # DAG level computation and cycle detection
     dsl.ex                # Macro-based DSL (internal use)
-    events.ex             # Typed event vocabulary (14 structs)
+    events.ex             # Typed event vocabulary
     executor.ex           # Stage/step execution engine
+    executor/
+      env.ex              # Resolves pipeline ⊕ stage ⊕ step env for a step
     hooks.ex              # Hook runner
     matrix.ex             # Matrix combination generator and helpers
     matrix_run_result.ex  # MatrixRunResult struct
@@ -921,6 +984,12 @@ test/
     tiny_ci_run_test.exs  # Mix task integration tests
   tiny_ci/
     context_test.exs
+    control/
+      breakpoint_test.exs
+      console_test.exs
+      server_test.exs
+      session_test.exs
+    control_integration_test.exs
     discovery_test.exs
     dsl/
       condition_eval_test.exs
@@ -962,6 +1031,7 @@ mix credo                          # static analysis
 - **Dependency caching** — `cache: [paths: [...], key: "file"]` skips steps on hash-keyed hits, stores at `~/.cache/tiny_ci/`, `--no-cache` flag, `mix tiny_ci.cache clean` to purge
 - **Artifact persistence** — `artifact: [name: "build", paths: [...]]` copies declared outputs to `~/.local/share/tiny_ci/artifacts/<project>/<run_id>/`, injects path into pipeline store, `required: true` fails the step if paths are absent, `--artifacts-dir` override, `--list-artifacts` to inspect
 - **Language server (live diagnostics)** — `tiny_ci_lsp`, a separate stdio LSP package that surfaces the validator's load-time errors live in-editor with accurate ranges, debounced as you type, over a shared code path with the runner ([docs/lsp.md](docs/lsp.md))
+- **Execution control (breakpoints)** — `--break before:deploy` / `--break after:test.unit` pause a run at a step/stage boundary with the live store, resolved env, working dir, git context and matrix combination inspectable, then `continue` / `skip` / `retry` / `abort` / `set KEY VALUE`; independent branches keep running, `--debug-serial` forces predictable stepping, `--break-timeout` guarantees CI cannot hang, and a hand-steered run is marked **divergent** and refused by attestation ([docs/execution-control.md](docs/execution-control.md))
 
 ### Up Next
 

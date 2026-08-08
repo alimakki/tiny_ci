@@ -563,4 +563,256 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       assert "run_finished" in types
     end
   end
+
+  describe "--break" do
+    # The test suite runs without a TTY, so no interactive driver is attached and
+    # `--break-timeout` is mandatory. That is the guard, exercised for real.
+    defp pipeline(root, body) do
+      path = Path.join(root, "tiny_ci.exs")
+      File.write!(path, body)
+      path
+    end
+
+    defp two_stage_pipeline(root) do
+      pipeline(root, """
+      stage :test, mode: :serial do
+        step :unit, cmd: "true"
+      end
+
+      stage :deploy, mode: :serial do
+        step :push, cmd: "true"
+      end
+      """)
+    end
+
+    test "refuses to arm with nothing able to answer the prompt", %{project_root: root} do
+      path = two_stage_pipeline(root)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            assert {:error, :no_pipeline} =
+                     Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "before:deploy"])
+          end)
+        end)
+
+      assert stderr =~ "Refusing to arm --break with nothing to release it"
+      assert stderr =~ "--break-timeout MS"
+    end
+
+    test "rejects an unparsable spec before running anything", %{project_root: root} do
+      path = two_stage_pipeline(root)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            assert {:error, :no_pipeline} =
+                     Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "during:deploy"])
+          end)
+        end)
+
+      assert stderr =~ "Invalid --break"
+      assert stderr =~ ~s(unknown breakpoint phase "during")
+    end
+
+    test "rejects an unknown stage and lists the real ones", %{project_root: root} do
+      path = two_stage_pipeline(root)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            assert {:error, :no_pipeline} =
+                     Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "before:nope"])
+          end)
+        end)
+
+      assert stderr =~ "unknown stage :nope"
+      assert stderr =~ "Available stages: :test, :deploy"
+    end
+
+    test "rejects an unknown step and lists that stage's steps", %{project_root: root} do
+      path = two_stage_pipeline(root)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            assert {:error, :no_pipeline} =
+                     Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "after:test.nope"])
+          end)
+        end)
+
+      assert stderr =~ "unknown step :nope in stage :test"
+      assert stderr =~ "Available steps: :unit"
+    end
+
+    test "reports every bad spec at once", %{project_root: root} do
+      path = two_stage_pipeline(root)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            Mix.Tasks.TinyCi.Run.run([
+              "--file",
+              path,
+              "--break",
+              "during:deploy",
+              "--break",
+              "sideways:test"
+            ])
+          end)
+        end)
+
+      assert stderr =~ ~s("during")
+      assert stderr =~ ~s("sideways")
+    end
+
+    test "rejects an unknown --break-timeout-action", %{project_root: root} do
+      path = two_stage_pipeline(root)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            assert {:error, :no_pipeline} =
+                     Mix.Tasks.TinyCi.Run.run([
+                       "--file",
+                       path,
+                       "--break",
+                       "before:deploy",
+                       "--break-timeout-action",
+                       "sideways"
+                     ])
+          end)
+        end)
+
+      assert stderr =~ "Unknown --break-timeout-action"
+      assert stderr =~ "abort, continue"
+    end
+
+    test "rejects a non-positive --break-timeout", %{project_root: root} do
+      path = two_stage_pipeline(root)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            assert {:error, :no_pipeline} =
+                     Mix.Tasks.TinyCi.Run.run([
+                       "--file",
+                       path,
+                       "--break",
+                       "before:deploy",
+                       "--break-timeout",
+                       "0"
+                     ])
+          end)
+        end)
+
+      assert stderr =~ "Invalid --break-timeout"
+    end
+
+    test "a headless breakpoint times out and aborts the run", %{project_root: root} do
+      path = two_stage_pipeline(root)
+      events_path = Path.join(root, "run.ndjson")
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            assert {:error, :pipeline_failed} =
+                     Mix.Tasks.TinyCi.Run.run([
+                       "--file",
+                       path,
+                       "--break",
+                       "before:deploy",
+                       "--break-timeout",
+                       "50",
+                       "--events",
+                       events_path
+                     ])
+          end)
+        end)
+
+      assert stderr =~ "Pipeline aborted by execution control at stage :deploy"
+
+      events =
+        events_path
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!/1)
+
+      hit = Enum.find(events, &(&1["type"] == "breakpoint_hit"))
+      assert hit["breakpoint"] == "before:deploy"
+      assert hit["phase"] == "before"
+      assert hit["scope"] == "stage"
+      assert hit["stage"] == "deploy"
+
+      resumed = Enum.find(events, &(&1["type"] == "breakpoint_resumed"))
+      assert resumed["command"] == "abort"
+      assert resumed["timed_out"] == true
+
+      # The abort surfaces as its own status, not as a test failure.
+      assert Enum.find(events, &(&1["type"] == "run_finished"))["status"] == "aborted"
+    end
+
+    test "--break-timeout-action continue lets the run finish", %{project_root: root} do
+      path = two_stage_pipeline(root)
+
+      output =
+        capture_io(fn ->
+          assert :ok =
+                   Mix.Tasks.TinyCi.Run.run([
+                     "--file",
+                     path,
+                     "--break",
+                     "before:deploy",
+                     "--break-timeout",
+                     "50",
+                     "--break-timeout-action",
+                     "continue"
+                   ])
+        end)
+
+      assert output =~ "Pipeline completed successfully"
+    end
+
+    test "--debug-serial is accepted alongside --break", %{project_root: root} do
+      path = two_stage_pipeline(root)
+
+      output =
+        capture_io(fn ->
+          assert :ok =
+                   Mix.Tasks.TinyCi.Run.run([
+                     "--file",
+                     path,
+                     "--break",
+                     "after:test.unit",
+                     "--break-timeout",
+                     "50",
+                     "--break-timeout-action",
+                     "continue",
+                     "--debug-serial"
+                   ])
+        end)
+
+      assert output =~ "Pipeline completed successfully"
+    end
+
+    test "a run without --break arms nothing and emits no control events",
+         %{project_root: root} do
+      path = two_stage_pipeline(root)
+      events_path = Path.join(root, "run.ndjson")
+
+      capture_io(fn ->
+        assert :ok = Mix.Tasks.TinyCi.Run.run(["--file", path, "--events", events_path])
+      end)
+
+      types =
+        events_path
+        |> File.read!()
+        |> String.split("\n", trim: true)
+        |> Enum.map(&Jason.decode!(&1)["type"])
+
+      refute "breakpoint_hit" in types
+      refute "breakpoint_resumed" in types
+      refute "run_diverged" in types
+    end
+  end
 end

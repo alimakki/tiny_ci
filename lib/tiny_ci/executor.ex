@@ -29,11 +29,18 @@ defmodule TinyCI.Executor do
   (default) prints progress, `TinyCI.Listener.Silent` suppresses it (e.g. when
   serializing results to JSON) — and still drives the buffered step-output, matrix,
   and retry-attempt renderings that have not yet moved to the event sink.
+
+  Passing `control:` arms execution-control breakpoints (see `TinyCI.Control` and
+  `docs/execution-control.md`): the process that reaches an armed step/stage
+  boundary blocks awaiting a command, so an independent parallel branch keeps
+  running. Without `control:`, no control plane is started and every boundary costs
+  a single map lookup.
   """
 
-  alias TinyCI.{Artifacts, Cache, DAG, Matrix, MatrixRunResult, Output, StageResult, StepResult}
+  alias TinyCI.{Artifacts, Cache, Control, DAG, Matrix, MatrixRunResult, Output}
+  alias TinyCI.{StageResult, StepResult}
   alias TinyCI.Events
-  alias TinyCI.Executor.Driver
+  alias TinyCI.Executor.{Driver, Env}
 
   alias TinyCI.Events.{
     CacheLookup,
@@ -80,11 +87,18 @@ defmodule TinyCI.Executor do
       * `:output`   — output mode: `:streaming`, `:buffered`, or `:auto` (default `:auto`)
       * `:listener` — a `TinyCI.Listener` implementation (default `TinyCI.Listener.Human`)
       * `:filter`   — list of stage name atoms to run; others are omitted
+      * `:control`  — execution-control options (`:breakpoints`, `:timeout`,
+        `:timeout_action`, `:subscribers`, `:serial`). See `TinyCI.Control`.
 
   ## Returns
 
     * `{:ok, [%StageResult{}]}` — when all stages succeed or are skipped
     * `{:error, {:stage_failed, stage_name, reason}, [%StageResult{}]}` — on first failure
+    * `{:error, {:aborted, stage_name}, [%StageResult{}]}` — when execution control
+      aborted the run
+
+  Raises `ArgumentError` when `control:` carries an unparsable `--break` spec —
+  a caller error, and one `mix tiny_ci.run` rejects before the run begins.
   """
   def run_pipeline(stages, context \\ nil, opts \\ [])
 
@@ -102,6 +116,7 @@ defmodule TinyCI.Executor do
 
     ctx = Map.put(ctx, :events, dispatcher)
     pipeline_name = opts[:pipeline_name] || :pipeline
+    {ctx, control} = start_control(ctx, opts[:control], dispatcher)
 
     try do
       Events.emit(ctx, %PipelineStarted{
@@ -128,9 +143,36 @@ defmodule TinyCI.Executor do
 
       result
     after
+      # Stopped before the dispatcher so any control event it still emits is sunk.
+      stop_control(control)
       Events.Dispatcher.stop(dispatcher)
     end
   end
+
+  # Starts the run's control plane only when the caller armed breakpoints, and puts
+  # its pid on the context. `Control.checkpoint/2` short-circuits on a `nil` here,
+  # which is what keeps an ordinary run on exactly today's code path.
+  defp start_control(ctx, nil, _dispatcher), do: {ctx, nil}
+
+  defp start_control(ctx, control, dispatcher) do
+    case Control.server_opts(control, ctx.run_id, dispatcher) do
+      {:ok, server_opts} ->
+        {:ok, server} = Control.Server.start_link(server_opts)
+
+        ctx =
+          ctx
+          |> Map.put(:control, server)
+          |> Map.put(:control_serial, Keyword.get(control, :serial, false))
+
+        {ctx, server}
+
+      {:error, messages} ->
+        raise ArgumentError, "invalid control breakpoints: " <> Enum.join(messages, "; ")
+    end
+  end
+
+  defp stop_control(nil), do: :ok
+  defp stop_control(server), do: GenServer.stop(server)
 
   # Maps the `listener:` option to a set of event sinks: the console sink unless
   # output is silenced, an NDJSON sink when `events:` is given, plus any caller-
@@ -147,6 +189,7 @@ defmodule TinyCI.Executor do
   defp ndjson_specs(path), do: [{Events.Sink.NDJSON, [path: path]}]
 
   defp pipeline_status({:ok, _}), do: :passed
+  defp pipeline_status({:error, {:aborted, _stage}, _}), do: :aborted
   defp pipeline_status({:error, _, _}), do: :failed
 
   defp now, do: DateTime.utc_now()
@@ -203,6 +246,9 @@ defmodule TinyCI.Executor do
         if output_mode == :buffered, do: listener.stage_finished(stage_result)
 
         case stage_result.status do
+          :aborted ->
+            {:halt, {:error, {:aborted, stage.name}, Enum.reverse([stage_result | acc])}}
+
           :failed ->
             {:halt,
              {:error, {:stage_failed, stage.name, :failed}, Enum.reverse([stage_result | acc])}}
@@ -246,18 +292,19 @@ defmodule TinyCI.Executor do
         {acc_results ++ stage_results, new_store, new_blocked}
       end)
 
-    if Enum.any?(all_results, &(&1.status == :failed)) do
-      failed = Enum.find(all_results, &(&1.status == :failed))
-      {:error, {:stage_failed, failed.name, :failed}, all_results}
-    else
-      {:ok, all_results}
+    # An abort dominates a failure: it says the run was stopped, not that the code
+    # under test is broken.
+    case {first_with(all_results, :aborted), first_with(all_results, :failed)} do
+      {nil, nil} -> {:ok, all_results}
+      {nil, failed} -> {:error, {:stage_failed, failed.name, :failed}, all_results}
+      {aborted, _} -> {:error, {:aborted, aborted.name}, all_results}
     end
   end
 
+  defp first_with(results, status), do: Enum.find(results, &(&1.status == status))
+
   defp execute_dag_level(stages, ctx, output_mode, blocked, listener) do
-    caller_gl = Process.group_leader()
-    tasks = Enum.map(stages, &spawn_dag_stage(&1, ctx, output_mode, blocked, caller_gl, listener))
-    stage_results = Task.await_many(tasks, :infinity)
+    stage_results = run_dag_stages(stages, ctx, output_mode, blocked, listener)
 
     new_blocked =
       Enum.zip(stages, stage_results)
@@ -268,6 +315,24 @@ defmodule TinyCI.Executor do
 
     {stage_results, new_blocked}
   end
+
+  # `--debug-serial` trades parallelism for predictable stepping: with a breakpoint
+  # armed, independent stages run one at a time so the operator is never prompted
+  # about two boundaries at once. Off by default — pausing one branch must not
+  # freeze the others.
+  defp run_dag_stages(stages, ctx, output_mode, blocked, listener) do
+    if serial_control?(ctx) do
+      Enum.map(stages, &run_dag_stage(&1, ctx, output_mode, blocked, listener))
+    else
+      caller_gl = Process.group_leader()
+
+      stages
+      |> Enum.map(&spawn_dag_stage(&1, ctx, output_mode, blocked, caller_gl, listener))
+      |> Task.await_many(:infinity)
+    end
+  end
+
+  defp serial_control?(ctx), do: Map.get(ctx, :control_serial, false)
 
   defp spawn_dag_stage(stage, ctx, output_mode, blocked, caller_gl, listener) do
     Task.Supervisor.async(TinyCI.TaskSupervisor, fn ->
@@ -392,12 +457,7 @@ defmodule TinyCI.Executor do
         |> Map.put(:stage_env, stage.env || %{})
         |> Map.put(:stage_name, stage.name)
 
-      result =
-        if stage.matrix != [] do
-          execute_matrix_stage(stage, ctx_with_stage, output_mode, listener)
-        else
-          execute_regular_stage(stage, ctx_with_stage, output_mode, listener)
-        end
+      result = run_stage_with_control(stage, ctx_with_stage, output_mode, listener)
 
       Events.emit(context, %StageCompleted{
         run_id: run_id(context),
@@ -411,29 +471,97 @@ defmodule TinyCI.Executor do
     end
   end
 
+  # The `before:` / `after:` stage boundaries. Runs in whichever process owns the
+  # stage — the pipeline process in sequential mode, the stage's own task in DAG
+  # mode — so pausing here leaves sibling stages untouched.
+  defp run_stage_with_control(stage, ctx, output_mode, listener) do
+    case Control.checkpoint(ctx, phase: :before) do
+      {:abort, ctx, _overrides} -> aborted_stage(stage, ctx)
+      {:skip, ctx, _overrides} -> control_skipped_stage(stage, ctx)
+      {_continue_or_retry, ctx, _overrides} -> review_stage(stage, ctx, output_mode, listener)
+    end
+  end
+
+  defp review_stage(stage, ctx, output_mode, listener) do
+    result = run_stage_body(stage, ctx, output_mode, listener)
+    # The `after:` payload must show the store the stage produced, not the one it
+    # started with, so the operator inspects (and edits) what actually happened.
+    after_ctx = Map.put(ctx, :store, result.store)
+
+    case Control.checkpoint(after_ctx, phase: :after, result: result) do
+      {:continue, ctx, _overrides} -> %{result | store: ctx.store}
+      {:skip, ctx, _overrides} -> %{result | status: :skipped, store: ctx.store}
+      {:abort, ctx, _overrides} -> %{result | status: :aborted, store: ctx.store}
+      {:retry, ctx, _overrides} -> review_stage(stage, ctx, output_mode, listener)
+    end
+  end
+
+  defp run_stage_body(stage, ctx, output_mode, listener) do
+    if stage.matrix != [] do
+      execute_matrix_stage(stage, ctx, output_mode, listener)
+    else
+      execute_regular_stage(stage, ctx, output_mode, listener)
+    end
+  end
+
+  defp aborted_stage(stage, ctx) do
+    %StageResult{
+      name: stage.name,
+      status: :aborted,
+      step_results: [],
+      duration_ms: 0,
+      store: ctx.store
+    }
+  end
+
+  defp control_skipped_stage(stage, ctx) do
+    Events.emit(ctx, %StageSkipped{
+      run_id: run_id(ctx),
+      timestamp: now(),
+      stage: stage.name,
+      reason: "skipped by execution control"
+    })
+
+    %StageResult{
+      name: stage.name,
+      status: :skipped,
+      step_results: [],
+      duration_ms: 0,
+      store: ctx.store
+    }
+  end
+
   defp run_id(ctx), do: Map.get(ctx, :run_id)
 
   defp execute_regular_stage(stage, context, output_mode, listener) do
     {duration_ms, {step_results, updated_store}} =
       measure(fn -> execute_by_mode(stage, context, output_mode, listener) end)
 
-    status =
-      if Enum.all?(step_results, &(&1.status in [:passed, :skipped] or &1.allowed_failure)),
-        do: :passed,
-        else: :failed
-
     %StageResult{
       name: stage.name,
-      status: status,
+      status: rollup_status(step_results),
       step_results: step_results,
       duration_ms: duration_ms,
       store: updated_store
     }
   end
 
+  # An abort outranks any failure or `allow_failure:` tolerance — the run was
+  # stopped by hand, and no declaration in the pipeline file can excuse that away.
+  defp rollup_status(step_results) do
+    cond do
+      Enum.any?(step_results, &(&1.status == :aborted)) -> :aborted
+      Enum.all?(step_results, &step_acceptable?/1) -> :passed
+      true -> :failed
+    end
+  end
+
+  defp step_acceptable?(%StepResult{status: status, allowed_failure: allowed}),
+    do: status in [:passed, :skipped] or allowed
+
   defp execute_matrix_stage(stage, context, _output_mode, listener) do
     combinations = Matrix.combinations(stage.matrix)
-    max_concurrency = stage.max_parallel || length(combinations)
+    max_concurrency = matrix_concurrency(stage, combinations, context)
     caller_gl = Process.group_leader()
 
     {duration_ms, run_results} =
@@ -454,20 +582,32 @@ defmodule TinyCI.Executor do
 
     listener.matrix_stage_finished(run_results)
 
-    any_failed = Enum.any?(run_results, &(&1.status == :failed))
-    status = if any_failed and not stage.allow_failure, do: :failed, else: :passed
-
     merged_store =
       Enum.reduce(run_results, context.store, fn r, acc -> Map.merge(acc, r.store) end)
 
     %StageResult{
       name: stage.name,
-      status: status,
+      status: matrix_stage_status(run_results, stage.allow_failure),
       step_results: [],
       matrix_runs: run_results,
       duration_ms: duration_ms,
       store: merged_store
     }
+  end
+
+  # `--debug-serial` also caps matrix fan-out at one combination, so stepping
+  # through a matrix stage does not queue up N simultaneous prompts.
+  defp matrix_concurrency(stage, combinations, context) do
+    if serial_control?(context), do: 1, else: stage.max_parallel || length(combinations)
+  end
+
+  defp matrix_stage_status(run_results, allow_failure) do
+    cond do
+      Enum.any?(run_results, &(&1.status == :aborted)) -> :aborted
+      allow_failure -> :passed
+      Enum.any?(run_results, &(&1.status == :failed)) -> :failed
+      true -> :passed
+    end
   end
 
   defp run_matrix_combination(stage, combination, context, listener) do
@@ -485,14 +625,16 @@ defmodule TinyCI.Executor do
       context
       |> Map.update(:stage_env, combo_env, &Map.merge(&1, combo_env))
       |> Map.update(:store, combo_store, &Map.merge(&1, combo_store))
+      # Carried so a breakpoint inside a matrix stage can report *which*
+      # combination it stopped in — otherwise N identical payloads are ambiguous.
+      |> Map.put(:matrix_combination, combination)
 
     stage_for_run = %{stage | matrix: [], max_parallel: nil}
 
     {duration_ms, {step_results, updated_store}} =
       measure(fn -> execute_by_mode(stage_for_run, ctx, :buffered, listener) end)
 
-    any_failed = Enum.any?(step_results, &(&1.status == :failed and not &1.allowed_failure))
-    status = if any_failed, do: :failed, else: :passed
+    status = rollup_status(step_results)
 
     Events.emit(context, %MatrixRunCompleted{
       run_id: run_id(context),
@@ -528,14 +670,7 @@ defmodule TinyCI.Executor do
 
   defp execute_step_or_skip(step, context, output_mode, prefix, working_dir, listener) do
     if skip_step?(step, context) do
-      Events.emit(context, %StepSkipped{
-        run_id: run_id(context),
-        timestamp: now(),
-        stage: stage_name(context),
-        step: step.name,
-        reason: "condition not met"
-      })
-
+      emit_step_skipped(context, step, "condition not met")
       %StepResult{name: step.name, status: :skipped, duration_ms: 0}
     else
       Events.emit(context, %StepStarted{
@@ -545,25 +680,95 @@ defmodule TinyCI.Executor do
         step: step.name
       })
 
-      result =
-        step
-        |> execute_with_cache(context, output_mode, prefix, working_dir, listener)
-        |> persist_step_artifacts(step, context, working_dir)
-
-      emit_step_output(context, step.name, result.output)
-
-      Events.emit(context, %StepCompleted{
-        run_id: run_id(context),
-        timestamp: now(),
-        stage: stage_name(context),
-        step: step.name,
-        status: result.status,
-        duration_ms: result.duration_ms,
-        output: result.output
-      })
-
-      result
+      run_step_with_control(step, context, output_mode, prefix, working_dir, listener)
     end
+  end
+
+  # The `before:` step boundary. Runs in the step's own process (its task in
+  # parallel mode, the stage's process in serial mode), so a pause is scoped to
+  # this step alone.
+  defp run_step_with_control(step, context, output_mode, prefix, working_dir, listener) do
+    case Control.checkpoint(context, control_opts(step, working_dir, phase: :before)) do
+      {:abort, ctx, overrides} ->
+        finish_step(ctx, step, control_result(step, :aborted, overrides))
+
+      {:skip, ctx, overrides} ->
+        emit_step_skipped(ctx, step, "skipped by execution control")
+        control_result(step, :skipped, overrides)
+
+      {_continue_or_retry, ctx, overrides} ->
+        review_step(step, ctx, output_mode, prefix, working_dir, listener, overrides)
+    end
+  end
+
+  # Runs the step body, then offers the `after:` boundary. Store edits ride out on
+  # the result's `store_data` so they propagate through the same merge a module
+  # step's own return value does — including out of a parallel branch.
+  defp review_step(step, ctx, output_mode, prefix, working_dir, listener, overrides) do
+    result =
+      step
+      |> execute_with_cache(ctx, output_mode, prefix, working_dir, listener)
+      |> persist_step_artifacts(step, ctx, working_dir)
+      |> merge_overrides(overrides)
+
+    after_ctx = Map.put(ctx, :store, Map.merge(ctx.store, result.store_data))
+    opts = control_opts(step, working_dir, phase: :after, result: result)
+
+    case Control.checkpoint(after_ctx, opts) do
+      {:continue, c, edits} ->
+        finish_step(c, step, merge_overrides(result, edits))
+
+      {:skip, c, edits} ->
+        finish_step(c, step, %{merge_overrides(result, edits) | status: :skipped})
+
+      {:abort, c, edits} ->
+        finish_step(c, step, %{merge_overrides(result, edits) | status: :aborted})
+
+      {:retry, c, edits} ->
+        # Bypass the cache: a hit would make the retry a silent no-op, and the
+        # operator asked for the body to actually run again.
+        retry_ctx = c |> Map.put(:store, c.store) |> Map.put(:no_cache, true)
+        review_step(step, retry_ctx, output_mode, prefix, working_dir, listener, edits)
+    end
+  end
+
+  defp control_opts(step, working_dir, opts) do
+    Keyword.merge(opts, step: step.name, step_env: step.env, working_dir: working_dir)
+  end
+
+  defp control_result(step, status, overrides) do
+    %StepResult{name: step.name, status: status, duration_ms: 0, store_data: overrides}
+  end
+
+  defp merge_overrides(result, overrides) when map_size(overrides) == 0, do: result
+
+  defp merge_overrides(result, overrides),
+    do: %{result | store_data: Map.merge(result.store_data, overrides)}
+
+  defp finish_step(ctx, step, result) do
+    emit_step_output(ctx, step.name, result.output)
+
+    Events.emit(ctx, %StepCompleted{
+      run_id: run_id(ctx),
+      timestamp: now(),
+      stage: stage_name(ctx),
+      step: step.name,
+      status: result.status,
+      duration_ms: result.duration_ms,
+      output: result.output
+    })
+
+    result
+  end
+
+  defp emit_step_skipped(ctx, step, reason) do
+    Events.emit(ctx, %StepSkipped{
+      run_id: run_id(ctx),
+      timestamp: now(),
+      stage: stage_name(ctx),
+      step: step.name,
+      reason: reason
+    })
   end
 
   defp stage_name(ctx), do: Map.get(ctx, :stage_name)
@@ -746,21 +951,20 @@ defmodule TinyCI.Executor do
   defp skip_step?(%{when_condition: ast}, context),
     do: not TinyCI.DSL.ConditionEval.eval(ast, context)
 
-  defp execute_by_mode(
-         %{mode: :serial, steps: steps, working_dir: stage_wd},
-         context,
-         output_mode,
-         listener
-       ),
-       do: execute_serial(steps, stage_wd, context, output_mode, listener)
+  defp execute_by_mode(%{steps: steps, working_dir: stage_wd} = stage, ctx, output_mode, listener) do
+    case effective_mode(stage, ctx) do
+      :serial -> execute_serial(steps, stage_wd, ctx, output_mode, listener)
+      :parallel -> execute_parallel(steps, stage_wd, ctx, output_mode, listener)
+    end
+  end
 
-  defp execute_by_mode(
-         %{mode: :parallel, steps: steps, working_dir: stage_wd},
-         context,
-         output_mode,
-         listener
-       ),
-       do: execute_parallel(steps, stage_wd, context, output_mode, listener)
+  # `--debug-serial` degrades a `mode: :parallel` stage to serial so steps are
+  # reached in declaration order while breakpoints are armed.
+  defp effective_mode(%{mode: :parallel}, ctx) do
+    if serial_control?(ctx), do: :serial, else: :parallel
+  end
+
+  defp effective_mode(%{mode: mode}, _ctx), do: mode
 
   defp execute_serial(steps, stage_wd, context, output_mode, listener) do
     root = Map.get(context, :root)
@@ -779,6 +983,8 @@ defmodule TinyCI.Executor do
           {:skipped, _} -> {:cont, {[step_result | acc], new_store}}
           {:failed, true} -> {:cont, {[step_result | acc], new_store}}
           {:failed, false} -> {:halt, {[step_result | acc], new_store}}
+          # No `allow_failure:` tolerance for an abort — the run was stopped.
+          {:aborted, _} -> {:halt, {[step_result | acc], new_store}}
         end
       end)
 
@@ -828,9 +1034,7 @@ defmodule TinyCI.Executor do
         allowed_failure: allow_failure
       }
     else
-      pipeline_env = Map.get(ctx, :pipeline_env, %{})
-      stage_env = Map.get(ctx, :stage_env, %{})
-      merged_env = pipeline_env |> Map.merge(stage_env) |> Map.merge(resolve_env(env, ctx.store))
+      merged_env = Env.resolve(ctx, env)
       output_opts = [mode: output_mode, env: merged_env, prefix: prefix, working_dir: working_dir]
 
       {duration_ms, {status, output}} =
@@ -857,9 +1061,7 @@ defmodule TinyCI.Executor do
        )
        when not is_nil(module) do
     config = if block, do: block.(), else: %{}
-    pipeline_env = Map.get(ctx, :pipeline_env, %{})
-    stage_env = Map.get(ctx, :stage_env, %{})
-    ctx = Map.put(ctx, :env, Map.merge(pipeline_env, stage_env))
+    ctx = Map.put(ctx, :env, Env.base(ctx))
 
     driver = Driver.select(module, ctx)
 
@@ -893,13 +1095,6 @@ defmodule TinyCI.Executor do
 
   defp driver_error_message(reason) when is_binary(reason), do: reason
   defp driver_error_message(reason), do: inspect(reason)
-
-  defp resolve_env(env, store) do
-    Map.new(env, fn
-      {k, {:store, key}} -> {k, to_string(Map.get(store, key, ""))}
-      {k, v} -> {k, v}
-    end)
-  end
 
   defp run_cmd_with_timeout(cmd, output_opts, nil) do
     Output.run_cmd(cmd, output_opts)

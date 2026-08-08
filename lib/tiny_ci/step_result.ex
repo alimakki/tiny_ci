@@ -15,7 +15,7 @@ defmodule TinyCI.StepResult do
   Shell command steps always have an empty `store_data`.
   """
 
-  @type status :: :passed | :failed | :skipped
+  @type status :: :passed | :failed | :skipped | :aborted
 
   @type cache_status :: :hit | :miss | nil
 

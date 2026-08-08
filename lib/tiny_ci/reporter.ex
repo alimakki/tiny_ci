@@ -90,15 +90,21 @@ defmodule TinyCI.Reporter do
   @doc """
   Determines the overall pipeline status from a list of stage results.
 
-  Returns `:failed` if any stage failed, otherwise `:passed`.
+  Returns `:aborted` if execution control stopped the run, `:failed` if any stage
+  failed, otherwise `:passed`. An abort outranks a failure: it reports that the run
+  was stopped by hand, not that the code under test is broken.
 
   ## Parameters
 
     * `stage_results` — a list of `%TinyCI.StageResult{}` structs
   """
-  @spec pipeline_status([StageResult.t()]) :: :passed | :failed
+  @spec pipeline_status([StageResult.t()]) :: :passed | :failed | :aborted
   def pipeline_status(stage_results) do
-    if Enum.any?(stage_results, &(&1.status == :failed)), do: :failed, else: :passed
+    cond do
+      Enum.any?(stage_results, &(&1.status == :aborted)) -> :aborted
+      Enum.any?(stage_results, &(&1.status == :failed)) -> :failed
+      true -> :passed
+    end
   end
 
   defp header(text) do
@@ -160,8 +166,10 @@ defmodule TinyCI.Reporter do
   defp status_icon(:passed), do: IO.ANSI.green() <> "✓" <> IO.ANSI.reset()
   defp status_icon(:failed), do: IO.ANSI.red() <> "✗" <> IO.ANSI.reset()
   defp status_icon(:skipped), do: IO.ANSI.yellow() <> "○" <> IO.ANSI.reset()
+  defp status_icon(:aborted), do: IO.ANSI.red() <> "⊘" <> IO.ANSI.reset()
 
   defp colorize_status(:passed), do: IO.ANSI.green() <> "passed" <> IO.ANSI.reset()
   defp colorize_status(:failed), do: IO.ANSI.red() <> "failed" <> IO.ANSI.reset()
   defp colorize_status(:skipped), do: IO.ANSI.yellow() <> "skipped" <> IO.ANSI.reset()
+  defp colorize_status(:aborted), do: IO.ANSI.red() <> "aborted" <> IO.ANSI.reset()
 end

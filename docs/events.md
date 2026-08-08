@@ -29,6 +29,11 @@ executor ──emit──▶ TinyCI.Events.Dispatcher ──┬─▶ TinyCI.Eve
 - `TinyCI.EventSink` — behaviour implemented by consumers: `init/1`,
   `handle_event/3` (`seq`, event, state), `close/1`.
 
+Execution control (T10) both writes to and reads from this stream: a paused
+boundary emits `breakpoint_hit` before blocking, and the control plane emits
+`breakpoint_resumed` and `run_diverged`. See
+[execution-control.md](execution-control.md).
+
 The dispatcher is per-run (its pid lives on the run context), so concurrent runs
 never interleave and `async: true` tests stay isolated.
 
@@ -49,7 +54,13 @@ Correlation IDs (`run_id`, `stage`, `step`, matrix `combination`) tie related
 events together. **Order is only guaranteed within a single correlation** — across
 correlations, rely on `seq`, not arrival order.
 
-The current `schema_version` is `1`.
+The current `schema_version` is `2`.
+
+**Changed in 2:** the `status` field on `run_started`'s counterparts —
+`run_finished`, `stage_finished`, and `step_finished` — can now also be `"aborted"`
+(execution control stopped the run) in addition to `"passed"`, `"failed"`, and
+`"skipped"`. A consumer that matched only `passed`/`failed` needs updating. The
+three `breakpoint_*` / `run_diverged` types below are additive.
 
 ## Event types
 
@@ -70,6 +81,9 @@ The current `schema_version` is `1`.
 | `matrix_run_finished` | one matrix combination finishes        | `stage`, `combination`, `status`, `duration_ms`|
 | `hook_started`        | a pipeline hook begins                 | `hook`                                         |
 | `hook_finished`       | a pipeline hook finishes               | `hook`, `status`, `duration_ms`                |
+| `breakpoint_hit`      | execution pauses at an armed boundary  | `pause_id`, `phase`, `scope`, `stage`, `step`, `breakpoint`, `env`, `working_dir`, `store`, `branch`, `commit`, `matrix_combination`, `result` |
+| `breakpoint_resumed`  | a paused boundary is released          | `pause_id`, `command`, `waited_ms`, `timed_out`, `stage`, `step` |
+| `run_diverged`        | manual control altered the run         | `reason`, `stage`, `step`, `detail`            |
 
 ### Notes
 
@@ -84,7 +98,22 @@ The current `schema_version` is `1`.
   after the run's dispatcher has closed, so they are not yet emitted live into the
   stream — wiring them depends on the hook lifecycle and is tracked separately.
 - Secret masking happens at the event/output boundary; once a secrets directive
-  lands, secret values will be masked in events exactly as in console output.
+  lands, secret values will be masked in events exactly as in console output. The
+  `breakpoint_hit` payload is already routed through
+  `TinyCI.Sandbox.Redaction.redact/2`, so it will mask as soon as the run carries
+  a secrets list.
+- `breakpoint_hit.store` and `.env` values are coerced to JSON-safe terms first:
+  scalars pass through, anything else (a tuple, a pid, a struct) is rendered with
+  `inspect/1`. A term in the store can never break the stream.
+- `breakpoint_hit.scope` is `"stage"` or `"step"`; `step` is `null` on a stage
+  boundary. `result` is `null` on a `"before"` boundary and carries `status` /
+  `duration_ms` / `output` on an `"after"` one.
+- `breakpoint_resumed.command` is one of `continue`, `skip`, `retry`, `abort`.
+  `set_store` produces no `breakpoint_resumed` — it leaves the boundary paused —
+  so `run_diverged` is its only trace.
+- `run_diverged` is emitted once per divergent command, not once per run, so the
+  stream records *what* changed. `TinyCI.Provenance` carries them into the
+  attestation predicate and refuses to sign a divergent run.
 
 ## Example lines
 
@@ -103,6 +132,14 @@ The current `schema_version` is `1`.
 {"seq":12,"type":"hook_started","run_id":"abc123","ts":"2024-01-15T10:30:01.130000Z","hook":"on_success"}
 {"seq":13,"type":"hook_finished","run_id":"abc123","ts":"2024-01-15T10:30:01.140000Z","hook":"on_success","status":"passed","duration_ms":10}
 {"seq":14,"type":"run_finished","run_id":"abc123","ts":"2024-01-15T10:30:01.150000Z","status":"passed","duration_ms":1150}
+```
+
+With a breakpoint armed (`--break before:deploy.push`):
+
+```json
+{"seq":9,"type":"breakpoint_hit","run_id":"abc123","ts":"2024-01-15T10:30:01.000000Z","pause_id":"pause_7","phase":"before","scope":"step","stage":"deploy","step":"push","breakpoint":"before:deploy.push","working_dir":"/repo","branch":"main","commit":"4f1c8a2b","matrix_combination":null,"result":null,"env":{"MIX_ENV":"prod"},"store":{"image_tag":"v1.4.2"}}
+{"seq":10,"type":"run_diverged","run_id":"abc123","ts":"2024-01-15T10:30:12.000000Z","reason":"set_store","stage":"deploy","step":"push","detail":"image_tag = \"v1.4.3\""}
+{"seq":11,"type":"breakpoint_resumed","run_id":"abc123","ts":"2024-01-15T10:30:14.000000Z","pause_id":"pause_7","command":"continue","waited_ms":14000,"stage":"deploy","step":"push","timed_out":false}
 ```
 
 ## Writing your own sink

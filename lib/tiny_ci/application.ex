@@ -4,7 +4,8 @@ defmodule TinyCI.Application do
 
   def start(_type, _args) do
     children = [
-      {Task.Supervisor, name: TinyCI.TaskSupervisor}
+      {Task.Supervisor, name: TinyCI.TaskSupervisor},
+      {Registry, keys: :unique, name: TinyCI.Control.Registry}
     ]
 
     opts = [strategy: :one_for_one, name: TinyCI.Supervisor]

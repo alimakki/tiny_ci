@@ -14,7 +14,7 @@ defmodule TinyCI.Events do
   ISO 8601 strings.
   """
 
-  @schema_version 1
+  @schema_version 2
 
   @doc """
   The current event-stream schema version, emitted on the `run_started` line.
@@ -54,6 +54,9 @@ defmodule TinyCI.Events do
           | TinyCI.Events.HookStarted.t()
           | TinyCI.Events.HookCompleted.t()
           | TinyCI.Events.CacheLookup.t()
+          | TinyCI.Events.BreakpointHit.t()
+          | TinyCI.Events.BreakpointResumed.t()
+          | TinyCI.Events.RunDiverged.t()
 
   @doc """
   Returns the stable wire `type` string for an event struct.
@@ -87,6 +90,9 @@ defmodule TinyCI.Events do
   def type(%{__struct__: TinyCI.Events.HookStarted}), do: "hook_started"
   def type(%{__struct__: TinyCI.Events.HookCompleted}), do: "hook_finished"
   def type(%{__struct__: TinyCI.Events.CacheLookup}), do: "cache_lookup"
+  def type(%{__struct__: TinyCI.Events.BreakpointHit}), do: "breakpoint_hit"
+  def type(%{__struct__: TinyCI.Events.BreakpointResumed}), do: "breakpoint_resumed"
+  def type(%{__struct__: TinyCI.Events.RunDiverged}), do: "run_diverged"
 end
 
 defmodule TinyCI.Events.PipelineStarted do
@@ -124,7 +130,7 @@ defmodule TinyCI.Events.PipelineCompleted do
   @type t :: %__MODULE__{
           run_id: String.t(),
           timestamp: DateTime.t(),
-          status: :passed | :failed,
+          status: :passed | :failed | :skipped | :aborted,
           duration_ms: non_neg_integer()
         }
 
@@ -207,7 +213,7 @@ defmodule TinyCI.Events.StageCompleted do
           run_id: String.t(),
           timestamp: DateTime.t(),
           stage: atom(),
-          status: :passed | :failed,
+          status: :passed | :failed | :skipped | :aborted,
           duration_ms: non_neg_integer()
         }
 
@@ -371,7 +377,7 @@ defmodule TinyCI.Events.StepCompleted do
           timestamp: DateTime.t(),
           stage: atom(),
           step: atom(),
-          status: :passed | :failed,
+          status: :passed | :failed | :skipped | :aborted,
           duration_ms: non_neg_integer(),
           output: String.t()
         }
@@ -433,7 +439,7 @@ defmodule TinyCI.Events.MatrixRunCompleted do
           timestamp: DateTime.t(),
           stage: atom(),
           combination: keyword(String.t()),
-          status: :passed | :failed,
+          status: :passed | :failed | :skipped | :aborted,
           duration_ms: non_neg_integer()
         }
 
@@ -490,7 +496,7 @@ defmodule TinyCI.Events.HookCompleted do
           run_id: String.t(),
           timestamp: DateTime.t(),
           hook: atom(),
-          status: :passed | :failed,
+          status: :passed | :failed | :skipped | :aborted,
           duration_ms: non_neg_integer()
         }
 
@@ -542,5 +548,192 @@ defmodule TinyCI.Events.CacheLookup do
 
     defp stage_to_string(nil), do: nil
     defp stage_to_string(stage), do: to_string(stage)
+  end
+end
+
+defmodule TinyCI.Events.BreakpointHit do
+  @moduledoc """
+  Emitted when execution reaches an armed breakpoint and the responsible process
+  is about to block awaiting a control command (T10).
+
+  This is the richest event in the stream: it carries everything needed to reason
+  about the paused boundary without reaching into executor internals — the
+  resolved environment, working directory, pipeline store snapshot, git context,
+  and (inside a matrix stage) the combination being run. On an `:after` boundary
+  it additionally carries the `result` that is about to be recorded.
+
+  `env` and `store` values are already coerced to JSON-safe terms and passed
+  through secret redaction by `TinyCI.Control.Session` before the event is built.
+  """
+
+  @enforce_keys [:run_id, :timestamp, :pause_id, :phase, :scope, :stage]
+  defstruct [
+    :run_id,
+    :timestamp,
+    :pause_id,
+    :phase,
+    :scope,
+    :stage,
+    :step,
+    :breakpoint,
+    :working_dir,
+    :branch,
+    :commit,
+    :matrix_combination,
+    :result,
+    env: %{},
+    store: %{}
+  ]
+
+  @type t :: %__MODULE__{
+          run_id: String.t(),
+          timestamp: DateTime.t(),
+          pause_id: String.t(),
+          phase: :before | :after,
+          scope: :stage | :step,
+          stage: atom(),
+          step: atom() | nil,
+          breakpoint: String.t() | nil,
+          working_dir: String.t() | nil,
+          branch: String.t() | nil,
+          commit: String.t() | nil,
+          matrix_combination: keyword(String.t()) | nil,
+          result: map() | nil,
+          env: %{optional(String.t()) => String.t()},
+          store: %{optional(String.t()) => term()}
+        }
+
+  defimpl Jason.Encoder do
+    def encode(event, opts) do
+      Jason.Encode.map(
+        %{
+          "run_id" => event.run_id,
+          "timestamp" => DateTime.to_iso8601(event.timestamp),
+          "pause_id" => event.pause_id,
+          "phase" => to_string(event.phase),
+          "scope" => to_string(event.scope),
+          "stage" => to_string(event.stage),
+          "step" => maybe_string(event.step),
+          "breakpoint" => event.breakpoint,
+          "working_dir" => event.working_dir,
+          "branch" => event.branch,
+          "commit" => event.commit,
+          "matrix_combination" => combination(event.matrix_combination),
+          "result" => event.result,
+          "env" => event.env,
+          "store" => event.store
+        },
+        opts
+      )
+    end
+
+    defp maybe_string(nil), do: nil
+    defp maybe_string(value), do: to_string(value)
+
+    defp combination(nil), do: nil
+    defp combination(combo), do: Map.new(combo, fn {k, v} -> {to_string(k), v} end)
+  end
+end
+
+defmodule TinyCI.Events.BreakpointResumed do
+  @moduledoc """
+  Emitted when a paused breakpoint is released by a terminal control command
+  (T10) — `continue`, `skip`, `retry`, or `abort`.
+
+  `set_store` does not produce this event: it mutates the paused session's store
+  and leaves the process paused, so it surfaces as `run_diverged` instead.
+
+  When the pause was released by `--break-timeout` rather than by an operator,
+  `timed_out` is `true` and `command` is the configured timeout action.
+  """
+
+  @enforce_keys [:run_id, :timestamp, :pause_id, :command, :waited_ms]
+  defstruct [
+    :run_id,
+    :timestamp,
+    :pause_id,
+    :command,
+    :waited_ms,
+    :stage,
+    :step,
+    timed_out: false
+  ]
+
+  @type t :: %__MODULE__{
+          run_id: String.t(),
+          timestamp: DateTime.t(),
+          pause_id: String.t(),
+          command: :continue | :skip | :retry | :abort,
+          waited_ms: non_neg_integer(),
+          stage: atom() | nil,
+          step: atom() | nil,
+          timed_out: boolean()
+        }
+
+  defimpl Jason.Encoder do
+    def encode(event, opts) do
+      Jason.Encode.map(
+        %{
+          "run_id" => event.run_id,
+          "timestamp" => DateTime.to_iso8601(event.timestamp),
+          "pause_id" => event.pause_id,
+          "command" => to_string(event.command),
+          "waited_ms" => event.waited_ms,
+          "stage" => maybe_string(event.stage),
+          "step" => maybe_string(event.step),
+          "timed_out" => event.timed_out
+        },
+        opts
+      )
+    end
+
+    defp maybe_string(nil), do: nil
+    defp maybe_string(value), do: to_string(value)
+  end
+end
+
+defmodule TinyCI.Events.RunDiverged do
+  @moduledoc """
+  Emitted every time manual execution control alters what a run would otherwise
+  have done (T10) — a `set_store`, a forced `skip`, or a forced `retry`.
+
+  One event per divergent command, so the stream records *what* was changed and
+  not merely that something was. `set_store` in particular produces no
+  `breakpoint_resumed` (it leaves the process paused), so this is its only trace.
+
+  A diverged run is **not a CI result**: it is carried through to provenance (T7),
+  where `TinyCI.Provenance` flags it and attestation refuses to sign it. See
+  `docs/execution-control.md`.
+  """
+
+  @enforce_keys [:run_id, :timestamp, :reason]
+  defstruct [:run_id, :timestamp, :reason, :stage, :step, :detail]
+
+  @type t :: %__MODULE__{
+          run_id: String.t(),
+          timestamp: DateTime.t(),
+          reason: :set_store | :skip | :retry,
+          stage: atom() | nil,
+          step: atom() | nil,
+          detail: String.t() | nil
+        }
+
+  defimpl Jason.Encoder do
+    def encode(event, opts) do
+      Jason.Encode.map(
+        %{
+          "run_id" => event.run_id,
+          "timestamp" => DateTime.to_iso8601(event.timestamp),
+          "reason" => to_string(event.reason),
+          "stage" => maybe_string(event.stage),
+          "step" => maybe_string(event.step),
+          "detail" => event.detail
+        },
+        opts
+      )
+    end
+
+    defp maybe_string(nil), do: nil
+    defp maybe_string(value), do: to_string(value)
   end
 end

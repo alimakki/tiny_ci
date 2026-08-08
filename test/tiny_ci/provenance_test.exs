@@ -6,6 +6,7 @@ defmodule TinyCI.ProvenanceTest do
   alias TinyCI.Events.{
     PipelineCompleted,
     PipelineStarted,
+    RunDiverged,
     StepCompleted,
     StepSkipped
   }
@@ -155,8 +156,68 @@ defmodule TinyCI.ProvenanceTest do
     end
   end
 
+  describe "divergence" do
+    test "an untouched run is not divergent" do
+      refute Provenance.divergent?(events())
+      refute build()["predicate"]["divergent"]
+      assert build()["predicate"]["divergences"] == []
+    end
+
+    test "a run_diverged event makes the run divergent" do
+      assert Provenance.divergent?([diverged(:set_store)])
+      assert build(events: events() ++ [diverged(:set_store)])["predicate"]["divergent"]
+    end
+
+    test "any divergence reason counts" do
+      for reason <- [:set_store, :skip, :retry] do
+        assert Provenance.divergent?([diverged(reason)])
+      end
+    end
+
+    test "each divergence is listed with what changed and where" do
+      stmt = build(events: events() ++ [diverged(:set_store)])
+
+      assert [entry] = stmt["predicate"]["divergences"]
+      assert entry["reason"] == "set_store"
+      assert entry["stage"] == "deploy"
+      assert entry["step"] == "ship"
+      assert entry["detail"] == ~s(tag = "v2")
+      assert entry["at"] == DateTime.to_iso8601(@ts)
+    end
+
+    test "every divergence is recorded, not only the first" do
+      stmt = build(events: events() ++ [diverged(:set_store), diverged(:retry)])
+
+      assert ["set_store", "retry"] = Enum.map(stmt["predicate"]["divergences"], & &1["reason"])
+    end
+
+    test "a divergence with no stage or step reads as null rather than a bare atom" do
+      event = %RunDiverged{run_id: "run-123", timestamp: @ts, reason: :skip}
+      stmt = build(events: events() ++ [event])
+
+      assert [%{"stage" => nil, "step" => nil, "detail" => nil}] =
+               stmt["predicate"]["divergences"]
+    end
+  end
+
   test "the statement is JSON-encodable" do
     assert {:ok, json} = Jason.encode(build())
     assert is_binary(json)
+  end
+
+  test "a divergent statement is JSON-encodable too" do
+    assert {:ok, json} = Jason.encode(build(events: events() ++ [diverged(:set_store)]))
+    assert Jason.decode!(json)["predicate"]["divergent"] == true
+  end
+
+  defp diverged(reason) do
+    %RunDiverged{
+      run_id: "run-123",
+      timestamp: @ts,
+      reason: reason,
+      stage: :deploy,
+      step: :ship,
+      detail: ~s(tag = "v2")
+    }
   end
 end

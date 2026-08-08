@@ -178,5 +178,41 @@ defmodule TinyCI.ReporterTest do
     test "returns :passed for empty results" do
       assert Reporter.pipeline_status([]) == :passed
     end
+
+    test "returns :aborted when execution control stopped a stage" do
+      results = [
+        %StageResult{name: :a, status: :passed},
+        %StageResult{name: :b, status: :aborted}
+      ]
+
+      assert Reporter.pipeline_status(results) == :aborted
+    end
+
+    test "an abort outranks a failure — the run was stopped, not broken" do
+      results = [
+        %StageResult{name: :a, status: :failed},
+        %StageResult{name: :b, status: :aborted}
+      ]
+
+      assert Reporter.pipeline_status(results) == :aborted
+    end
+  end
+
+  describe "print_summary/1 with an aborted stage" do
+    test "renders the aborted status rather than crashing on an unknown atom" do
+      results = [
+        %StageResult{
+          name: :deploy,
+          status: :aborted,
+          duration_ms: 0,
+          step_results: [%StepResult{name: :push, status: :aborted, duration_ms: 0}]
+        }
+      ]
+
+      output = capture_io(fn -> Reporter.print_summary(results) end)
+
+      assert output =~ "deploy"
+      assert output =~ "aborted"
+    end
   end
 end

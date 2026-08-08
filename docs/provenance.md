@@ -28,6 +28,10 @@ An attestation is written whether the run **passes or fails** — provenance of 
 failed run is just as useful. A failed run still exits non-zero; if `--attest` is
 given but no signing key is available, the command fails with a clear message.
 
+One run is **never** attested: a run that
+[execution control](execution-control.md) steered by hand. See
+[Divergent runs](#divergent-runs).
+
 ## Verifying
 
 ```bash
@@ -63,6 +67,8 @@ The decoded payload:
     "outcome": "success",
     "startedAt": "…", "finishedAt": "…",
     "builder": { "tool": "tiny_ci", "version": "0.1.0" },
+    "divergent": false,
+    "divergences": [],
     "actions": [
       { "module": "Acme.Deploy", "app": "acme", "version": "1.2.0",
         "checksum": "…", "source": "hex",
@@ -88,6 +94,40 @@ The decoded payload:
   package, closing the loop between "what was locked" and "what ran".
 - **Only executed actions are listed.** A step skipped by a `when:` condition is
   recorded with `"status": "skipped"` and contributes no action.
+- **A run altered by hand is never signed.** See below.
+
+## Divergent runs
+
+[Execution control](execution-control.md) lets an operator change what a run does:
+`set_store` edits a store value, and a forced `skip` or `retry` overrides what a
+step would otherwise have produced. Each of those emits a `run_diverged` event, and
+`TinyCI.Provenance` carries them straight into the predicate:
+
+```json
+"divergent": true,
+"divergences": [
+  { "reason": "set_store", "stage": "deploy", "step": "push",
+    "detail": "image_tag = \"v1.4.3\"", "at": "2024-01-15T10:30:12Z" }
+]
+```
+
+`mix tiny_ci.run --attest` **refuses to sign** such a run:
+
+```
+Refusing to attest a divergent run.
+  Execution control altered this run (set_store, or a forced skip/retry), so
+  it records what an operator made happen rather than what the pipeline does.
+  Re-run without --break to produce an attestable result.
+```
+
+The statement itself is still buildable via `TinyCI.Provenance.build/1`, so the
+divergence can be inspected or fed to a re-run (T17) — it just never becomes a
+signed supply-chain claim. `TinyCI.Provenance.divergent?/1` exposes the same
+judgement to your own tooling.
+
+An **aborted** run is different: nothing was altered, the run was stopped. It
+records `"outcome": "aborted"` and remains attestable as an honest record of a
+partial run.
 
 ## Signing backends
 

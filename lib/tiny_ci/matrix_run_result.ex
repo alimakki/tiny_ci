@@ -7,7 +7,7 @@ defmodule TinyCI.MatrixRunResult do
   overall status from them.
   """
 
-  @type status :: :passed | :failed | :skipped
+  @type status :: :passed | :failed | :skipped | :aborted
 
   @type t :: %__MODULE__{
           combination: keyword(String.t()),

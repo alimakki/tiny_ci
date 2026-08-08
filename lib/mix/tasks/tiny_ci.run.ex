@@ -22,6 +22,24 @@ defmodule Mix.Tasks.TinyCi.Run do
     * `--output FORMAT` — output format: `json` for machine-readable output
     * `--events FILE` — write the structured run event stream as NDJSON to `FILE`
       (one JSON object per line); use `-` to write to stdout. See `docs/events.md`.
+    * `--break SPEC` — pause at a step/stage boundary. Repeatable. `SPEC` is
+      `before:STAGE`, `after:STAGE`, `before:STAGE.STEP`, or `after:STAGE.STEP`.
+    * `--break-timeout MS` — auto-resolve a breakpoint after `MS` milliseconds, so a
+      forgotten breakpoint cannot hang CI. Required when no interactive terminal is
+      attached to answer the prompt.
+    * `--break-timeout-action ACTION` — `abort` (default) or `continue` on timeout
+    * `--debug-serial` — force serial scheduling while breakpoints are armed, for
+      predictable stepping. Off by default: pausing one branch must not freeze the
+      independent ones.
+
+  ## Execution control
+
+  A breakpoint pauses the process that reached the boundary, prints the resolved
+  environment, working directory, store snapshot, git context, and matrix
+  combination, and reads a command: `continue`, `skip`, `retry`, `abort`, or
+  `set KEY VALUE`. `set`, a forced `skip`, and a forced `retry` mark the run
+  **divergent** — it is no longer a CI result and `--attest` refuses to sign it.
+  See `docs/execution-control.md`.
 
   ## Pipeline Selection
 
@@ -55,16 +73,25 @@ defmodule Mix.Tasks.TinyCi.Run do
       mix tiny_ci.run --events run.ndjson
       mix tiny_ci.run --events -            # to stdout
 
+      # Pause before the deploy stage and after a specific step
+      mix tiny_ci.run --break before:deploy
+      mix tiny_ci.run --break after:test.unit --debug-serial
+
+      # Headless: give up on a breakpoint after 30s and abort
+      mix tiny_ci.run --break before:deploy --break-timeout 30000
+
   ## Exit Codes
 
     * `0` — pipeline completed successfully (or `--list` / `--dry-run`)
-    * `1` — pipeline failed or no pipeline file found
+    * `1` — pipeline failed, was aborted through execution control, or no pipeline
+      file was found
   """
 
   use Mix.Task
 
   alias TinyCI.{Artifacts, Discovery, DryRun, Executor, Hooks, Provenance, Reporter, Results}
   alias TinyCI.Action.Audit
+  alias TinyCI.Control
   alias TinyCI.Listener
 
   @impl Mix.Task
@@ -85,7 +112,11 @@ defmodule Mix.Tasks.TinyCi.Run do
           list_artifacts: :boolean,
           events: :string,
           attest: :string,
-          signing_key: :string
+          signing_key: :string,
+          break: :keep,
+          break_timeout: :integer,
+          break_timeout_action: :string,
+          debug_serial: :boolean
         ],
         aliases: [f: :file, r: :root]
       )
@@ -187,30 +218,111 @@ defmodule Mix.Tasks.TinyCi.Run do
     # repo root.
     spec = %{spec | root: Path.expand(root)}
 
-    case verify_actions(spec, opts[:dry_run]) do
-      :ok -> run_and_attest(spec, opts, root, filter, output_format)
+    with :ok <- verify_actions(spec, opts[:dry_run]),
+         {:ok, control} <- resolve_control(opts, spec, output_format) do
+      run_and_attest(spec, opts, root, filter, output_format, control)
+    else
       {:error, reason} -> handle_error(reason)
     end
   end
 
   # Runs the pipeline and, when `--attest` is given, writes a signed provenance
   # attestation built from the run's event stream (skipped for --dry-run).
-  defp run_and_attest(spec, opts, root, filter, output_format) do
+  defp run_and_attest(spec, opts, root, filter, output_format, control) do
     attest_path = if opts[:dry_run], do: nil, else: opts[:attest]
-    {run_opts, agent} = maybe_collector(base_run_opts(opts), attest_path)
+    {run_opts, agent} = maybe_collector(base_run_opts(opts, control), attest_path)
 
     result = run_with_filter(spec, opts[:dry_run], filter, output_format, run_opts)
 
     finalize_attest(agent, attest_path, spec, opts, root, result)
   end
 
-  defp base_run_opts(opts) do
+  defp base_run_opts(opts, control) do
     [
       no_cache: opts[:no_cache] || false,
       artifacts_dir: opts[:artifacts_dir],
-      events: opts[:events]
+      events: opts[:events],
+      control: control
     ]
   end
+
+  # ---------------------------------------------------------------------------
+  # Execution control (T10)
+  # ---------------------------------------------------------------------------
+
+  # Everything about `--break` is settled here, before a single step runs: specs
+  # parse, targets exist, and there is *something* that will eventually release the
+  # pause. A typo or a missing driver must never cost a whole run.
+  defp resolve_control(opts, spec, output_format) do
+    case Keyword.get_values(opts, :break) do
+      [] -> {:ok, nil}
+      specs -> build_control(specs, opts, spec, output_format)
+    end
+  end
+
+  defp build_control(specs, opts, spec, output_format) do
+    with {:ok, breakpoints} <- parse_breakpoints(specs),
+         :ok <- validate_breakpoints(breakpoints, spec.stages),
+         {:ok, action} <- parse_timeout_action(opts[:break_timeout_action]),
+         {:ok, subscribers, interactive?} <- start_control_driver(output_format),
+         {:ok, timeout} <- resolve_break_timeout(opts[:break_timeout], interactive?) do
+      {:ok,
+       [
+         breakpoints: breakpoints,
+         timeout: timeout,
+         timeout_action: action,
+         subscribers: subscribers,
+         serial: opts[:debug_serial] || false
+       ]}
+    end
+  end
+
+  defp parse_breakpoints(specs) do
+    {parsed, errors} =
+      Enum.reduce(specs, {[], []}, fn spec, {ok, errors} ->
+        case Control.Breakpoint.parse(spec) do
+          {:ok, breakpoint} -> {[breakpoint | ok], errors}
+          {:error, message} -> {ok, [message | errors]}
+        end
+      end)
+
+    if errors == [],
+      do: {:ok, Enum.reverse(parsed)},
+      else: {:error, {:breakpoints, Enum.reverse(errors)}}
+  end
+
+  defp validate_breakpoints(breakpoints, stages) do
+    case Control.Breakpoint.validate(breakpoints, stages) do
+      :ok -> :ok
+      {:error, errors} -> {:error, {:breakpoints, errors}}
+    end
+  end
+
+  defp parse_timeout_action(nil), do: {:ok, :abort}
+  defp parse_timeout_action("abort"), do: {:ok, :abort}
+  defp parse_timeout_action("continue"), do: {:ok, :continue}
+  defp parse_timeout_action(other), do: {:error, {:break_timeout_action, other}}
+
+  # The terminal REPL only makes sense when a human is at an ANSI terminal and
+  # stdout is not already committed to machine-readable JSON.
+  defp start_control_driver(:json), do: {:ok, [], false}
+
+  defp start_control_driver(_human) do
+    if IO.ANSI.enabled?() do
+      {:ok, driver} = Control.Console.start_link()
+      {:ok, [driver], true}
+    else
+      {:ok, [], false}
+    end
+  end
+
+  # Without an interactive driver something else must release the pause. Rather
+  # than guess a default that silently changes CI behaviour, demand the timeout
+  # explicitly — this is the "a forgotten breakpoint can't hang CI" guarantee.
+  defp resolve_break_timeout(nil, true), do: {:ok, :infinity}
+  defp resolve_break_timeout(nil, false), do: {:error, :break_timeout_required}
+  defp resolve_break_timeout(ms, _interactive?) when is_integer(ms) and ms > 0, do: {:ok, ms}
+  defp resolve_break_timeout(ms, _interactive?), do: {:error, {:break_timeout, ms}}
 
   defp maybe_collector(run_opts, nil), do: {run_opts, nil}
 
@@ -233,7 +345,8 @@ defmodule Mix.Tasks.TinyCi.Run do
   end
 
   defp write_attestation(path, spec, opts, root, events) do
-    with {:ok, private} <- signing_key(opts),
+    with :ok <- refuse_divergent(events),
+         {:ok, private} <- signing_key(opts),
          {:ok, actions} <- Audit.analyze(spec, root, root_app: Mix.Project.config()[:app]),
          ctx = TinyCI.Context.build(root: root),
          statement =
@@ -254,6 +367,13 @@ defmodule Mix.Tasks.TinyCi.Run do
         print_error({:attestation, reason})
         {:error, :attestation_failed}
     end
+  end
+
+  # Cross-cutting invariant 5: a run a human steered by hand records what an
+  # operator made happen, not what the pipeline does. Signing it would launder a
+  # manual result into a supply-chain claim.
+  defp refuse_divergent(events) do
+    if Provenance.divergent?(events), do: {:error, :divergent_run}, else: :ok
   end
 
   defp signing_key(opts) do
@@ -402,19 +522,18 @@ defmodule Mix.Tasks.TinyCi.Run do
         IO.puts([IO.ANSI.green(), "Pipeline completed successfully.", IO.ANSI.reset()])
         :ok
 
-      {:error, _reason, stage_results} ->
+      {:error, reason, stage_results} ->
         Reporter.print_summary(stage_results)
         Hooks.run_hooks(hooks, :on_failure, context)
-
-        IO.puts(:stderr, [
-          IO.ANSI.red(),
-          "Pipeline failed.",
-          IO.ANSI.reset()
-        ])
-
+        IO.puts(:stderr, [IO.ANSI.red(), failure_message(reason), IO.ANSI.reset()])
         {:error, :pipeline_failed}
     end
   end
+
+  defp failure_message({:aborted, stage}),
+    do: "Pipeline aborted by execution control at stage :#{stage}."
+
+  defp failure_message(_reason), do: "Pipeline failed."
 
   defp list_artifacts(root, artifacts_dir_override) do
     base_root = artifacts_dir_override || root
@@ -521,6 +640,51 @@ defmodule Mix.Tasks.TinyCi.Run do
     IO.puts(:stderr, [IO.ANSI.red(), "Action supply-chain check failed:", IO.ANSI.reset()])
     Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
     IO.puts(:stderr, "Run `mix tiny_ci.actions.audit` to inspect the resolved action tree.")
+  end
+
+  defp print_error({:breakpoints, errors}) do
+    IO.puts(:stderr, [IO.ANSI.red(), "Invalid --break:", IO.ANSI.reset()])
+    Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
+  end
+
+  defp print_error({:break_timeout_action, value}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Unknown --break-timeout-action: #{inspect(value)}.",
+      IO.ANSI.reset(),
+      " Supported actions: abort, continue"
+    ])
+  end
+
+  defp print_error({:break_timeout, value}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Invalid --break-timeout: #{inspect(value)}.",
+      IO.ANSI.reset(),
+      " Expected a positive number of milliseconds."
+    ])
+  end
+
+  defp print_error(:break_timeout_required) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Refusing to arm --break with nothing to release it.",
+      IO.ANSI.reset(),
+      "\n  No interactive terminal is attached (non-TTY, or --output json), so the\n",
+      "  breakpoint prompt cannot be answered. Pass --break-timeout MS so the run\n",
+      "  cannot hang, or attach a control driver via TinyCI.Control.subscribe/1."
+    ])
+  end
+
+  defp print_error({:attestation, :divergent_run}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Refusing to attest a divergent run.",
+      IO.ANSI.reset(),
+      "\n  Execution control altered this run (set_store, or a forced skip/retry), so\n",
+      "  it records what an operator made happen rather than what the pipeline does.\n",
+      "  Re-run without --break to produce an attestable result."
+    ])
   end
 
   defp print_error({:attestation, :no_signing_key}) do
