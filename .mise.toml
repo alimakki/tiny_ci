@@ -1,6 +1,6 @@
 [tools]
 erlang = "29.0.1"
-elixir = "1.20.1-otp-29"
+elixir = "1.20.3-otp-29"
 
 # Hooks are an experimental mise feature; opt in (scoped to this project).
 [settings]
