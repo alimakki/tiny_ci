@@ -1013,27 +1013,5 @@ mix credo                          # static analysis
 
 ## Roadmap
 
-### Completed
-
-- **Core execution** — serial and parallel stage modes, fail-fast pipeline, conditional stages
-- **Git context** — automatic branch/commit detection passed through the pipeline
-- **CLI** — `mix tiny_ci.run` with discovery, `--file`, `--root`, `--list`, named pipelines, proper exit codes
-- **Generic config** — `set key, value` for module step and hook configuration
-- **Output** — live streaming with per-step prefixes in parallel mode, buffered fallback in non-TTY
-- **Robustness** — step timeouts, `--dry-run`, `allow_failure` steps
-- **Richer conditions** — `branch()`, `env/1`, `file_changed?/1` with boolean combinators
-- **Hooks** — `on_success` / `on_failure` pipeline hooks (shell and module-based)
-- **Step data passing** — pipeline store for sharing data between module steps
-- **Custom DSL** — declarative pipeline format with an allowlist validator
-- **Stage dependencies (DAG)** — `needs:` for fan-out/fan-in topologies with parallel independent stages, transitive skip propagation, and cycle detection at parse time
-- **Matrix builds** — `matrix:` option for cartesian-product parallel stage runs with env var injection, `max_parallel:` concurrency cap, and `allow_failure:` for partial tolerance
-- **Event structs** — 14 typed event structs covering every execution boundary (pipeline, stage, step, matrix, hooks), each with `run_id`, `timestamp`, and `Jason.Encoder` support
-- **Dependency caching** — `cache: [paths: [...], key: "file"]` skips steps on hash-keyed hits, stores at `~/.cache/tiny_ci/`, `--no-cache` flag, `mix tiny_ci.cache clean` to purge
-- **Artifact persistence** — `artifact: [name: "build", paths: [...]]` copies declared outputs to `~/.local/share/tiny_ci/artifacts/<project>/<run_id>/`, injects path into pipeline store, `required: true` fails the step if paths are absent, `--artifacts-dir` override, `--list-artifacts` to inspect
-- **Language server (live diagnostics)** — `tiny_ci_lsp`, a separate stdio LSP package that surfaces the validator's load-time errors live in-editor with accurate ranges, debounced as you type, over a shared code path with the runner ([docs/lsp.md](docs/lsp.md))
-- **Execution control (breakpoints)** — `--break before:deploy` / `--break after:test.unit` pause a run at a step/stage boundary with the live store, resolved env, working dir, git context and matrix combination inspectable, then `continue` / `skip` / `retry` / `abort` / `set KEY VALUE`; independent branches keep running, `--debug-serial` forces predictable stepping, `--break-timeout` guarantees CI cannot hang, and a hand-steered run is marked **divergent** and refused by attestation ([docs/execution-control.md](docs/execution-control.md))
-
-### Up Next
-
-- **Secrets management** — `secret "MY_KEY"` reading from env or a local secrets file, with value masking in output
-- **Watch mode** — `mix tiny_ci.run --watch` to re-run on file changes
+The project roadmap lives in [ROADMAP.md](ROADMAP.md); per-task implementation plans live in
+[`.tasks/`](.tasks/INDEX.md). The feature list above describes what exists today.

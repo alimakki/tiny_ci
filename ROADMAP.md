@@ -1,223 +1,191 @@
 # tiny_ci Roadmap
 
-Feature backlog ordered by implementation priority. Each item follows the user story format with desired outcomes and acceptance criteria.
+**This is the only roadmap.** Per-task implementation plans live in [`.tasks/`](.tasks/INDEX.md).
+Older planning documents are archived under [`docs/archive/`](docs/archive/) and are referenced
+from tasks where their design still applies. The README's feature list describes what exists;
+this file describes where the project is going and in what order.
+
+Last rewritten: 2026-09-07.
 
 ---
 
-## 1. Pipeline & Stage-Level Environment Variables
+## Positioning
 
-**User story**
-As a pipeline author, I want to declare environment variables at the pipeline or stage level so that all steps within that scope inherit them without repeating `env:` on every individual step.
+> One binary that is your CI server, runner, and UI. The pipeline you run on your laptop is the
+> same one the server runs. No YAML, no Kubernetes, no Redis, no Postgres.
 
-**Desired outcomes**
-- A top-level `env` directive sets variables available to all stages and steps in the pipeline.
-- A stage-level `env` directive sets variables available only to steps within that stage.
-- Step-level `env` overrides stage-level, which overrides pipeline-level (cascade with override).
-- Variables are injected into shell step processes and accessible to module steps via context.
-- Declared variables appear in `--dry-run` output.
+tiny_ci is a replacement for a traditional CI stack, not a task runner and not a plugin for
+someone else's CI. It is written in Elixir because the BEAM already provides the primitives a CI
+system otherwise has to assemble from Redis, a job queue, a worker fleet, and a web tier:
 
-**Acceptance criteria**
-- [x] `env name: "value"` is valid DSL at pipeline scope
-- [x] `env name: "value"` is valid DSL inside a `stage` block
-- [x] Shell steps receive merged env without explicit per-step `env:`
-- [x] Step-level `env:` takes precedence over inherited values
-- [x] Validator accepts `env` as an allowlisted DSL construct
+| CI concern | Traditional stack | BEAM |
+|---|---|---|
+| A run in flight | a job row + a worker container | one supervised process tree |
+| Cancel / timeout / crash isolation | orchestrator polls, kills containers | kill the process tree; supervisors report the outcome |
+| Runner fleet and liveness | agent daemon + heartbeat table + broker | distributed nodes, `Node.monitor/1`, no broker |
+| Live logs and UI updates | log shipper + websocket service | one event stream, PubSub, LiveView |
+| Many concurrent runs per host | one container per job | thousands of cheap processes |
 
----
+Where the BEAM does **not** help, we say so: hot code upgrades are irrelevant to CI, distributed
+Erlang is not safe over untrusted networks (see M4), and the OS is still the security boundary
+for third-party code.
 
-## 2. Step-Level `when` Conditions
+## The pain points we are solving
 
-**User story**
-As a pipeline author, I want to apply conditional execution to individual steps — not just entire stages — so that I can skip specific checks on certain branches or environments without restructuring my pipeline into extra stages.
+Every milestone below is justified by at least one row of this table.
 
-**Desired outcomes**
-- The `when` option accepted on `step` uses the same condition DSL already supported on `stage`.
-- A skipped step is reported in the summary as "skipped" with its condition displayed.
-- Skipped steps do not affect the pass/fail outcome of their stage.
-- `--dry-run` shows per-step skip/run status.
+| Pain in existing CI stacks | tiny_ci answer | Milestone |
+|---|---|---|
+| YAML with no validation; the only way to test a pipeline is to push it | Interpreted, allowlisted DSL; LSP; `--dry-run`; an identical local run | done |
+| Debugging a failure means re-pushing or a tmate hack | Breakpoints, shell-on-failure, replay | done / M6 |
+| Secrets end up in logs | Masking at the event boundary; every sink inherits it | M0 |
+| A crashing step takes the whole job down with an opaque error | A crashing step is a failed step with a message | M0 |
+| Self-hosting means operating Jenkins or a Kubernetes runner fleet | A single release binary; add a node to scale | M1, M2, M4 |
+| "It only runs in CI" — no local parity | The server runs the very same runner the laptop does | M2 |
+| A new push wastes minutes finishing a superseded run | Per-branch auto-cancel; cancel is killing a process tree | M2 |
+| No structured history; logs are the only record | Every run is a persisted event log; the UI is a fold over it | M0, M3 |
+| Cold containers, queue wait | Long-lived warm runners with the cache already on disk | M4, M5 |
+| A monorepo push rebuilds everything | Affected-stage execution from the git diff | M5 |
+| Retries at whole-job granularity; flaky tests block merges | Per-test re-run and quarantine | M5 |
+| Zombie jobs when a runner dies | Node monitoring surfaces a lost runner in seconds | M4 |
+| Pinned third-party actions, provenance | Lockfile, attestation, registry | done / M7 |
 
-**Acceptance criteria**
-- [x] `step "name", cmd: "...", when: branch() == "main"` is valid DSL
-- [x] Condition is evaluated at runtime against pipeline context
-- [x] Skipped steps appear in reporter output with `:skipped` status
-- [x] Module steps support `when:` in the same way as shell steps
-- [x] Validator allowlists `when:` on step constructs
+## Principles
 
----
+1. **Adoption gates, not feature lists.** Each milestone ends with something a team can now do.
+   Nothing in a later milestone starts until the gate is met.
+2. **The library stays lean; the binary is the product.** `tiny_ci` (the Mix project at the root)
+   depends on `jason` and nothing else at runtime. The server and UI live in sibling Mix projects
+   that depend on core, and the *release* bundles all of them. This revises the earlier rule that
+   the web UI must never ship with core: it never ships *in* core, but it does ship in the binary.
+3. **Everything observable flows through the event stream.** No feature reaches into executor
+   internals to observe a run. The UI, replay, provenance, and the runner protocol all consume
+   events. Run history is the persisted stream, and any view of a run is a fold over it.
+4. **The DSL allowlist is the security boundary for pipeline files.** New directives are added to
+   `TinyCI.DSL.Spec` and `TinyCI.DSL.Validator` together, and rejected when misused.
+5. **Never run untrusted code unsandboxed.** Third-party actions go through the sandbox driver.
+6. **Honesty about determinism.** Replay reconstructs the data layer; it cannot undo side effects.
+   A hand-steered run is divergent and not attestable.
+7. **Shell steps are first-class.** A Go or JavaScript team must be able to use tiny_ci without
+   writing Elixir. Module steps are an Elixir-project bonus.
 
-## 3. Working Directory per Step / Stage
+## Milestones
 
-**User story**
-As a pipeline author, I want to set a working directory on a step or stage so that commands execute relative to a subdirectory of the project without prepending `cd path &&` to every command.
+Status legend: ⬜ not started · 🟡 in progress · ✅ done
 
-**Desired outcomes**
-- A `working_dir:` option on a step changes the process working directory for that step only.
-- A `working_dir:` option on a stage sets the default for all steps in that stage; steps may override it.
-- Relative paths are resolved from the pipeline root (where `tiny_ci.exs` lives).
-- An invalid or non-existent `working_dir` fails the step immediately with a clear error message.
-- `--dry-run` displays the resolved working directory for each step.
+### M0 — Finish the fundamentals ⬜
 
-**Acceptance criteria**
-- [x] `step "name", cmd: "npm test", working_dir: "frontend"` runs in `<root>/frontend`
-- [x] Stage-level `working_dir:` is inherited by steps that don't declare their own
-- [x] Absolute paths are accepted as-is; relative paths are resolved from pipeline root
-- [x] Non-existent directory fails the step immediately with a clear error message
-- [x] Validator allowlists `working_dir:` on both step and stage
-- [x] `--dry-run` shows the resolved working directory for each step
+The remaining correctness and safety gaps in the runner. All small, all blocking.
 
----
+| Task | Item |
+|---|---|
+| [M0-01](.tasks/M0-01-crash-isolation.md) | A raising or exiting step is a *failed step*, never a crashed run |
+| [M0-02](.tasks/M0-02-remove-legacy-dsl.md) | Delete the macro DSL, the old validator, and scaffold leftovers |
+| [M0-03](.tasks/M0-03-secrets-declaration-and-masking.md) | `secret` directive; values masked in every sink and result |
+| [M0-04](.tasks/M0-04-cache-atomicity-locking-eviction.md) | Atomic cache writes, cross-process locking, eviction |
+| [M0-05](.tasks/M0-05-changed-files-semantics.md) | `file_changed?` against a base ref plus the dirty tree; git runs in `root` |
+| [M0-06](.tasks/M0-06-run-persistence.md) | Every run's event stream persisted; `runs` list/show; a shared projection |
 
-## 4. Step Retries
+**Gate:** a secret value never appears in console, NDJSON, JSON output, or attestation; a raising
+module step in a parallel stage yields one failed step and a completed run; two concurrent runs
+sharing a cache key leave a valid entry; a past run can be listed and read back.
 
-**User story**
-As a pipeline author, I want to configure a step to retry automatically on failure so that transient errors — flaky network calls, intermittent package downloads, external service timeouts — do not fail the whole pipeline.
+### M1 — Standalone binary ⬜
 
-**Desired outcomes**
-- A `retry:` option specifies the maximum number of retry attempts (integer ≥ 1).
-- An optional `retry_delay:` option (milliseconds) introduces a wait between attempts.
-- Each attempt is logged with its attempt number (e.g., `[attempt 2/3]`).
-- If all attempts fail, the step is marked failed and the pipeline proceeds according to normal failure rules.
-- Retries are visible in `--dry-run` output as metadata.
+| Task | Item |
+|---|---|
+| [M1-01](.tasks/M1-01-cli-entrypoint.md) | `TinyCI.CLI` with `run`, `runs`, `cache` subcommands; the Mix task becomes a thin wrapper |
+| [M1-02](.tasks/M1-02-run-outside-mix.md) | Runs in a directory with no `mix.exs`; every `Mix.*` call is guarded |
+| [M1-03](.tasks/M1-03-release-binary.md) | Burrito-wrapped release per OS/arch; release workflow; install docs |
 
-**Acceptance criteria**
-- [x] `step "name", cmd: "...", retry: 3` retries up to 3 times on non-zero exit
-- [x] `retry_delay: 1000` waits 1 second between attempts
-- [x] Reporter shows attempt count on failure: `failed after 3 attempts`
-- [x] `allow_failure: true` combined with `retry:` exhausts retries before allowing failure
-- [x] Timeouts apply per attempt, not across all attempts combined
+**Gate:** a downloaded binary runs a shell-only pipeline green in a Go repository on a machine
+with no Erlang or Elixir installed, and `tiny_ci run --dry-run` matches `mix tiny_ci.run --dry-run`.
 
----
+### M2 — The server ⬜
 
-## 5. Secrets Management
+`tiny_ci serve`: one node, runs as supervised processes, triggered by webhooks, reporting back.
 
-**User story**
-As a pipeline author, I want to declare named secrets so that sensitive values are never echoed to logs, are available to steps as environment variables, and can be sourced from the environment or a local secrets file without being hardcoded in the pipeline definition.
+| Task | Item |
+|---|---|
+| [M2-01](.tasks/M2-01-run-process-model.md) | `TinyCI.Server.Run` GenServer per run under a DynamicSupervisor; cancel kills the OS subtree; in-process event bus |
+| [M2-02](.tasks/M2-02-workspace-checkout.md) | Bare-mirror cache per repo, one worktree per run at the exact SHA |
+| [M2-03](.tasks/M2-03-queue-and-scheduler.md) | FIFO queue, concurrency cap, per-branch auto-cancel of superseded runs |
+| [M2-04](.tasks/M2-04-http-webhooks-and-polling.md) | Plug/Bandit HTTP; GitHub, GitLab, Gitea webhooks with signature checks; `git ls-remote` poller |
+| [M2-05](.tasks/M2-05-commit-status-reporting.md) | Commit status posted back on queued/started/finished |
+| [M2-06](.tasks/M2-06-secrets-store.md) | Encrypted-at-rest secrets store feeding the M0-03 `secret` directive |
+| [M2-07](.tasks/M2-07-serve-cli-config-api.md) | `tiny_ci serve`, the config file, the HTTP API, token auth, dogfooding |
 
-**Desired outcomes**
-- A `secret "NAME"` directive declares a secret by name; tiny_ci reads its value from the process environment at runtime.
-- Secret values are masked in all output (replaced with `[MASKED]` if they appear in stdout/stderr).
-- If a declared secret is not present in the environment, the pipeline fails at startup with a clear error listing missing secrets.
-- An optional `.tiny_ci/secrets` file (key=value, gitignored) is sourced automatically if present.
-- Secrets are never written to the pipeline store or exposed in `--dry-run` output (only their names are shown).
+**Gate:** a team points a GitHub webhook at a fresh VM running one binary and sees a status check
+on their pull request within a minute of pushing. This is the milestone at which tiny_ci is CI.
 
-**Acceptance criteria**
-- [ ] `secret "DATABASE_URL"` is valid DSL; value is read from `System.get_env/1`
-- [ ] Missing secret at pipeline start produces a descriptive startup error
-- [ ] Secret values in stdout/stderr are replaced with `[MASKED]`
-- [ ] `.tiny_ci/secrets` file is loaded when present; format is `KEY=value` per line
-- [ ] `--dry-run` lists declared secret names without values
-- [ ] Validator allowlists `secret` as a DSL construct
+### M3 — Live UI ⬜
 
----
+LiveView in the same binary. A pure consumer of events and a thin sender of control.
 
-## 6. Dependency Caching
+| Task | Item |
+|---|---|
+| [M3-01](.tasks/M3-01-web-app-shell.md) | `tiny_ci_web` Phoenix app in the release; run list, repo pages, live updates over PubSub |
+| [M3-02](.tasks/M3-02-run-detail-view.md) | Run detail: DAG, streaming per-step logs, store panel, matrix rows; past and live runs share one projection |
+| [M3-03](.tasks/M3-03-controls-and-auth.md) | Cancel, re-run, breakpoint controls; login |
 
-**User story**
-As a pipeline author, I want to cache directories between pipeline runs (keyed by a file hash) so that dependency installation steps are skipped when nothing has changed, dramatically reducing pipeline duration.
+**Gate:** no external database, one process, a fresh VM shows a live DAG updating as a run
+executes and can open any run from history.
 
-**Desired outcomes**
-- A `cache` directive accepts a list of directory paths and a `key:` expression (e.g., a file path whose hash becomes the cache key).
-- On a cache hit, the cached directories are restored before the step runs; the step itself is skipped.
-- On a cache miss, the step runs normally and its output directories are saved to the cache afterward.
-- Cache is stored locally (e.g., `~/.cache/tiny_ci/<project>/<key>`).
-- Cache hits and misses are reported in output with the resolved key.
-- A `--no-cache` CLI flag disables all caching for a run.
+### M4 — Distributed runners ⬜
 
-**Acceptance criteria**
-- [x] `cache paths: ["deps", "_build"], key: "mix.lock"` is valid DSL on a step
-- [x] Cache key is the SHA256 of the named file's contents
-- [x] Cache hit skips the step and restores directories; reporter shows `[cache hit]`
-- [x] Cache miss runs the step and saves directories; reporter shows `[cache miss]`
-- [x] `mix tiny_ci.run --no-cache` bypasses all cache lookups
-- [x] Stale cache entries can be cleared with `mix tiny_ci.cache clean`
+| Task | Item |
+|---|---|
+| [M4-01](.tasks/M4-01-runner-node.md) | `tiny_ci runner --join`; labels; registration; liveness via node monitoring |
+| [M4-02](.tasks/M4-02-remote-stage-execution.md) | `runs_on:` stage option; scheduler assigns stages to runners; events and control cross nodes |
+| [M4-03](.tasks/M4-03-artifact-transfer.md) | Artifacts move between nodes; downstream stages find them |
+| [M4-04](.tasks/M4-04-secure-transport.md) | TLS distribution first; documented threat model; authenticated protocol later |
 
----
+**Gate:** a macOS stage and a Linux stage in one pipeline run on two machines; killing a runner
+mid-run is reported as a failure within seconds, not a hang.
 
-## 7. Artifact Persistence
+### M5 — Speed ⬜
 
-**User story**
-As a pipeline author, I want to declare build artifacts produced by one stage so that they are available to downstream stages, enabling multi-stage pipelines (compile → test → package → deploy) without relying on shared filesystem assumptions.
+| Task | Item |
+|---|---|
+| [M5-01](.tasks/M5-01-affected-stages.md) | `paths:` on stages; the trigger supplies the base ref; unaffected stages are skipped |
+| [M5-02](.tasks/M5-02-test-sharding.md) | `shards:` on stages fans a test suite across runners |
+| [M5-03](.tasks/M5-03-flaky-test-quarantine.md) | Per-test failure records, targeted re-run, quarantine (design: `docs/archive/design-2026-05.md` §2) |
 
-**Desired outcomes**
-- An `artifact` directive on a step or stage declares one or more paths to persist after that step/stage completes.
-- Downstream stages/steps can reference artifacts by name and have them available in a predictable location.
-- Artifacts are stored per pipeline run (timestamped or by commit SHA) so runs don't overwrite each other.
-- A `--artifacts-dir` CLI option overrides the default storage location.
-- Missing declared artifact paths produce a warning (not an error) unless `required: true` is set.
-- `mix tiny_ci.run --list-artifacts` shows artifacts from the last run.
+**Gate:** a monorepo push touching one package runs only that package's stages; a test suite
+split across three runners finishes in roughly a third of the time.
 
-**Acceptance criteria**
-- [x] `artifact "build", paths: ["_build/prod/rel"]` is valid DSL
-- [x] Downstream stage step receives artifact path via store or injected env var
-- [x] Artifact is copied/linked to `<artifacts_dir>/<run_id>/<name>/`
-- [x] Missing path with `required: true` fails the step
-- [x] Missing path without `required:` emits a warning and continues
-- [x] `--dry-run` shows artifact declarations and their resolved storage paths
+### M6 — Debugging differentiators ⬜
 
----
+These were designed earlier and are genuinely differentiating. They wait for a server and a UI
+to live in. Re-specify each against M2/M3 before starting.
 
-## 8. Stage Dependency Graph (DAG)
+| Task | Item |
+|---|---|
+| [M6-01](.tasks/M6-01-shell-on-failure.md) | Drop into a shell in the failed step's environment (CLI first, then browser PTY) |
+| [M6-02](.tasks/M6-02-conditional-breakpoints.md) | Breakpoints with `when:`-grammar conditions |
+| [M6-03](.tasks/M6-03-replay-time-travel.md) | Scrub a recorded run's timeline in the UI |
+| [M6-04](.tasks/M6-04-dap-editor-debugging.md) | Debug Adapter Protocol server for editor breakpoints |
 
-**User story**
-As a pipeline author, I want stages to declare explicit dependencies so that independent stages can run in parallel while dependent stages wait, enabling fan-out/fan-in topologies without forcing all stages into a single sequence.
+### M7 — Ecosystem ⬜
 
-**Desired outcomes**
-- A `needs:` option on a stage declares one or more stage names that must complete successfully before this stage starts.
-- Stages with no `needs:` (and no predecessors depending on them) run in parallel at the start.
-- If a dependency stage fails, all stages that `needs:` it are skipped.
-- The execution plan rendered by `--dry-run` shows the dependency graph visually.
-- Circular dependency detection at parse time produces a clear error.
+| Task | Item |
+|---|---|
+| [M7-01](.tasks/M7-01-import-github-actions.md) | `tiny_ci import` converts simple GitHub Actions workflows |
+| [M7-02](.tasks/M7-02-supply-chain-in-ui.md) | Lockfile, attestation, and registry surfaced in the UI; server runs attested |
 
-**Acceptance criteria**
-- [x] `stage "deploy", needs: ["test", "build"]` is valid DSL
-- [x] `test` and `build` run in parallel if they have no mutual dependencies
-- [x] `deploy` starts only after both `test` and `build` succeed
-- [x] Cycle detection at pipeline load time: `{:error, :circular_dependency, [...]}`
-- [x] Reporter shows parallel stages grouped on the same "level"
-- [x] `--dry-run` renders a dependency graph (ASCII or indented tree)
+## Explicitly not building
 
----
+- Container orchestration or a Kubernetes operator. Runners are processes on machines you own.
+- A hosted service before M4 is stable.
+- Windows before M2 ships.
+- Further module-step debugging (source-level pry, what-if re-runs, recorded external reads).
+  Their old task files are kept under [`.tasks/deferred/`](.tasks/deferred/) until someone asks.
+- A YAML compatibility layer. M7-01 is a one-time importer, not a runtime.
 
-## 9. Matrix Builds
+## Process
 
-**User story**
-As a pipeline author, I want to define a matrix of variable combinations so that a stage is automatically replicated and run once per combination, enabling me to test against multiple Elixir versions, operating systems, or configuration flags in a single pipeline definition.
-
-**Desired outcomes**
-- A `matrix:` option on a stage accepts a map of variable names to lists of values.
-- tiny_ci generates one stage run per combination of matrix values (cartesian product).
-- Each matrix run receives its variables as environment variables and as named entries in the pipeline store.
-- Matrix runs execute in parallel by default; a `max_parallel:` option caps concurrency.
-- The reporter groups matrix runs under their parent stage name with the variable combination shown.
-- A failing matrix combination fails the parent stage; `allow_failure: true` on the matrix stage allows partial failure.
-
-**Acceptance criteria**
-- [x] `matrix: [elixir: ["1.17", "1.18"], otp: ["26", "27"]]` produces 4 runs
-- [x] Each run receives `ELIXIR` and `OTP` env vars with its combination's values
-- [x] All 4 runs start in parallel (subject to `max_parallel:`)
-- [x] Reporter shows: `test [elixir=1.17, otp=26] ✓`, `test [elixir=1.17, otp=27] ✓`, etc.
-- [x] One failing combination marks the stage as failed
-- [x] `--dry-run` lists all generated matrix combinations without running them
-
----
-
-## 10. Watch Mode
-
-**User story**
-As a developer, I want tiny_ci to watch my project files and automatically re-run the pipeline (or a specified subset of stages) when files change, so that I get continuous feedback during development without manually re-triggering runs.
-
-**Desired outcomes**
-- `mix tiny_ci.run --watch` starts a file watcher on the project root.
-- On file change, the pipeline re-runs; if a run is in progress it is cancelled first (or queued, based on a `--watch-queue` flag).
-- A `--watch-paths` option restricts which paths trigger a re-run (supports glob patterns).
-- A debounce window (default 500ms, configurable via `--watch-debounce`) prevents rapid re-triggers.
-- The terminal is cleared between runs (optional, `--watch-clear`).
-- `Ctrl+C` exits watch mode cleanly, killing any in-progress run.
-
-**Acceptance criteria**
-- [ ] `mix tiny_ci.run --watch` enters watch mode after an initial run
-- [ ] Saving any tracked file triggers a re-run within the debounce window
-- [ ] `--watch-paths "lib/**/*.ex,test/**/*.exs"` only triggers on matched paths
-- [ ] In-progress run is terminated cleanly before starting a new one
-- [ ] Exit code on `Ctrl+C` is 0 (clean exit, not a failure)
-- [ ] Watch mode is incompatible with `--dry-run`; clear error if combined
+- One roadmap (this file), one task index (`.tasks/INDEX.md`), one task file per unit of work.
+  Update the status in both when a task lands.
+- Tasks are written for autonomous agents: see [`.tasks/CONVENTIONS.md`](.tasks/CONVENTIONS.md)
+  for the test-first workflow and the definition of done every task shares.
+- M2 is the first milestone dogfooded on a real machine: tiny_ci's own server builds tiny_ci.
