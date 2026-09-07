@@ -4,7 +4,7 @@ defmodule TinyCI.Executor.DriverTest do
   alias TinyCI.Context
   alias TinyCI.Executor.Driver
   alias TinyCI.Executor.Driver.{Inline, Sandbox}
-  alias TinyCI.SandboxFixtures.Echo
+  alias TinyCI.SandboxFixtures.{Boom, Echo, Exits, Throws}
 
   # A backend that runs the real Runner in-process (no OS isolation) so the
   # Sandbox driver's glue — policy, context sanitizing, serialization, redaction
@@ -67,6 +67,24 @@ defmodule TinyCI.Executor.DriverTest do
     test "refuses an untrusted (third-party) action" do
       assert {:error, {:untrusted_action, Echo}} =
                Inline.run(Echo, %{msg: "hi"}, ctx(root_app: :other), root_app: :other)
+    end
+  end
+
+  describe "Inline.run/4 crash handling" do
+    test "a raising action is reported as a crashed step, with the stack trace" do
+      assert {:error, {:crashed, text}} = Inline.run(Boom, %{}, ctx(root_app: :tiny_ci), [])
+      assert text =~ "Step crashed: ** (RuntimeError) kaboom"
+      assert text =~ "Boom.execute/2"
+    end
+
+    test "an exiting action is reported as a crashed step" do
+      assert {:error, {:crashed, text}} = Inline.run(Exits, %{}, ctx(root_app: :tiny_ci), [])
+      assert text =~ "(exit) :kaboom"
+    end
+
+    test "a throwing action is reported as a crashed step" do
+      assert {:error, {:crashed, text}} = Inline.run(Throws, %{}, ctx(root_app: :tiny_ci), [])
+      assert text =~ "(throw) :ball"
     end
   end
 

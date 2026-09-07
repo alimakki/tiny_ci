@@ -35,12 +35,22 @@ defmodule TinyCI.Executor do
   boundary blocks awaiting a command, so an independent parallel branch keeps
   running. Without `control:`, no control plane is started and every boundary costs
   a single map lookup.
+
+  A crash (raise, exit, or throw) inside a step is a **failed step**, never a
+  crashed run: it is caught at the step boundary and reported through the same
+  `StepResult` and `step_finished` event as any other failure, with the formatted
+  exception as the step's output (see `TinyCI.Executor.Crash`). Sibling steps and
+  stages finish, `allow_failure:` still applies, and the worker tasks used for
+  parallel steps, DAG levels, and matrix combinations are not linked to the run,
+  so nothing that escapes those boundaries can take it down either.
   """
 
   alias TinyCI.{Artifacts, Cache, Control, DAG, Matrix, MatrixRunResult, Output}
   alias TinyCI.{StageResult, StepResult}
   alias TinyCI.Events
-  alias TinyCI.Executor.{Driver, Env}
+  alias TinyCI.Executor.{Crash, Driver, Env}
+
+  require Logger
 
   alias TinyCI.Events.{
     CacheLookup,
@@ -326,19 +336,51 @@ defmodule TinyCI.Executor do
     else
       caller_gl = Process.group_leader()
 
-      stages
-      |> Enum.map(&spawn_dag_stage(&1, ctx, output_mode, blocked, caller_gl, listener))
-      |> Task.await_many(:infinity)
+      tasks =
+        Enum.map(stages, &spawn_dag_stage(&1, ctx, output_mode, blocked, caller_gl, listener))
+
+      tasks
+      |> Task.yield_many(timeout: :infinity)
+      |> Enum.zip_with(stages, fn
+        {_task, {:ok, result}}, _stage -> result
+        {_task, {:exit, reason}}, stage -> escaped_stage_crash(stage, ctx, reason)
+      end)
     end
   end
 
   defp serial_control?(ctx), do: Map.get(ctx, :control_serial, false)
 
   defp spawn_dag_stage(stage, ctx, output_mode, blocked, caller_gl, listener) do
-    Task.Supervisor.async(TinyCI.TaskSupervisor, fn ->
+    Task.Supervisor.async_nolink(TinyCI.TaskSupervisor, fn ->
       Process.group_leader(self(), caller_gl)
       run_dag_stage(stage, ctx, output_mode, blocked, listener)
     end)
+  end
+
+  # Defense in depth: the stage boundary in `do_execute/4` should have caught
+  # this, so an exit reaching here is logged loudly rather than swallowed.
+  defp escaped_stage_crash(stage, ctx, reason) do
+    crashed_stage(stage, ctx, Crash.format(:exit, reason, []))
+  end
+
+  defp crashed_stage(stage, ctx, text) do
+    Logger.error("Stage #{stage.name} crashed outside any step: #{text}")
+
+    Events.emit(ctx, %StageCompleted{
+      run_id: run_id(ctx),
+      timestamp: now(),
+      stage: stage.name,
+      status: :failed,
+      duration_ms: 0
+    })
+
+    %StageResult{
+      name: stage.name,
+      status: :failed,
+      step_results: [],
+      duration_ms: 0,
+      store: ctx.store
+    }
   end
 
   defp run_dag_stage(stage, ctx, output_mode, blocked, listener) do
@@ -436,6 +478,21 @@ defmodule TinyCI.Executor do
       stage: stage.name
     })
 
+    run_stage_guarded(stage, context, output_mode, listener)
+  end
+
+  # The stage boundary. Covers the `when:` evaluation as well as the stage body,
+  # so a crash outside any step still yields a failed `StageResult` and a
+  # `stage_finished` event instead of taking the run down.
+  defp run_stage_guarded(stage, context, output_mode, listener) do
+    run_stage_or_skip(stage, context, output_mode, listener)
+  rescue
+    e -> crashed_stage(stage, context, Crash.format(:error, e, __STACKTRACE__))
+  catch
+    kind, reason -> crashed_stage(stage, context, Crash.format(kind, reason, __STACKTRACE__))
+  end
+
+  defp run_stage_or_skip(stage, context, output_mode, listener) do
     if skip_stage?(stage, context) do
       Events.emit(context, %StageSkipped{
         run_id: run_id(context),
@@ -567,7 +624,7 @@ defmodule TinyCI.Executor do
     {duration_ms, run_results} =
       measure(fn ->
         TinyCI.TaskSupervisor
-        |> Task.Supervisor.async_stream(
+        |> Task.Supervisor.async_stream_nolink(
           combinations,
           fn combo ->
             Process.group_leader(self(), caller_gl)
@@ -575,9 +632,13 @@ defmodule TinyCI.Executor do
           end,
           max_concurrency: max_concurrency,
           timeout: :infinity,
-          ordered: true
+          ordered: true,
+          zip_input_on_exit: true
         )
-        |> Enum.map(fn {:ok, result} -> result end)
+        |> Enum.map(fn
+          {:ok, result} -> result
+          {:exit, {combination, reason}} -> escaped_matrix_crash(stage, combination, reason)
+        end)
       end)
 
     listener.matrix_stage_finished(run_results)
@@ -593,6 +654,18 @@ defmodule TinyCI.Executor do
       duration_ms: duration_ms,
       store: merged_store
     }
+  end
+
+  # Defense in depth, as with `escaped_stage_crash/3`: the step boundary should
+  # have caught this inside the combination's own task.
+  defp escaped_matrix_crash(stage, combination, reason) do
+    text = Crash.format(:exit, reason, [])
+
+    Logger.error(
+      "Matrix combination #{inspect(combination)} of stage #{stage.name} crashed: #{text}"
+    )
+
+    %MatrixRunResult{combination: combination, status: :failed, step_results: [], store: %{}}
   end
 
   # `--debug-serial` also caps matrix fan-out at one combination, so stepping
@@ -680,8 +753,29 @@ defmodule TinyCI.Executor do
         step: step.name
       })
 
-      run_step_with_control(step, context, output_mode, prefix, working_dir, listener)
+      run_step_guarded(step, context, output_mode, prefix, working_dir, listener)
     end
+  end
+
+  # The step boundary: the single place a crash in one step's execution — the
+  # action itself, cache restore, artifact copy, port errors — becomes a failed
+  # `StepResult` carrying the formatted exception, with the usual events emitted.
+  defp run_step_guarded(step, context, output_mode, prefix, working_dir, listener) do
+    run_step_with_control(step, context, output_mode, prefix, working_dir, listener)
+  rescue
+    e -> crashed_step(context, step, Crash.format(:error, e, __STACKTRACE__))
+  catch
+    kind, reason -> crashed_step(context, step, Crash.format(kind, reason, __STACKTRACE__))
+  end
+
+  defp crashed_step(ctx, step, text) do
+    finish_step(ctx, step, %StepResult{
+      name: step.name,
+      status: :failed,
+      output: text,
+      duration_ms: 0,
+      allowed_failure: step.allow_failure
+    })
   end
 
   # The `before:` step boundary. Runs in the step's own process (its task in
@@ -1001,13 +1095,19 @@ defmodule TinyCI.Executor do
         step_prefix = if prefix == :step_name, do: step.name, else: nil
         effective_wd = resolve_working_dir(step.working_dir || stage_wd, root)
 
-        Task.Supervisor.async(TinyCI.TaskSupervisor, fn ->
+        Task.Supervisor.async_nolink(TinyCI.TaskSupervisor, fn ->
           Process.group_leader(self(), caller_gl)
           execute_step_or_skip(step, context, output_mode, step_prefix, effective_wd, listener)
         end)
       end)
 
-    step_results = Task.await_many(tasks, :infinity)
+    step_results =
+      tasks
+      |> Task.yield_many(timeout: :infinity)
+      |> Enum.zip_with(steps, fn
+        {_task, {:ok, result}}, _step -> result
+        {_task, {:exit, reason}}, step -> escaped_step_crash(context, step, reason)
+      end)
 
     merged_store =
       Enum.reduce(step_results, context.store, fn result, store ->
@@ -1015,6 +1115,11 @@ defmodule TinyCI.Executor do
       end)
 
     {step_results, merged_store}
+  end
+
+  # Defense in depth: the step boundary should have caught this inside the task.
+  defp escaped_step_crash(ctx, step, reason) do
+    crashed_step(ctx, step, Crash.format(:exit, reason, []))
   end
 
   defp run_step(
@@ -1093,6 +1198,7 @@ defmodule TinyCI.Executor do
       "untrusted action unsandboxed."
   end
 
+  defp driver_error_message({:crashed, text}) when is_binary(text), do: text
   defp driver_error_message(reason) when is_binary(reason), do: reason
   defp driver_error_message(reason), do: inspect(reason)
 

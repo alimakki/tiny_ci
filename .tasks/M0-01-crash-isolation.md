@@ -1,6 +1,6 @@
 # M0-01 — A crashing step is a failed step, not a crashed run
 
-**Milestone:** M0 · **Size:** S · **Depends on:** — · **Status:** ⬜ Not started
+**Milestone:** M0 · **Size:** S · **Depends on:** — · **Status:** ✅ Done (2026-09-07)
 **Written against:** commit `b9496e7` (2026-08-08)
 
 ## Summary
@@ -197,17 +197,28 @@ Write each test first, run it, watch it fail, then implement the smallest change
 
 ## Acceptance criteria
 
-- [ ] A module step that raises, exits, or throws produces a `StepResult{status: :failed}` whose
+- [x] A module step that raises, exits, or throws produces a `StepResult{status: :failed}` whose
       `output` starts with `"Step crashed: "` and includes the exception and stack trace.
-- [ ] In a parallel stage, sibling steps complete and report their own results.
-- [ ] In a serial stage, fail-fast behaviour is unchanged (later steps are not run).
-- [ ] `allow_failure: true` on a crashing step lets the stage pass.
-- [ ] A crashing matrix combination fails only that combination.
-- [ ] A crashing stage in a DAG level does not prevent independent stages from finishing.
-- [ ] `step_finished` and `run_finished` events are emitted for a run containing a crash.
-- [ ] No `Task ... terminating` error is logged for a caught crash.
-- [ ] A raising module hook does not stop subsequent hooks and does not change the exit code.
-- [ ] `docs/actions.md` gains a short "What happens when an action crashes" paragraph.
+      — `driver_test.exs` "Inline.run/4 crash handling" (raise/exit/throw);
+      `executor_test.exs` "a raising module step fails only itself in a parallel stage".
+- [x] In a parallel stage, sibling steps complete and report their own results.
+      — `executor_test.exs` "a raising module step fails only itself in a parallel stage".
+- [x] In a serial stage, fail-fast behaviour is unchanged (later steps are not run).
+      — `executor_test.exs` "a raising module step keeps fail-fast in a serial stage".
+- [x] `allow_failure: true` on a crashing step lets the stage pass.
+      — `executor_test.exs` "allow_failure: true lets the stage pass a crashing step".
+- [x] A crashing matrix combination fails only that combination.
+      — `executor_test.exs` "a crashing matrix combination fails only that combination".
+- [x] A crashing stage in a DAG level does not prevent independent stages from finishing.
+      — `executor_test.exs` "a crashing stage in a DAG level does not stop independent stages".
+- [x] `step_finished` and `run_finished` events are emitted for a run containing a crash.
+      — `executor_test.exs` "step_finished and run_finished events are emitted for a crashed step".
+- [x] No `Task ... terminating` error is logged for a caught crash.
+      — `executor_test.exs` "a caught crash logs no task termination" and
+      "a crash in step plumbing outside the driver is a failed step".
+- [x] A raising module hook does not stop subsequent hooks and does not change the exit code.
+      — `hooks_test.exs` "a raising module hook is reported and the next hook still runs".
+- [x] `docs/actions.md` gains a short "What happens when an action crashes" paragraph.
 
 ## Pitfalls
 
@@ -224,6 +235,28 @@ Write each test first, run it, watch it fail, then implement the smallest change
 
 - `docs/actions.md`: add the crash paragraph.
 - No README change required.
+
+## Deviations
+
+- **Stage boundary covers the `when:` check.** The design said to wrap
+  `run_stage_with_control/4`, but `skip_stage?/2` (where a `when_condition` is evaluated)
+  runs *before* it in `do_execute/4`, so the TDD-plan test for a raising condition could not
+  pass with that placement. `run_stage_guarded/4` wraps both the skip check and the body,
+  after `StageStarted` is emitted. A crash there emits `StageCompleted{status: :failed}` and
+  logs the formatted crash with `Logger.error/1`.
+- **`TinyCI.TestSink` lives in `test/support/test_sink.ex`** even though only
+  `executor_test.exs` uses it today; the events test in the TDD plan names it by that module,
+  and M0-03/M0-06 will want the same sink.
+- **Extra test:** "a crash in step plumbing outside the driver is a failed step" raises from a
+  step's `config_block`, which runs in `run_step/5` before the driver. It is the test that
+  fails without the step boundary (the driver rescue alone makes every module-step case pass).
+- **DAG test shape:** a DAG with every stage at `needs: []` runs sequentially
+  (`DAG.dag_mode?/1`), which halts at the first failure by design; the test adds a third stage
+  that `needs: [:fine]` so the crashing and independent stages share a DAG level.
+- **Escaped exits also emit events.** The fan-out `{:exit, reason}` paths (defense in depth)
+  route through the same `crashed_step/3` / `crashed_stage/3` helpers as the boundaries, so a
+  `StepCompleted` / `StageCompleted` is still emitted; matrix exits log and return a failed
+  `MatrixRunResult` without a `MatrixRunCompleted` (the combination's own task emits that).
 
 ## Follow-ups (record here, do not fix in this task)
 

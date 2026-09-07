@@ -15,7 +15,7 @@ starting.
 
 | ID | Task | Size | Depends on | Status |
 |----|------|------|------------|--------|
-| [M0-01](M0-01-crash-isolation.md) | A crashing step is a failed step, not a crashed run | S | — | ⬜ |
+| [M0-01](M0-01-crash-isolation.md) | A crashing step is a failed step, not a crashed run | S | — | ✅ |
 | [M0-02](M0-02-remove-legacy-dsl.md) | Remove the macro DSL, old validator, scaffold files | S | — | ⬜ |
 | [M0-03](M0-03-secrets-declaration-and-masking.md) | `secret` directive + masking in every sink and result | M | M0-01 | ⬜ |
 | [M0-04](M0-04-cache-atomicity-locking-eviction.md) | Cache: atomic writes, cross-process lock, eviction | M | — | ⬜ |

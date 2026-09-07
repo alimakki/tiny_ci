@@ -7,8 +7,9 @@ defmodule TinyCI.Hooks do
   automatically injected environment variables. Module hooks (`:module`)
   call `module.run/2` with the hook config and an enriched context.
 
-  Hook failures are logged to stderr but do not raise an exception and
-  do not change the pipeline exit code.
+  Hook failures — including a module hook that raises, exits, or throws —
+  are logged to stderr but do not raise an exception, do not stop the
+  remaining hooks, and do not change the pipeline exit code.
 
   ## Environment variables for shell command hooks
 
@@ -22,6 +23,7 @@ defmodule TinyCI.Hooks do
       @spec run(keyword(), map()) :: :ok | {:error, reason :: term()}
   """
 
+  alias TinyCI.Executor.Crash
   alias TinyCI.Hook
   alias TinyCI.Output
 
@@ -87,14 +89,28 @@ defmodule TinyCI.Hooks do
     IO.puts("Hook: #{name}")
     config = if block, do: block.(), else: []
 
-    case apply(module, :run, [config, context]) do
+    case invoke_module_hook(module, config, context) do
       :ok ->
+        :ok
+
+      {:error, {:crashed, text}} ->
+        IO.puts(:stderr, "Hook #{name} failed: #{text}")
         :ok
 
       {:error, reason} ->
         IO.puts(:stderr, "Hook #{name} failed: #{inspect(reason)}")
         :ok
     end
+  end
+
+  # A raising hook is reported like a hook that returned `{:error, _}`: it must
+  # not abort the remaining hooks, and hooks never affect the exit code.
+  defp invoke_module_hook(module, config, context) do
+    apply(module, :run, [config, context])
+  rescue
+    e -> {:error, {:crashed, Crash.format(:error, e, __STACKTRACE__)}}
+  catch
+    kind, reason -> {:error, {:crashed, Crash.format(kind, reason, __STACKTRACE__)}}
   end
 
   defp build_hook_env(context) do

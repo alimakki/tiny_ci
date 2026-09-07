@@ -34,6 +34,40 @@ defmodule TinyCI.SandboxFixtures do
     def metadata, do: %TinyCI.Action.Metadata{name: "fixture.boom", version: "1.0.0"}
   end
 
+  defmodule Exits do
+    @moduledoc "Exits the calling process, to exercise crash handling at the boundary."
+    use TinyCI.Action
+
+    @impl true
+    def execute(_config, _ctx), do: exit(:kaboom)
+
+    @impl true
+    def metadata, do: %TinyCI.Action.Metadata{name: "fixture.exits", version: "1.0.0"}
+  end
+
+  defmodule Throws do
+    @moduledoc "Throws a bare term, to exercise crash handling at the boundary."
+    use TinyCI.Action
+
+    @impl true
+    def execute(_config, _ctx), do: throw(:ball)
+
+    @impl true
+    def metadata, do: %TinyCI.Action.Metadata{name: "fixture.throws", version: "1.0.0"}
+  end
+
+  defmodule BoomIf do
+    @moduledoc "Raises only when the store's `:v` is \"a\", for matrix crash tests."
+    use TinyCI.Action
+
+    @impl true
+    def execute(_config, %{store: %{v: "a"}}), do: raise("kaboom")
+    def execute(_config, _ctx), do: :ok
+
+    @impl true
+    def metadata, do: %TinyCI.Action.Metadata{name: "fixture.boom_if", version: "1.0.0"}
+  end
+
   defmodule TcpProbe do
     @moduledoc "Attempts an outbound TCP connection (no network capability declared)."
     use TinyCI.Action

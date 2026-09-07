@@ -1,7 +1,9 @@
 defmodule TinyCI.ExecutorTest do
   use ExUnit.Case, async: true
 
-  alias TinyCI.{Executor, Stage, Step, StageResult, StepResult}
+  alias TinyCI.{Executor, MatrixRunResult, Stage, Step, StageResult, StepResult}
+  alias TinyCI.Events.{PipelineCompleted, StageCompleted, StepCompleted}
+  alias TinyCI.SandboxFixtures.{Boom, BoomIf}
 
   describe "execute/2 with serial mode" do
     test "returns a passed StageResult on success" do
@@ -1992,6 +1994,143 @@ defmodule TinyCI.ExecutorTest do
 
       ctx = %{branch: "main", commit: "abc1234", timestamp: DateTime.utc_now(), store: %{}}
       assert {:ok, _} = Executor.run_pipeline(stages, ctx)
+    end
+  end
+
+  describe "crash isolation" do
+    @silent [listener: TinyCI.Listener.Silent, output: :buffered]
+
+    defp crash_stage(mode, steps) do
+      %Stage{name: :s, mode: mode, steps: steps}
+    end
+
+    defp ok_step, do: %Step{name: :ok, cmd: "echo fine"}
+    defp boom_step(attrs \\ []), do: struct(%Step{name: :boom, module: Boom}, attrs)
+
+    defp result_for(results, name), do: Enum.find(results, &(&1.name == name))
+
+    test "a raising module step fails only itself in a parallel stage" do
+      stage = crash_stage(:parallel, [ok_step(), boom_step()])
+
+      assert {:error, {:stage_failed, :s, :failed}, [%StageResult{step_results: results}]} =
+               Executor.run_pipeline([stage], nil, @silent)
+
+      assert %StepResult{status: :passed} = result_for(results, :ok)
+      assert %StepResult{status: :failed, output: output} = result_for(results, :boom)
+      assert output =~ "Step crashed: ** (RuntimeError) kaboom"
+      assert output =~ "Boom.execute/2"
+    end
+
+    test "a raising module step keeps fail-fast in a serial stage" do
+      stage = crash_stage(:serial, [boom_step(), ok_step()])
+
+      assert {:error, {:stage_failed, :s, :failed}, [%StageResult{step_results: results}]} =
+               Executor.run_pipeline([stage], nil, @silent)
+
+      assert [%StepResult{name: :boom, status: :failed, output: output}] = results
+      assert output =~ "kaboom"
+    end
+
+    test "allow_failure: true lets the stage pass a crashing step" do
+      stage = crash_stage(:parallel, [ok_step(), boom_step(allow_failure: true)])
+
+      assert {:ok, [%StageResult{status: :passed, step_results: results}]} =
+               Executor.run_pipeline([stage], nil, @silent)
+
+      assert %StepResult{status: :failed, allowed_failure: true} = result_for(results, :boom)
+    end
+
+    test "a crashing matrix combination fails only that combination" do
+      stage = %Stage{
+        name: :s,
+        mode: :serial,
+        matrix: [v: ["a", "b"]],
+        steps: [%Step{name: :maybe, module: BoomIf}]
+      }
+
+      assert {:error, {:stage_failed, :s, :failed}, [%StageResult{matrix_runs: runs}]} =
+               Executor.run_pipeline([stage], nil, @silent)
+
+      by_v = Map.new(runs, fn r -> {Keyword.fetch!(r.combination, :v), r} end)
+      assert %MatrixRunResult{status: :failed, step_results: [failed]} = by_v["a"]
+      assert failed.output =~ "kaboom"
+      assert %MatrixRunResult{status: :passed} = by_v["b"]
+    end
+
+    test "a crashing stage in a DAG level does not stop independent stages" do
+      stages = [
+        %Stage{name: :crash, needs: [], mode: :serial, steps: [boom_step()]},
+        %Stage{name: :fine, needs: [], mode: :serial, steps: [ok_step()]},
+        %Stage{name: :after_fine, needs: [:fine], mode: :serial, steps: [ok_step()]}
+      ]
+
+      assert {:error, {:stage_failed, :crash, :failed}, results} =
+               Executor.run_pipeline(stages, nil, @silent)
+
+      assert %StageResult{status: :failed} = result_for(results, :crash)
+      assert %StageResult{status: :passed} = result_for(results, :fine)
+      assert %StageResult{status: :passed} = result_for(results, :after_fine)
+    end
+
+    test "step_finished and run_finished events are emitted for a crashed step" do
+      stage = crash_stage(:parallel, [ok_step(), boom_step()])
+      opts = @silent ++ [extra_sinks: [{TinyCI.TestSink, pid: self()}]]
+
+      Executor.run_pipeline([stage], nil, opts)
+
+      assert_receive {:event, %StepCompleted{step: :boom, status: :failed, output: output}}
+      assert output =~ "kaboom"
+      assert_receive {:event, %StepCompleted{step: :ok, status: :passed}}
+      assert_receive {:event, %PipelineCompleted{status: :failed}}
+    end
+
+    test "a caught crash logs no task termination" do
+      stage = crash_stage(:parallel, [ok_step(), boom_step()])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          Executor.run_pipeline([stage], nil, @silent)
+        end)
+
+      refute log =~ "Task #PID"
+    end
+
+    test "a crash in step plumbing outside the driver is a failed step" do
+      step = %Step{name: :cfg, module: Boom, config_block: fn -> raise "config boom" end}
+      stage = crash_stage(:parallel, [ok_step(), step])
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:stage_failed, :s, :failed}, [%StageResult{step_results: results}]} =
+                   Executor.run_pipeline([stage], nil, @silent)
+
+          assert %StepResult{status: :passed} = result_for(results, :ok)
+          assert %StepResult{status: :failed, output: output} = result_for(results, :cfg)
+          assert output =~ "Step crashed: ** (RuntimeError) config boom"
+        end)
+
+      refute log =~ "Task #PID"
+    end
+
+    test "a crash outside any step fails the stage" do
+      stage = %Stage{
+        name: :s,
+        mode: :serial,
+        when_condition: fn _ctx -> raise "cond boom" end,
+        steps: [ok_step()]
+      }
+
+      opts = @silent ++ [extra_sinks: [{TinyCI.TestSink, pid: self()}]]
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:stage_failed, :s, :failed}, [%StageResult{status: :failed}]} =
+                   Executor.run_pipeline([stage], nil, opts)
+        end)
+
+      assert log =~ "cond boom"
+      assert_receive {:event, %StageCompleted{stage: :s, status: :failed}}
+      assert_receive {:event, %PipelineCompleted{status: :failed}}
     end
   end
 end

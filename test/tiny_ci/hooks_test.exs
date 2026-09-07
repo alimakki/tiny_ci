@@ -15,6 +15,11 @@ defmodule TinyCI.HooksTest do
     def run(_config, _ctx), do: {:error, :boom}
   end
 
+  defmodule RaiseHook do
+    @moduledoc false
+    def run(_config, _ctx), do: raise("hook kaboom")
+  end
+
   defmodule ConfigCapture do
     @moduledoc false
     def run(config, _ctx) do
@@ -227,6 +232,26 @@ defmodule TinyCI.HooksTest do
   end
 
   describe "run_hooks/3 with module hooks" do
+    test "a raising module hook is reported and the next hook still runs" do
+      marker = "hook-after-crash-#{System.unique_integer([:positive])}"
+
+      hooks = %{
+        on_failure: [
+          %Hook{name: :raise_hook, module: RaiseHook},
+          %Hook{name: :echo_hook, cmd: "echo #{marker}; false"}
+        ]
+      }
+
+      stderr =
+        ExUnit.CaptureIO.capture_io(:stderr, fn ->
+          assert :ok = Hooks.run_hooks(hooks, :on_failure, @base_context)
+        end)
+
+      assert stderr =~ "Hook raise_hook failed"
+      assert stderr =~ "(RuntimeError) hook kaboom"
+      assert stderr =~ marker
+    end
+
     test "runs a passing module hook" do
       hooks = %{on_success: [%Hook{name: :ok_hook, module: OkHook}]}
       assert :ok = Hooks.run_hooks(hooks, :on_success, @base_context)

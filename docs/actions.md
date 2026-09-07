@@ -45,6 +45,19 @@ Return semantics:
 | `{:ok, map}`    | step passed; `map` is merged into the store for later steps/stages  |
 | `{:error, term}`| step failed (stage fails unless the step is `allow_failure: true`)  |
 
+### What happens when an action crashes
+
+A raise, `exit/1`, or `throw/1` inside `execute/2` does **not** take the run
+down. The inline driver catches it and the executor records a **failed step**
+whose output starts with `Step crashed: ` followed by the formatted exception
+and its stack trace, so the console and the `step_finished` event carry the same
+text a `{:error, term}` return would. Everything else behaves as for any failed
+step: sibling steps in a parallel stage finish, later steps in a serial stage
+are not run, `allow_failure: true` lets the stage pass, a crashing matrix
+combination fails only that combination, and independent DAG stages complete.
+The same boundary covers module hooks: a raising hook is reported on stderr and
+the remaining hooks still run.
+
 ### `metadata/0` (optional)
 
 ```elixir
