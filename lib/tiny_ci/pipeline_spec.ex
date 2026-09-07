@@ -3,8 +3,8 @@ defmodule TinyCI.PipelineSpec do
   The output of the DSL interpreter — a fully-resolved pipeline definition.
 
   `%PipelineSpec{}` is what `TinyCI.DSL.Interpreter` produces from a pipeline
-  file. It replaces the old pattern of compiling a module and calling
-  `module.__pipeline__()/0` and `module.__hooks__()/0`.
+  file. It is the only representation of a pipeline the runtime works with:
+  no module is compiled and no code runs while a pipeline is loaded.
 
   ## Fields
 

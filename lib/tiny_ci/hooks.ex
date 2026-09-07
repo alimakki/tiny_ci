@@ -42,8 +42,8 @@ defmodule TinyCI.Hooks do
   ## Parameters
 
     * `hooks`   — a map with `:on_success` and `:on_failure` keys, each
-      containing a list of `%TinyCI.Hook{}` structs (as returned by
-      `module.__hooks__/0`)
+      containing a list of `%TinyCI.Hook{}` structs (the `:hooks` field of a
+      `%TinyCI.PipelineSpec{}`)
     * `event`   — `:on_success` or `:on_failure`
     * `context` — the pipeline context map (branch, commit, store, etc.)
 

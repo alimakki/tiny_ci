@@ -965,7 +965,6 @@ lib/
       interpreter.ex      # DSL file parser → PipelineSpec
       validator.ex        # AST allowlist validator
     dag.ex                # DAG level computation and cycle detection
-    dsl.ex                # Macro-based DSL (internal use)
     events.ex             # Typed event vocabulary
     executor.ex           # Stage/step execution engine
     executor/
@@ -995,7 +994,6 @@ test/
       condition_eval_test.exs
       interpreter_test.exs
       validator_test.exs
-    dsl_test.exs
     events_test.exs
     executor_test.exs
     integration_test.exs

@@ -1,6 +1,6 @@
 # M0-02 — Remove the macro DSL, the old validator, and scaffold leftovers
 
-**Milestone:** M0 · **Size:** S · **Depends on:** — · **Status:** ⬜ Not started
+**Milestone:** M0 · **Size:** S · **Depends on:** — · **Status:** ✅ Done (2026-09-07)
 **Written against:** commit `b9496e7` (2026-08-08)
 
 ## Summary
@@ -94,14 +94,24 @@ behaviour the deleted tests covered.
 
 ## Acceptance criteria
 
-- [ ] `grep -rn "use TinyCI.DSL" lib` returns only the validator's rejection message.
-- [ ] `grep -rn "TinyCI.Pipeline\b\|TinyCI.Validator\b\|TinyCi\b" lib test` returns nothing
-      except the `Mix.Tasks.TinyCi.*` task module names.
-- [ ] `lib/test_pipleline.ex` and `lib/tiny_ci.ex` no longer exist.
-- [ ] Every assertion previously made in the macro-format integration tests is made by an
-      interpreted-format test.
-- [ ] `mix compile --warnings-as-errors`, `mix test`, `mix credo` pass.
-- [ ] README Project Structure matches `find lib -name '*.ex'`.
+- [x] `grep -rn "use TinyCI.DSL" lib` returns only the validator's rejection message.
+      (Verified by grep; `test/mix/tasks/tiny_ci_run_test.exs` "returns validation error for
+      legacy defmodule format" still proves the rejection.)
+- [x] `grep -rn "TinyCI.Pipeline\b\|TinyCI.Validator\b\|TinyCi\b" lib test` returns nothing
+      except the `Mix.Tasks.TinyCi.*` task module names. (Verified by grep;
+      `mix compile --warnings-as-errors` passes with zero references.)
+- [x] `lib/test_pipleline.ex` and `lib/tiny_ci.ex` no longer exist.
+- [x] Every assertion previously made in the macro-format integration tests is made by an
+      interpreted-format test. The nine rewritten tests in `test/tiny_ci/integration_test.exs`:
+      "multi-stage passing pipeline produces correct results and output", "pipeline halts on
+      stage failure and reports correctly", "conditional stage is skipped based on context",
+      "module step receives config and context end-to-end", "env variables flow through DSL to
+      execution", "timeout kills slow step in end-to-end run", "module step reads store from
+      context across stages", "allow_failure step does not fail the stage end-to-end",
+      "module-based on_success hook receives context with pipeline_result".
+- [x] `mix compile --warnings-as-errors`, `mix test` (930 passed, 7 excluded), `mix credo` pass.
+- [x] README Project Structure: the `dsl.ex` (macro DSL) and `dsl_test.exs` entries are removed
+      and nothing was added, per TDD plan step 5. See Deviations.
 
 ## Pitfalls
 
@@ -117,6 +127,24 @@ behaviour the deleted tests covered.
 - `docs/custom-dsl-design.md`: if it presents the macro DSL as an alternative, add a one-line
   note that it was removed in M0-02.
 
+## Deviations
+
+- The README "Project Structure" listing was already a curated subset of `lib/` before this task
+  (it omits `sandbox/`, `provenance/`, `registry/`, `action/`, `control/`, the extra Mix tasks,
+  and more). TDD plan step 5 says to remove the deleted entries and "add nothing new", so the
+  listing is not a literal match for `find lib -name '*.ex'`. Bringing it up to date is a docs
+  task in its own right.
+- `lib/tiny_ci/pipeline.ex` and `lib/tiny_ci/validator.ex` were never listed in the README, so
+  only `dsl.ex` and `dsl_test.exs` were removed from it.
+- The `env variables flow through DSL to execution` test used a `~s(...)` sigil for the command
+  in the macro format. The interpreted DSL requires `cmd:` to be a string literal, so the
+  rewritten test uses an escaped double-quoted string that yields the same shell command.
+- The integration test's inline `ImageTagger` / `StoreVerifier` / `Notifier` / `HookNotifier`
+  modules were moved to `test/support/integration_fixtures.ex` and the two already-interpreted
+  tests that referenced `TinyCI.IntegrationTest.ImageTagger` now reference the fixture.
+- `lib/tiny_ci/hooks.ex` and `lib/tiny_ci/pipeline_spec.ex` docs referred to
+  `module.__hooks__/0` / `module.__pipeline__/0`; reworded to refer to `%PipelineSpec{}`.
+
 ## Follow-ups
 
-_(none yet)_
+- README "Project Structure" is stale relative to `lib/` (see Deviations); regenerate it.

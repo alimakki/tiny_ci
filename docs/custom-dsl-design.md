@@ -102,8 +102,12 @@ script — a sequence of top-level DSL calls.
 An optional `name` directive at the top identifies the pipeline. If omitted,
 the name is derived from the filename (e.g. `deploy.exs` → `:deploy`).
 
+> **Note (M0-02, 2026-09):** the macro DSL shown as "before" below (`use TinyCI.DSL`,
+> `TinyCI.Pipeline`, `TinyCI.Validator`) has been removed from the codebase. The flat
+> interpreted format is the only pipeline format. The "before" snippets are kept as history.
+
 ```elixir
-# tiny_ci.exs — before (current format)
+# tiny_ci.exs — before (legacy format, removed)
 defmodule MyPipeline do
   use TinyCI.DSL
 

@@ -2,30 +2,24 @@ defmodule TinyCI.IntegrationTest do
   @moduledoc """
   End-to-end integration tests that exercise the full pipeline lifecycle.
 
-  Tests in the "DSL -> execute -> report" group compile pipeline modules from
-  source strings using the legacy Elixir macro DSL directly, bypassing the
-  file interpreter. This exercises the executor, reporter, and core pipeline
-  logic without touching the file format.
+  Tests in the "DSL -> execute -> report" group interpret flat pipeline
+  sources in memory with `TinyCI.DSL.Interpreter.interpret_string/2` and hand
+  the resulting spec straight to the executor. This exercises the interpreter,
+  executor, reporter, and core pipeline logic without touching the filesystem
+  for the pipeline itself.
 
-  Tests that go through `Mix.Tasks.TinyCi.Run` write pipeline files in the
-  new flat DSL format and exercise the full interpreter -> executor path.
+  Tests that go through `Mix.Tasks.TinyCi.Run` write pipeline files to disk and
+  exercise the full discovery -> interpreter -> executor path.
+
+  Module steps and hooks referenced from pipeline sources live in
+  `TinyCI.IntegrationFixtures` (`test/support/integration_fixtures.ex`).
   """
 
   use ExUnit.Case
 
   import ExUnit.CaptureIO
 
-  alias TinyCI.{Executor, Reporter, StageResult, StepResult}
-
-  defmodule Notifier do
-    @moduledoc false
-    def execute(config, ctx) do
-      path = config[:output_path]
-      content = "channel=#{config[:channel]},branch=#{ctx.branch}"
-      File.write!(path, content)
-      :ok
-    end
-  end
+  alias TinyCI.{DSL.Interpreter, Executor, Reporter, StageResult, StepResult}
 
   @tmp_dir "test/tmp/integration"
 
@@ -36,26 +30,15 @@ defmodule TinyCI.IntegrationTest do
     :ok
   end
 
-  defp compile_pipeline(code) do
-    [{module, _bytecode}] =
-      ExUnit.CaptureIO.capture_io(:stderr, fn ->
-        send(self(), {:modules, Code.compile_string(code)})
-      end)
-      |> then(fn _warnings ->
-        receive do
-          {:modules, modules} -> modules
-        end
-      end)
-
-    module
+  defp interpret!(source) do
+    {:ok, spec} = Interpreter.interpret_string(source, "integration.exs")
+    spec
   end
 
   describe "full pipeline: DSL -> execute -> report" do
     test "multi-stage passing pipeline produces correct results and output" do
-      code = """
-      defmodule TinyCI.IntegrationTest.PassingPipeline do
-        use TinyCI.DSL
-
+      spec =
+        interpret!("""
         stage :lint, mode: :parallel do
           step :format, cmd: "echo formatted"
           step :credo, cmd: "echo clean"
@@ -64,14 +47,11 @@ defmodule TinyCI.IntegrationTest do
         stage :test, mode: :serial do
           step :unit, cmd: "echo '5 tests, 0 failures'"
         end
-      end
-      """
+        """)
 
-      module = compile_pipeline(code)
-      stages = module.__pipeline__()
       context = %{branch: "main", commit: "abc123def456", timestamp: DateTime.utc_now()}
 
-      assert {:ok, results} = Executor.run_pipeline(stages, context)
+      assert {:ok, results} = Executor.run_pipeline(spec.stages, context)
 
       assert length(results) == 2
 
@@ -97,16 +77,11 @@ defmodule TinyCI.IntegrationTest do
       assert summary =~ "lint"
       assert summary =~ "test"
       assert summary =~ "passed"
-    after
-      :code.purge(TinyCI.IntegrationTest.PassingPipeline)
-      :code.delete(TinyCI.IntegrationTest.PassingPipeline)
     end
 
     test "pipeline halts on stage failure and reports correctly" do
-      code = """
-      defmodule TinyCI.IntegrationTest.FailingPipeline do
-        use TinyCI.DSL
-
+      spec =
+        interpret!("""
         stage :build, mode: :serial do
           step :compile, cmd: "echo compiling"
           step :typecheck, cmd: "exit 1"
@@ -115,15 +90,12 @@ defmodule TinyCI.IntegrationTest do
         stage :deploy, mode: :serial do
           step :release, cmd: "echo should_not_run"
         end
-      end
-      """
+        """)
 
-      module = compile_pipeline(code)
-      stages = module.__pipeline__()
       context = %{branch: "main", commit: "abc123", timestamp: DateTime.utc_now()}
 
       assert {:error, {:stage_failed, :build, :failed}, results} =
-               Executor.run_pipeline(stages, context)
+               Executor.run_pipeline(spec.stages, context)
 
       assert length(results) == 1
       assert [%StageResult{name: :build, status: :failed}] = results
@@ -140,32 +112,23 @@ defmodule TinyCI.IntegrationTest do
 
       assert summary =~ "build"
       assert summary =~ "failed"
-    after
-      :code.purge(TinyCI.IntegrationTest.FailingPipeline)
-      :code.delete(TinyCI.IntegrationTest.FailingPipeline)
     end
 
     test "conditional stage is skipped based on context" do
-      code = """
-      defmodule TinyCI.IntegrationTest.ConditionalPipeline do
-        use TinyCI.DSL
-
+      spec =
+        interpret!("""
         stage :test do
           step :unit, cmd: "echo tests_pass"
         end
 
-        stage :deploy, when: when_branch("main") do
+        stage :deploy, when: branch() == "main" do
           step :release, cmd: "echo deploying"
         end
-      end
-      """
-
-      module = compile_pipeline(code)
-      stages = module.__pipeline__()
+        """)
 
       feature_context = %{branch: "feature/foo", commit: "abc123", timestamp: DateTime.utc_now()}
 
-      assert {:ok, results} = Executor.run_pipeline(stages, feature_context)
+      assert {:ok, results} = Executor.run_pipeline(spec.stages, feature_context)
 
       assert [
                %StageResult{name: :test, status: :passed},
@@ -174,98 +137,71 @@ defmodule TinyCI.IntegrationTest do
 
       main_context = %{branch: "main", commit: "def456", timestamp: DateTime.utc_now()}
 
-      assert {:ok, results} = Executor.run_pipeline(stages, main_context)
+      assert {:ok, results} = Executor.run_pipeline(spec.stages, main_context)
 
       assert [
                %StageResult{name: :test, status: :passed},
                %StageResult{name: :deploy, status: :passed}
              ] = results
-    after
-      :code.purge(TinyCI.IntegrationTest.ConditionalPipeline)
-      :code.delete(TinyCI.IntegrationTest.ConditionalPipeline)
     end
 
     test "module step receives config and context end-to-end" do
       output_path = Path.join(@tmp_dir, "notifier_output.txt")
 
-      code = """
-      defmodule TinyCI.IntegrationTest.ModuleStepPipeline do
-        use TinyCI.DSL
-
+      spec =
+        interpret!("""
         stage :notify, mode: :serial do
-          step :slack, module: TinyCI.IntegrationTest.Notifier do
+          step :slack, module: TinyCI.IntegrationFixtures.Notifier do
             set :channel, "#deploys"
             set :output_path, "#{output_path}"
           end
         end
-      end
-      """
+        """)
 
-      module = compile_pipeline(code)
-      stages = module.__pipeline__()
       context = %{branch: "main", commit: "abc123", timestamp: DateTime.utc_now()}
 
       assert {:ok, [%StageResult{name: :notify, status: :passed}]} =
-               Executor.run_pipeline(stages, context)
+               Executor.run_pipeline(spec.stages, context)
 
       assert File.read!(output_path) == "channel=#deploys,branch=main"
-    after
-      :code.purge(TinyCI.IntegrationTest.ModuleStepPipeline)
-      :code.delete(TinyCI.IntegrationTest.ModuleStepPipeline)
     end
 
     test "env variables flow through DSL to execution" do
-      code = """
-      defmodule TinyCI.IntegrationTest.EnvPipeline do
-        use TinyCI.DSL
-
+      spec =
+        interpret!("""
         stage :check, mode: :serial do
-          step :env_test, cmd: ~s(echo "$TINY_CI_INTEGRATION_VAR"), env: %{"TINY_CI_INTEGRATION_VAR" => "it_works"}
+          step :env_test, cmd: "echo \\"$TINY_CI_INTEGRATION_VAR\\"", env: %{"TINY_CI_INTEGRATION_VAR" => "it_works"}
         end
-      end
-      """
+        """)
 
-      module = compile_pipeline(code)
-      stages = module.__pipeline__()
       context = %{branch: "main", commit: "abc123", timestamp: DateTime.utc_now()}
 
       assert {:ok, [%StageResult{name: :check, status: :passed, step_results: [step]}]} =
-               Executor.run_pipeline(stages, context)
+               Executor.run_pipeline(spec.stages, context)
 
       assert step.output =~ "it_works"
-    after
-      :code.purge(TinyCI.IntegrationTest.EnvPipeline)
-      :code.delete(TinyCI.IntegrationTest.EnvPipeline)
     end
 
     test "timeout kills slow step in end-to-end run" do
-      code = """
-      defmodule TinyCI.IntegrationTest.TimeoutPipeline do
-        use TinyCI.DSL
-
+      spec =
+        interpret!("""
         stage :test, mode: :serial do
           step :slow, cmd: "sleep 30", timeout: 200
         end
-      end
-      """
+        """)
 
-      module = compile_pipeline(code)
-      stages = module.__pipeline__()
       context = %{branch: "main", commit: "abc123", timestamp: DateTime.utc_now()}
 
       assert {:error, {:stage_failed, :test, :failed}, [result]} =
-               Executor.run_pipeline(stages, context)
+               Executor.run_pipeline(spec.stages, context)
 
       assert result.status == :failed
       [step] = result.step_results
       assert step.status == :failed
       assert step.output =~ "timed out"
-    after
-      :code.purge(TinyCI.IntegrationTest.TimeoutPipeline)
-      :code.delete(TinyCI.IntegrationTest.TimeoutPipeline)
     end
 
-    test "full pipeline via Mix task with --file flag (new format)" do
+    test "full pipeline via Mix task with --file flag" do
       path = Path.join(@tmp_dir, "pipeline.exs")
 
       File.write!(path, """
@@ -286,7 +222,7 @@ defmodule TinyCI.IntegrationTest do
       assert output =~ "integration_world"
     end
 
-    test "dry-run via Mix task shows plan without executing (new format)" do
+    test "dry-run via Mix task shows plan without executing" do
       path = Path.join(@tmp_dir, "pipeline.exs")
 
       File.write!(path, """
@@ -317,29 +253,12 @@ defmodule TinyCI.IntegrationTest do
   end
 
   describe "phase 10: step data passing" do
-    defmodule ImageTagger do
-      @moduledoc false
-      def execute(config, _ctx) do
-        {:ok, %{image_tag: "myapp:#{config[:version]}"}}
-      end
-    end
-
-    defmodule StoreVerifier do
-      @moduledoc false
-      def execute(_config, ctx) do
-        path = ctx[:verify_path]
-        content = inspect(ctx.store)
-        File.write!(path, content)
-        :ok
-      end
-    end
-
     test "module step produces store data consumed by later shell step via env" do
       path = Path.join(@tmp_dir, "store_producer.exs")
 
       File.write!(path, """
       stage :build, mode: :serial do
-        step :tag, module: TinyCI.IntegrationTest.ImageTagger do
+        step :tag, module: TinyCI.IntegrationFixtures.ImageTagger do
           set :version, "1.0.0"
         end
       end
@@ -367,24 +286,18 @@ defmodule TinyCI.IntegrationTest do
     test "module step reads store from context across stages" do
       verify_path = Path.join(@tmp_dir, "store_verify.txt")
 
-      code = """
-      defmodule TinyCI.IntegrationTest.StoreReaderPipeline do
-        use TinyCI.DSL
-
+      spec =
+        interpret!("""
         stage :build, mode: :serial do
-          step :tag, module: TinyCI.IntegrationTest.ImageTagger do
+          step :tag, module: TinyCI.IntegrationFixtures.ImageTagger do
             set :version, "2.0.0"
           end
         end
 
         stage :verify, mode: :serial do
-          step :check, module: TinyCI.IntegrationTest.StoreVerifier
+          step :check, module: TinyCI.IntegrationFixtures.StoreVerifier
         end
-      end
-      """
-
-      module = compile_pipeline(code)
-      stages = module.__pipeline__()
+        """)
 
       context = %{
         branch: "main",
@@ -393,15 +306,12 @@ defmodule TinyCI.IntegrationTest do
         verify_path: verify_path
       }
 
-      assert {:ok, results} = Executor.run_pipeline(stages, context)
+      assert {:ok, results} = Executor.run_pipeline(spec.stages, context)
       assert Enum.all?(results, &(&1.status == :passed))
 
       store_contents = File.read!(verify_path)
       assert store_contents =~ "image_tag"
       assert store_contents =~ "myapp:2.0.0"
-    after
-      :code.purge(TinyCI.IntegrationTest.StoreReaderPipeline)
-      :code.delete(TinyCI.IntegrationTest.StoreReaderPipeline)
     end
 
     test "serial steps within a stage accumulate store data" do
@@ -409,7 +319,7 @@ defmodule TinyCI.IntegrationTest do
 
       File.write!(path, """
       stage :build, mode: :serial do
-        step :tag, module: TinyCI.IntegrationTest.ImageTagger do
+        step :tag, module: TinyCI.IntegrationFixtures.ImageTagger do
           set :version, "3.0.0"
         end
         step :check, cmd: "echo $IMAGE_TAG", env: %{"IMAGE_TAG" => store(:image_tag)}
@@ -429,10 +339,8 @@ defmodule TinyCI.IntegrationTest do
 
   describe "phase 9: allow_failure" do
     test "allow_failure step does not fail the stage end-to-end" do
-      code = """
-      defmodule TinyCI.IntegrationTest.AllowFailurePipeline do
-        use TinyCI.DSL
-
+      spec =
+        interpret!("""
         stage :test, mode: :serial do
           step :flaky, cmd: "exit 1", allow_failure: true
           step :unit, cmd: "echo tests_pass"
@@ -441,14 +349,11 @@ defmodule TinyCI.IntegrationTest do
         stage :deploy, mode: :serial do
           step :release, cmd: "echo deployed"
         end
-      end
-      """
+        """)
 
-      module = compile_pipeline(code)
-      stages = module.__pipeline__()
       context = %{branch: "main", commit: "abc123", timestamp: DateTime.utc_now()}
 
-      assert {:ok, results} = Executor.run_pipeline(stages, context)
+      assert {:ok, results} = Executor.run_pipeline(spec.stages, context)
 
       assert [
                %StageResult{name: :test, status: :passed},
@@ -469,13 +374,10 @@ defmodule TinyCI.IntegrationTest do
         end)
 
       assert summary =~ "allowed"
-    after
-      :code.purge(TinyCI.IntegrationTest.AllowFailurePipeline)
-      :code.delete(TinyCI.IntegrationTest.AllowFailurePipeline)
     end
   end
 
-  describe "phase 9: when_env (new format via interpreter)" do
+  describe "phase 9: when_env" do
     test "stage runs when env var is set, skips when absent" do
       path = Path.join(@tmp_dir, "when_env_pipeline.exs")
 
@@ -516,16 +418,6 @@ defmodule TinyCI.IntegrationTest do
   end
 
   describe "phase 11: on_success / on_failure hooks" do
-    defmodule HookNotifier do
-      @moduledoc false
-      def run(config, ctx) do
-        path = config[:output_path]
-        content = "result=#{ctx.pipeline_result},branch=#{ctx.branch}"
-        File.write!(path, content)
-        :ok
-      end
-    end
-
     test "on_success hook runs via Mix task when pipeline passes" do
       output_path = Path.join(@tmp_dir, "on_success_output.txt")
       path = Path.join(@tmp_dir, "pipeline_hooks_success.exs")
@@ -575,34 +467,25 @@ defmodule TinyCI.IntegrationTest do
     test "module-based on_success hook receives context with pipeline_result" do
       output_path = Path.join(@tmp_dir, "hook_module_output.txt")
 
-      code = """
-      defmodule TinyCI.IntegrationTest.ModuleHookPipeline do
-        use TinyCI.DSL
-
-        on_success :notify, module: TinyCI.IntegrationTest.HookNotifier do
+      spec =
+        interpret!("""
+        on_success :notify, module: TinyCI.IntegrationFixtures.HookNotifier do
           set :output_path, "#{output_path}"
         end
 
         stage :test, mode: :serial do
           step :pass, cmd: "true"
         end
-      end
-      """
+        """)
 
-      module = compile_pipeline(code)
-      stages = module.__pipeline__()
-      hooks = module.__hooks__()
       context = %{branch: "main", commit: "abc123", store: %{}, timestamp: DateTime.utc_now()}
 
-      assert {:ok, _results} = TinyCI.Executor.run_pipeline(stages, context)
-      TinyCI.Hooks.run_hooks(hooks, :on_success, context)
+      assert {:ok, _results} = TinyCI.Executor.run_pipeline(spec.stages, context)
+      TinyCI.Hooks.run_hooks(spec.hooks, :on_success, context)
 
       content = File.read!(output_path)
       assert content =~ "result=on_success"
       assert content =~ "branch=main"
-    after
-      :code.purge(TinyCI.IntegrationTest.ModuleHookPipeline)
-      :code.delete(TinyCI.IntegrationTest.ModuleHookPipeline)
     end
 
     test "hook failure does not affect pipeline exit code" do
@@ -643,7 +526,7 @@ defmodule TinyCI.IntegrationTest do
     end
   end
 
-  describe "phase 9: when_file_changed (new format via interpreter)" do
+  describe "phase 9: when_file_changed" do
     test "stage runs when matching files changed, skips otherwise" do
       path = Path.join(@tmp_dir, "when_file_pipeline.exs")
 
