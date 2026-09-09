@@ -16,6 +16,8 @@ defmodule Mix.Tasks.TinyCi.Run do
 
     * `--file PATH` / `-f` — path to a specific pipeline file (skips discovery)
     * `--root DIR` / `-r` — project root directory (defaults to current directory)
+    * `--base REF` — ref or SHA that `file_changed?` diffs against (see
+      `TinyCI.Context.detect_base/2` for the default; `TINY_CI_BASE_REF` also sets it)
     * `--dry-run` — show what would execute without running anything
     * `--list` — list all available pipelines in `.tiny_ci/` and exit
     * `--filter STAGES` — run only the named stage(s), comma-separated
@@ -103,6 +105,7 @@ defmodule Mix.Tasks.TinyCi.Run do
         switches: [
           file: :string,
           root: :string,
+          base: :string,
           dry_run: :boolean,
           list: :boolean,
           filter: :string,
@@ -240,6 +243,7 @@ defmodule Mix.Tasks.TinyCi.Run do
   defp base_run_opts(opts, control) do
     [
       no_cache: opts[:no_cache] || false,
+      base: opts[:base],
       artifacts_dir: opts[:artifacts_dir],
       events: opts[:events],
       control: control
@@ -405,8 +409,8 @@ defmodule Mix.Tasks.TinyCi.Run do
     end
   end
 
-  defp dispatch_pipeline(spec, true, filter, _output_format, _run_opts),
-    do: dry_run_pipeline(spec, filter)
+  defp dispatch_pipeline(spec, true, filter, _output_format, run_opts),
+    do: dry_run_pipeline(spec, filter, run_opts)
 
   defp dispatch_pipeline(spec, _, filter, output_format, run_opts),
     do: execute_pipeline(spec, filter, output_format, run_opts)
@@ -452,29 +456,26 @@ defmodule Mix.Tasks.TinyCi.Run do
     end
   end
 
-  defp dry_run_pipeline(
-         %TinyCI.PipelineSpec{stages: stages, root: root, env: pipeline_env},
-         filter
-       ) do
-    context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
+  # The context is built for the project root (not the cwd) so `--root` and a
+  # server-side workspace both see the right branch, commit, and changed files.
+  defp build_context(%TinyCI.PipelineSpec{root: root, env: pipeline_env}, run_opts) do
+    TinyCI.Context.build(root: root, pipeline_env: pipeline_env, base: run_opts[:base])
+  end
+
+  defp dry_run_pipeline(%TinyCI.PipelineSpec{stages: stages} = spec, filter, run_opts) do
+    context = build_context(spec, run_opts)
     filtered = filter_stages(stages, filter)
     DryRun.print_plan(filtered, context)
     :ok
   end
 
   defp execute_pipeline(
-         %TinyCI.PipelineSpec{
-           name: name,
-           stages: stages,
-           hooks: hooks,
-           root: root,
-           env: pipeline_env
-         },
+         %TinyCI.PipelineSpec{name: name, stages: stages, hooks: hooks} = spec,
          filter,
          :json,
          run_opts
        ) do
-    context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
+    context = build_context(spec, run_opts)
 
     pipeline_result =
       Executor.run_pipeline(
@@ -500,18 +501,12 @@ defmodule Mix.Tasks.TinyCi.Run do
   end
 
   defp execute_pipeline(
-         %TinyCI.PipelineSpec{
-           name: name,
-           stages: stages,
-           hooks: hooks,
-           root: root,
-           env: pipeline_env
-         },
+         %TinyCI.PipelineSpec{name: name, stages: stages, hooks: hooks} = spec,
          filter,
          :human,
          run_opts
        ) do
-    context = TinyCI.Context.build(root: root, pipeline_env: pipeline_env)
+    context = build_context(spec, run_opts)
 
     run_opts = Keyword.merge(run_opts, filter: filter, pipeline_name: name)
 

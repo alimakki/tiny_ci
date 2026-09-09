@@ -41,6 +41,7 @@ mix tiny_ci.run [pipeline] [options]
 |------|-------|-------------|
 | `--file PATH` | `-f` | Path to a pipeline file (skips discovery) |
 | `--root DIR` | `-r` | Project root for pipeline discovery |
+| `--base REF` | | Ref or SHA that `file_changed?` diffs against (default: detected — see [Conditions](#conditions)) |
 | `--dry-run` | | Show what would execute without running anything |
 | `--list` | | List all available pipelines in `.tiny_ci/` |
 | `--filter STAGES` | | Run only the named stage(s) — see below |
@@ -353,7 +354,7 @@ The `:when` option is supported on both **stages** and **steps**. It accepts a b
 |------------|-------------|
 | `branch()` | Current git branch name (string) |
 | `env("VAR")` | Value of environment variable, or `nil` if unset |
-| `file_changed?("glob")` | `true` if any file matching the glob changed since last commit |
+| `file_changed?("glob")` | `true` if any file matching the glob changed on this branch since it diverged from the base ref, or is uncommitted — see below |
 
 Combine with standard boolean operators: `and`, `or`, `not`, `==`, `!=`.
 
@@ -368,6 +369,30 @@ stage :test, when: file_changed?("lib/**") or file_changed?("test/**") do
   step :unit, cmd: "mix test"
 end
 ```
+
+#### How changed files are computed
+
+`file_changed?` matches against `context.changed_files`, the sorted union of:
+
+1. every file changed between `merge-base(base, HEAD)` and `HEAD` — what this
+   branch has committed since it diverged from its base;
+2. the dirty tree: unstaged edits, staged changes, and untracked files that are
+   not ignored by `.gitignore`.
+
+The **base ref** is the first of these that resolves to a commit:
+
+1. `--base REF` on the command line, or the `TINY_CI_BASE_REF` environment variable;
+2. `@{upstream}` — the branch's tracking ref;
+3. the remote's default branch (`refs/remotes/origin/HEAD`);
+4. the first existing of `origin/main`, `origin/master`, `main`, `master`;
+5. `HEAD~1`.
+
+If the resolved base is the same commit as `HEAD` (you are on `main` with
+everything pushed), it falls back to `HEAD~1`, so running the pipeline right
+after a push still sees that push's files. On an initial commit with no remote
+there is no base at all: every tracked file counts as changed. `--dry-run`
+prints the resolved base and the merge-base SHA it diffed from. All git
+commands run in the project root (`--root`), not the current directory.
 
 **Step-level conditions** skip individual steps within a running stage, leaving the rest of the stage unaffected:
 

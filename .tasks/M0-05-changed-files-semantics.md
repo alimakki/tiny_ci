@@ -1,6 +1,6 @@
 # M0-05 — `file_changed?` against a base ref plus the dirty tree; git runs in `root`
 
-**Milestone:** M0 · **Size:** S–M · **Depends on:** — · **Status:** ⬜ Not started
+**Milestone:** M0 · **Size:** S–M · **Depends on:** — · **Status:** ✅ Done (2026-09-08)
 **Written against:** commit `b9496e7` (2026-08-08)
 
 ## Summary
@@ -172,13 +172,22 @@ than mutating global config. These tests are `async: true`; nothing touches the 
 
 ## Acceptance criteria
 
-- [ ] An uncommitted edit to `lib/foo.ex` makes `file_changed?("lib/**/*.ex")` true.
-- [ ] `changed_files/2` does not raise or return `[]` on a fresh repo with one commit.
-- [ ] Base ref is detected from upstream / origin default / `main` / `HEAD~1` in that order,
+- [x] An uncommitted edit to `lib/foo.ex` makes `file_changed?("lib/**/*.ex")` true.
+      — `context_test.exs` "includes an unstaged edit to a committed file", "includes a staged
+      new file", "includes untracked files but not ignored ones".
+- [x] `changed_files/2` does not raise or return `[]` on a fresh repo with one commit.
+      — `context_test.exs` "initial commit with no remote returns every tracked file".
+- [x] Base ref is detected from upstream / origin default / `main` / `HEAD~1` in that order,
       overridable by `--base` and `TINY_CI_BASE_REF`, with the equals-HEAD fallback.
-- [ ] Every git invocation in `Context` runs in `root`.
-- [ ] `--dry-run` prints the resolved base.
-- [ ] README "Conditions" documents `file_changed?` semantics precisely (base detection order,
+      — `context_test.exs` `describe "detect_base/2"` (all five tests) and "build/1 with root:";
+      `tiny_ci_run_test.exs` "--base selects which commits count as changed".
+- [x] Every git invocation in `Context` runs in `root`.
+      — every call goes through the private `git/3` helper with `cd: root`;
+      `context_test.exs` "runs git in root, not in the current directory".
+- [x] `--dry-run` prints the resolved base.
+      — `dry_run_test.exs` "print_plan/2 header" (both tests);
+      `tiny_ci_run_test.exs` "--dry-run prints the resolved base".
+- [x] README "Conditions" documents `file_changed?` semantics precisely (base detection order,
       dirty tree inclusion, equals-HEAD rule, initial commit).
 
 ## Pitfalls
@@ -196,6 +205,23 @@ than mutating global config. These tests are `async: true`; nothing touches the 
 - README → "Conditions": rewrite the `file_changed?` row and add a short "How changed files
   are computed" subsection. Add `--base` to the flag table.
 
+## Deviations
+
+- **`git_env:` option.** `changed_files/2`, `detect_base/2`, and `merge_base/3` accept
+  `git_env: [{"VAR", "value"}]`, passed to the git processes. ExUnit's `tmp_dir` lives inside
+  the tiny_ci checkout, so the "not a repository" test needs `GIT_CEILING_DIRECTORIES` to stop
+  git from finding the enclosing repo; without the option that test could not be honest.
+- **Unresolvable base.** A `--base` (or `TINY_CI_BASE_REF`) that does not name a commit is
+  treated as "no base" and falls through to `HEAD~1` / `nil` rather than raising, so a typo
+  degrades to the default semantics. Covered by "honours TINY_CI_BASE_REF through the env:
+  option".
+- **`merge_base/3` is public.** `DryRun` needs the merge-base SHA for its header and should
+  not shell out to git itself; the spec only listed it as an internal step.
+- **Feature branch with local `main` and no remote** resolves to `main` (detection step 4),
+  not `HEAD~1`; the build/1 test asserts that, since it is what the spec's order implies.
+
 ## Follow-ups
 
-_(none yet)_
+- `Mix.Tasks.TinyCi.Run.write_attestation/5` builds its own `Context.build(root: root)` without
+  `base:`; the attestation records branch and commit only, so this is harmless today, but M5-01
+  should thread the trigger's base through there too.

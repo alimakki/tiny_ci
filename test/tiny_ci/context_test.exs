@@ -1,7 +1,13 @@
 defmodule TinyCI.ContextTest do
   use ExUnit.Case, async: true
 
-  alias TinyCI.Context
+  alias TinyCI.{Context, GitFixtures}
+
+  @empty_tree "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+  defp repo(tmp_dir, name \\ "repo"), do: GitFixtures.init_repo(Path.join(tmp_dir, name))
+
+  defp sha(dir, ref), do: GitFixtures.git!(dir, ["rev-parse", ref])
 
   describe "build/0" do
     test "returns a TinyCI.Context struct" do
@@ -155,6 +161,193 @@ defmodule TinyCI.ContextTest do
     test "returns the current commit SHA as a string" do
       assert is_binary(Context.commit())
       assert String.match?(Context.commit(), ~r/^[0-9a-f]{40}$/)
+    end
+  end
+
+  describe "changed_files/2" do
+    @describetag :tmp_dir
+
+    test "initial commit with no remote returns every tracked file", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      GitFixtures.commit(dir, %{"lib/a.ex" => "a", "README.md" => "r"})
+
+      assert Context.changed_files(dir) == ["README.md", "lib/a.ex"]
+    end
+
+    test "on main with a clean tree and no remote, falls back to HEAD~1", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      GitFixtures.commit(dir, %{"docs/b.md" => "b"})
+
+      assert Context.changed_files(dir) == ["docs/b.md"]
+    end
+
+    test "includes an unstaged edit to a committed file", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      GitFixtures.commit(dir, %{"docs/b.md" => "b"})
+      GitFixtures.write_files(dir, %{"lib/a.ex" => "changed"})
+
+      assert "lib/a.ex" in Context.changed_files(dir)
+    end
+
+    test "includes a staged new file", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      GitFixtures.commit(dir, %{"docs/b.md" => "b"})
+      GitFixtures.write_files(dir, %{"lib/new.ex" => "n"})
+      GitFixtures.git!(dir, ["add", "lib/new.ex"])
+
+      assert "lib/new.ex" in Context.changed_files(dir)
+    end
+
+    test "includes untracked files but not ignored ones", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      GitFixtures.commit(dir, %{"lib/a.ex" => "a", ".gitignore" => "_build/\n"})
+      GitFixtures.commit(dir, %{"docs/b.md" => "b"})
+      GitFixtures.write_files(dir, %{"lib/untracked.ex" => "u", "_build/out" => "o"})
+
+      files = Context.changed_files(dir)
+      assert "lib/untracked.ex" in files
+      refute "_build/out" in files
+    end
+
+    test "include_dirty: false excludes uncommitted changes", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      GitFixtures.commit(dir, %{"docs/b.md" => "b"})
+      GitFixtures.write_files(dir, %{"lib/a.ex" => "changed", "lib/untracked.ex" => "u"})
+
+      assert Context.changed_files(dir, include_dirty: false) == ["docs/b.md"]
+    end
+
+    test "an explicit base: covers every commit after it", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      first = GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      GitFixtures.commit(dir, %{"docs/b.md" => "b"})
+      GitFixtures.commit(dir, %{"test/c_test.exs" => "c"})
+
+      assert Context.changed_files(dir, base: first) == ["docs/b.md", "test/c_test.exs"]
+    end
+
+    test "a path with a space survives", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      GitFixtures.commit(dir, %{"docs/my notes.md" => "n"})
+
+      assert Context.changed_files(dir) == ["docs/my notes.md"]
+    end
+
+    test "returns [] for a directory that is not a repository", %{tmp_dir: tmp} do
+      dir = Path.join(tmp, "plain")
+      File.mkdir_p!(dir)
+      GitFixtures.write_files(dir, %{"lib/a.ex" => "a"})
+
+      # Isolate from any enclosing repository so the test does not depend on cwd.
+      assert Context.changed_files(dir, git_env: [{"GIT_CEILING_DIRECTORIES", tmp}]) == []
+    end
+
+    test "with base: nil diffs against the empty tree", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      GitFixtures.commit(dir, %{"docs/b.md" => "b"})
+
+      assert Context.changed_files(dir, base: nil) == ["docs/b.md", "lib/a.ex"]
+      assert Context.merge_base(dir, nil) == @empty_tree
+    end
+  end
+
+  describe "detect_base/2" do
+    @describetag :tmp_dir
+
+    defp origin_and_clone(tmp) do
+      src = repo(tmp, "src")
+      GitFixtures.commit(src, %{"lib/a.ex" => "a"})
+      origin = GitFixtures.bare_clone(src, Path.join(tmp, "origin.git"))
+      work = GitFixtures.clone(origin, Path.join(tmp, "work"))
+      {origin, work}
+    end
+
+    test "on a feature branch, the base is the upstream main", %{tmp_dir: tmp} do
+      {origin, work} = origin_and_clone(tmp)
+      origin_main = sha(origin, "main")
+      GitFixtures.git!(work, ["checkout", "-q", "-b", "feature/x"])
+      GitFixtures.commit(work, %{"lib/feature.ex" => "f"})
+
+      base = Context.detect_base(work)
+      assert is_binary(base)
+      assert Context.merge_base(work, base) == origin_main
+      assert Context.changed_files(work) == ["lib/feature.ex"]
+    end
+
+    test "on main with an unpushed commit, the base is origin/main", %{tmp_dir: tmp} do
+      {origin, work} = origin_and_clone(tmp)
+      origin_main = sha(origin, "main")
+      GitFixtures.commit(work, %{"lib/local.ex" => "l"})
+
+      base = Context.detect_base(work)
+      assert Context.merge_base(work, base) == origin_main
+      assert Context.changed_files(work) == ["lib/local.ex"]
+    end
+
+    test "a base equal to HEAD falls back to HEAD~1", %{tmp_dir: tmp} do
+      {_origin, work} = origin_and_clone(tmp)
+      GitFixtures.commit(work, %{"lib/local.ex" => "l"})
+      GitFixtures.git!(work, ["push", "-q", "origin", "main"])
+
+      assert Context.detect_base(work) == "HEAD~1"
+      assert Context.changed_files(work) == ["lib/local.ex"]
+    end
+
+    test "honours TINY_CI_BASE_REF through the env: option", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      first = GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      GitFixtures.commit(dir, %{"docs/b.md" => "b"})
+      GitFixtures.commit(dir, %{"test/c_test.exs" => "c"})
+
+      assert Context.detect_base(dir, env: %{"TINY_CI_BASE_REF" => first}) == first
+      assert Context.detect_base(dir, env: %{"TINY_CI_BASE_REF" => ""}) == "HEAD~1"
+      assert Context.detect_base(dir, env: %{"TINY_CI_BASE_REF" => "no-such-ref"}) == "HEAD~1"
+    end
+
+    test "returns nil on an initial commit with no remote", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+
+      assert Context.detect_base(dir, env: %{}) == nil
+    end
+  end
+
+  describe "build/1 with root:" do
+    @describetag :tmp_dir
+
+    test "runs git in root, not in the current directory", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      GitFixtures.git!(dir, ["checkout", "-q", "-b", "feature/x"])
+      head = GitFixtures.commit(dir, %{"lib/b.ex" => "b"})
+
+      ctx = Context.build(root: dir)
+
+      assert ctx.branch == "feature/x"
+      assert ctx.commit == head
+      # No upstream and no remote, so the local `main` is the base (step 4).
+      assert ctx.base_ref == "main"
+      assert ctx.changed_files == ["lib/b.ex"]
+      assert ctx.root == dir
+      refute Map.has_key?(ctx, :include_dirty)
+    end
+
+    test "an explicit base: is recorded on the context", %{tmp_dir: tmp} do
+      dir = repo(tmp)
+      first = GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      GitFixtures.commit(dir, %{"docs/b.md" => "b"})
+      GitFixtures.commit(dir, %{"test/c_test.exs" => "c"})
+
+      ctx = Context.build(root: dir, base: first)
+
+      assert ctx.base_ref == first
+      assert ctx.changed_files == ["docs/b.md", "test/c_test.exs"]
     end
   end
 end

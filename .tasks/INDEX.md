@@ -19,7 +19,7 @@ starting.
 | [M0-02](M0-02-remove-legacy-dsl.md) | Remove the macro DSL, old validator, scaffold files | S | — | ✅ |
 | [M0-03](M0-03-secrets-declaration-and-masking.md) | `secret` directive + masking in every sink and result | M | M0-01 | ⬜ |
 | [M0-04](M0-04-cache-atomicity-locking-eviction.md) | Cache: atomic writes, cross-process lock, eviction | M | — | ✅ |
-| [M0-05](M0-05-changed-files-semantics.md) | `file_changed?` base ref + dirty tree; git runs in `root` | S–M | — | ⬜ |
+| [M0-05](M0-05-changed-files-semantics.md) | `file_changed?` base ref + dirty tree; git runs in `root` | S–M | — | ✅ |
 | [M0-06](M0-06-run-persistence.md) | Persist every run; `runs` list/show; `Runs.Projection` | M | M0-03 | ⬜ |
 
 ## M1 — Standalone binary

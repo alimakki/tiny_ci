@@ -496,6 +496,50 @@ defmodule Mix.Tasks.TinyCi.RunTest do
     end
   end
 
+  describe "--base" do
+    test "selects which commits count as changed", %{project_root: root} do
+      repo = TinyCI.GitFixtures.init_repo(Path.join(root, "repo"))
+
+      pipeline = """
+      stage :only_docs, mode: :serial, when: file_changed?("docs/**") do
+        step :note, cmd: "echo docs-changed"
+      end
+      """
+
+      sha1 = TinyCI.GitFixtures.commit(repo, %{"tiny_ci.exs" => pipeline, "lib/a.ex" => "a"})
+      sha2 = TinyCI.GitFixtures.commit(repo, %{"docs/guide.md" => "g"})
+      TinyCI.GitFixtures.commit(repo, %{"lib/b.ex" => "b"})
+
+      run = fn base ->
+        capture_io(fn ->
+          assert :ok = Mix.Tasks.TinyCi.Run.run(["--root", repo, "--base", base])
+        end)
+      end
+
+      assert run.(sha1) =~ "docs-changed"
+      assert run.(sha2) =~ "will skip" or run.(sha2) =~ "Skipped"
+      refute run.(sha2) =~ "docs-changed"
+    end
+
+    test "--dry-run prints the resolved base", %{project_root: root} do
+      repo = TinyCI.GitFixtures.init_repo(Path.join(root, "repo"))
+
+      TinyCI.GitFixtures.commit(repo, %{
+        "tiny_ci.exs" => "stage :s do\n  step :a, cmd: \"true\"\nend\n"
+      })
+
+      first = TinyCI.GitFixtures.git!(repo, ["rev-parse", "HEAD"])
+      TinyCI.GitFixtures.commit(repo, %{"lib/a.ex" => "a"})
+
+      output =
+        capture_io(fn ->
+          assert :ok = Mix.Tasks.TinyCi.Run.run(["--root", repo, "--dry-run"])
+        end)
+
+      assert output =~ "Base: HEAD~1 (#{String.slice(first, 0, 7)})"
+    end
+  end
+
   describe "--events" do
     test "writes a valid NDJSON event stream to a file", %{project_root: root} do
       path = Path.join(root, "tiny_ci.exs")

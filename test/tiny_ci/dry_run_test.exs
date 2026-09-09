@@ -5,6 +5,26 @@ defmodule TinyCI.DryRunTest do
 
   alias TinyCI.{DryRun, Stage, Step}
 
+  describe "print_plan/2 header" do
+    @tag :tmp_dir
+    test "prints the resolved base and its merge-base SHA", %{tmp_dir: tmp} do
+      dir = TinyCI.GitFixtures.init_repo(Path.join(tmp, "repo"))
+      first = TinyCI.GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      TinyCI.GitFixtures.commit(dir, %{"docs/b.md" => "b"})
+      ctx = TinyCI.Context.build(root: dir)
+
+      output = capture_io(fn -> DryRun.print_plan([], ctx) end)
+
+      assert output =~ "Base: HEAD~1 (#{String.slice(first, 0, 7)})"
+    end
+
+    test "says so when no base could be found" do
+      output = capture_io(fn -> DryRun.print_plan([], %{branch: "main", base_ref: nil}) end)
+
+      assert output =~ "Base: (none — initial commit)"
+    end
+  end
+
   describe "print_plan/2" do
     test "prints stages and their steps" do
       stages = [

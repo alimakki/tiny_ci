@@ -71,7 +71,7 @@ defmodule TinyCI.DryRun do
 
     branch = Map.get(context, :branch, "unknown")
     commit = Map.get(context, :commit, "unknown")
-    IO.puts("  Branch: #{branch} | Commit: #{commit}")
+    IO.puts("  Branch: #{branch} | Commit: #{commit}#{base_info(context)}")
 
     pipeline_env = Map.get(context, :pipeline_env, %{})
 
@@ -81,6 +81,21 @@ defmodule TinyCI.DryRun do
 
     IO.puts("")
   end
+
+  # The base is what `file_changed?` was evaluated against, so the plan can be
+  # checked. The parenthesised SHA is the merge base actually diffed from.
+  defp base_info(%{base_ref: nil}), do: " | Base: (none — initial commit)"
+
+  defp base_info(%{base_ref: base} = context) do
+    root = Map.get(context, :root) || File.cwd!()
+
+    case TinyCI.Context.merge_base(root, base) do
+      nil -> " | Base: #{base}"
+      sha -> " | Base: #{base} (#{String.slice(sha, 0, 7)})"
+    end
+  end
+
+  defp base_info(_context), do: ""
 
   defp print_stage(%Stage{} = stage, context) do
     skipped? = skip_stage?(stage, context)

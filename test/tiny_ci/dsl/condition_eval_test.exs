@@ -52,6 +52,26 @@ defmodule TinyCI.DSL.ConditionEvalTest do
       ast = quote do: file_changed?("lib/**/*.ex")
       assert ConditionEval.eval(ast, %{changed_files: []}) == false
     end
+
+    @tag :tmp_dir
+    test "is true against a real repository where a matching file changed", %{tmp_dir: tmp} do
+      dir = TinyCI.GitFixtures.init_repo(Path.join(tmp, "repo"))
+      TinyCI.GitFixtures.commit(dir, %{"README.md" => "r"})
+      TinyCI.GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+
+      ast = quote do: file_changed?("lib/**")
+      assert ConditionEval.eval(ast, TinyCI.Context.build(root: dir)) == true
+    end
+
+    @tag :tmp_dir
+    test "is false against a real repository where no matching file changed", %{tmp_dir: tmp} do
+      dir = TinyCI.GitFixtures.init_repo(Path.join(tmp, "repo"))
+      TinyCI.GitFixtures.commit(dir, %{"lib/a.ex" => "a"})
+      TinyCI.GitFixtures.commit(dir, %{"README.md" => "r"})
+
+      ast = quote do: file_changed?("lib/**")
+      assert ConditionEval.eval(ast, TinyCI.Context.build(root: dir)) == false
+    end
   end
 
   describe "== and !=" do
