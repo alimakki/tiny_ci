@@ -82,16 +82,26 @@ defmodule Mix.Tasks.TinyCi.Run do
       # Headless: give up on a breakpoint after 30s and abort
       mix tiny_ci.run --break before:deploy --break-timeout 30000
 
+  ## Secrets
+
+  Every `secret :NAME` the pipeline declares is resolved before any step runs, from
+  the process environment or a gitignored `.tiny_ci/secrets` file (`KEY=value` per
+  line). A missing secret fails the run with exit code 1 and lists every missing
+  name; with `--dry-run` it is a warning. Resolved values are masked as `***` in
+  the console, `--output json`, `--events`, breakpoint payloads, and attestations.
+  See the README's "Secrets" section.
+
   ## Exit Codes
 
     * `0` — pipeline completed successfully (or `--list` / `--dry-run`)
-    * `1` — pipeline failed, was aborted through execution control, or no pipeline
-      file was found
+    * `1` — pipeline failed, was aborted through execution control, a declared
+      secret could not be resolved, or no pipeline file was found
   """
 
   use Mix.Task
 
   alias TinyCI.{Artifacts, Discovery, DryRun, Executor, Hooks, Provenance, Reporter, Results}
+  alias TinyCI.Secrets
   alias TinyCI.Action.Audit
   alias TinyCI.Control
   alias TinyCI.Listener
@@ -221,33 +231,96 @@ defmodule Mix.Tasks.TinyCi.Run do
     # repo root.
     spec = %{spec | root: Path.expand(root)}
 
-    with :ok <- verify_actions(spec, opts[:dry_run]),
+    with {:ok, secrets} <- resolve_secrets(spec, opts[:dry_run]),
+         :ok <- verify_actions(spec, opts[:dry_run]),
          {:ok, control} <- resolve_control(opts, spec, output_format) do
-      run_and_attest(spec, opts, root, filter, output_format, control)
+      run_and_attest(spec, opts, root, filter, output_format, control, secrets)
     else
-      {:error, reason} -> handle_error(reason)
+      {:error, {:missing_secrets, _} = reason} ->
+        print_error(reason)
+        {:error, :missing_secrets}
+
+      {:error, {:secrets_file, _, _} = reason} ->
+        print_error(reason)
+        {:error, :missing_secrets}
+
+      {:error, reason} ->
+        handle_error(reason)
     end
   end
 
   # Runs the pipeline and, when `--attest` is given, writes a signed provenance
   # attestation built from the run's event stream (skipped for --dry-run).
-  defp run_and_attest(spec, opts, root, filter, output_format, control) do
+  defp run_and_attest(spec, opts, root, filter, output_format, control, secrets) do
     attest_path = if opts[:dry_run], do: nil, else: opts[:attest]
-    {run_opts, agent} = maybe_collector(base_run_opts(opts, control), attest_path)
+    {run_opts, agent} = maybe_collector(base_run_opts(opts, control, secrets), attest_path)
 
     result = run_with_filter(spec, opts[:dry_run], filter, output_format, run_opts)
 
     finalize_attest(agent, attest_path, spec, opts, root, result)
   end
 
-  defp base_run_opts(opts, control) do
+  defp base_run_opts(opts, control, secrets) do
     [
       no_cache: opts[:no_cache] || false,
       base: opts[:base],
       artifacts_dir: opts[:artifacts_dir],
       events: opts[:events],
-      control: control
+      control: control,
+      secrets: secrets
     ]
+  end
+
+  # ---------------------------------------------------------------------------
+  # Secrets (M0-03)
+  # ---------------------------------------------------------------------------
+
+  # Declared secrets are settled before anything runs: a missing one fails the run
+  # (or warns under --dry-run, which runs nothing anyway). A secrets file that is
+  # not gitignored is the classic way to leak a token, so it is called out.
+  defp resolve_secrets(spec, dry_run) do
+    warn_unignored_secrets_file(spec.root)
+
+    case {Secrets.resolve(spec.secrets, root: spec.root), dry_run} do
+      {{:ok, secrets}, _} ->
+        {:ok, secrets}
+
+      {{:error, {:missing_secrets, names}}, true} ->
+        print_warning(missing_secrets_message(names))
+        {:ok, %{}}
+
+      {{:error, _} = error, _} ->
+        error
+    end
+  end
+
+  defp warn_unignored_secrets_file(root) do
+    path = Secrets.file_path(root)
+
+    if File.exists?(path) and not gitignored?(root, path) do
+      print_warning(".tiny_ci/secrets is not gitignored.")
+    end
+  end
+
+  defp gitignored?(root, path) do
+    args = ["check-ignore", "-q", Path.relative_to(path, root)]
+
+    case System.cmd("git", args, cd: root, stderr_to_stdout: true) do
+      {_, 0} -> true
+      _ -> false
+    end
+  rescue
+    # No git on the machine: nothing to check against.
+    ErlangError -> true
+  end
+
+  defp missing_secrets_message(names) do
+    "Missing secrets: #{Enum.join(names, ", ")}\n" <>
+      "  Set them in the environment or in .tiny_ci/secrets (KEY=value, gitignored)."
+  end
+
+  defp print_warning(message) do
+    IO.puts(:stderr, [IO.ANSI.yellow(), "Warning: ", message, IO.ANSI.reset()])
   end
 
   # ---------------------------------------------------------------------------
@@ -458,8 +531,19 @@ defmodule Mix.Tasks.TinyCi.Run do
 
   # The context is built for the project root (not the cwd) so `--root` and a
   # server-side workspace both see the right branch, commit, and changed files.
-  defp build_context(%TinyCI.PipelineSpec{root: root, env: pipeline_env}, run_opts) do
-    TinyCI.Context.build(root: root, pipeline_env: pipeline_env, base: run_opts[:base])
+  # Declared secret names ride along for the dry-run header; resolved values are
+  # attached so hooks see them.
+  defp build_context(
+         %TinyCI.PipelineSpec{root: root, env: pipeline_env, secrets: names},
+         run_opts
+       ) do
+    TinyCI.Context.build(
+      root: root,
+      pipeline_env: pipeline_env,
+      base: run_opts[:base],
+      secret_names: names
+    )
+    |> Secrets.attach(Keyword.get(run_opts, :secrets, %{}))
   end
 
   defp dry_run_pipeline(%TinyCI.PipelineSpec{stages: stages} = spec, filter, run_opts) do
@@ -525,6 +609,8 @@ defmodule Mix.Tasks.TinyCi.Run do
     end
   end
 
+  # The same context goes to the executor and to the hooks, so resolved secrets
+  # are attached here rather than only inside `Executor.run_pipeline/3`.
   defp failure_message({:aborted, stage}),
     do: "Pipeline aborted by execution control at stage :#{stage}."
 
@@ -635,6 +721,18 @@ defmodule Mix.Tasks.TinyCi.Run do
     IO.puts(:stderr, [IO.ANSI.red(), "Action supply-chain check failed:", IO.ANSI.reset()])
     Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
     IO.puts(:stderr, "Run `mix tiny_ci.actions.audit` to inspect the resolved action tree.")
+  end
+
+  defp print_error({:missing_secrets, names}) do
+    IO.puts(:stderr, [IO.ANSI.red(), missing_secrets_message(names), IO.ANSI.reset()])
+  end
+
+  defp print_error({:secrets_file, path, {:line, line, reason}}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Cannot parse #{path}:#{line}: #{reason}",
+      IO.ANSI.reset()
+    ])
   end
 
   defp print_error({:breakpoints, errors}) do

@@ -46,7 +46,7 @@ defmodule TinyCI.Executor do
   """
 
   alias TinyCI.{Artifacts, Cache, Control, DAG, Matrix, MatrixRunResult, Output}
-  alias TinyCI.{StageResult, StepResult}
+  alias TinyCI.{Redaction, Secrets, StageResult, StepResult}
   alias TinyCI.Events
   alias TinyCI.Executor.{Crash, Driver, Env}
 
@@ -99,6 +99,9 @@ defmodule TinyCI.Executor do
       * `:filter`   — list of stage name atoms to run; others are omitted
       * `:control`  — execution-control options (`:breakpoints`, `:timeout`,
         `:timeout_action`, `:subscribers`, `:serial`). See `TinyCI.Control`.
+      * `:secrets`  — resolved secrets as a `%{name => value}` map (see
+        `TinyCI.Secrets`). They become the lowest env layer of every step and
+        hook, and their values are masked in step output, results, and events.
 
   ## Returns
 
@@ -117,12 +120,16 @@ defmodule TinyCI.Executor do
     ctx = Map.put_new(ctx, :store, %{})
     ctx = Map.put(ctx, :no_cache, opts[:no_cache] || false)
     ctx = put_artifacts_dir(ctx, opts)
+    ctx = Secrets.attach(ctx, opts[:secrets] || Map.get(ctx, :secrets, %{}))
     output_mode = Output.resolve_mode(opts[:output] || :auto)
     listener = opts[:listener] || TinyCI.Listener.Human
     filtered = apply_filter(stages, opts[:filter])
 
     {:ok, dispatcher} =
-      Events.Dispatcher.start_link(build_sink_specs(listener, output_mode, opts))
+      Events.Dispatcher.start_link(
+        build_sink_specs(listener, output_mode, opts),
+        redact: ctx.secret_values
+      )
 
     ctx = Map.put(ctx, :events, dispatcher)
     pipeline_name = opts[:pipeline_name] || :pipeline
@@ -455,7 +462,11 @@ defmodule TinyCI.Executor do
   # When `execute/4` is called standalone (no run dispatcher on the context),
   # spin up a short-lived dispatcher so its events and console output still work.
   defp with_ephemeral_dispatcher(context, output_mode, listener, fun) do
-    {:ok, dispatcher} = Events.Dispatcher.start_link(build_sink_specs(listener, output_mode, []))
+    {:ok, dispatcher} =
+      Events.Dispatcher.start_link(
+        build_sink_specs(listener, output_mode, []),
+        redact: secret_values(context)
+      )
 
     ctx =
       context
@@ -772,7 +783,7 @@ defmodule TinyCI.Executor do
     finish_step(ctx, step, %StepResult{
       name: step.name,
       status: :failed,
-      output: text,
+      output: mask(ctx, text),
       duration_ms: 0,
       allowed_failure: step.allow_failure
     })
@@ -1140,7 +1151,14 @@ defmodule TinyCI.Executor do
       }
     else
       merged_env = Env.resolve(ctx, env)
-      output_opts = [mode: output_mode, env: merged_env, prefix: prefix, working_dir: working_dir]
+
+      output_opts = [
+        mode: output_mode,
+        env: merged_env,
+        prefix: prefix,
+        working_dir: working_dir,
+        redact: secret_values(ctx)
+      ]
 
       {duration_ms, {status, output}} =
         measure(fn ->
@@ -1150,7 +1168,7 @@ defmodule TinyCI.Executor do
       %StepResult{
         name: name,
         status: status,
-        output: output,
+        output: mask(ctx, output),
         duration_ms: duration_ms,
         allowed_failure: allow_failure and status == :failed
       }
@@ -1178,12 +1196,18 @@ defmodule TinyCI.Executor do
     %StepResult{
       name: name,
       status: status,
-      output: output,
+      output: mask(ctx, output),
       duration_ms: duration_ms,
       allowed_failure: allow_failure and status == :failed,
       store_data: store_data
     }
   end
+
+  # Results are masked at creation so `Results.to_json/2` and the reporter never
+  # see a secret; Output and the dispatcher mask the console and events.
+  defp mask(ctx, output), do: Redaction.redact(output, secret_values(ctx))
+
+  defp secret_values(ctx), do: Map.get(ctx, :secret_values, [])
 
   defp interpret_outcome({:ok, delta}) when is_map(delta), do: {:passed, delta, ""}
   defp interpret_outcome({:error, reason}), do: {:failed, %{}, driver_error_message(reason)}

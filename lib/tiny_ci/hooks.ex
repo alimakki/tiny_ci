@@ -16,6 +16,9 @@ defmodule TinyCI.Hooks do
     * `TINY_CI_RESULT`  — atom name of the event (e.g., `"on_success"`)
     * `TINY_CI_BRANCH`  — current git branch from the pipeline context
     * `TINY_CI_COMMIT`  — current git commit SHA from the pipeline context
+
+  Resolved secrets (`context.secrets`) are injected underneath the pipeline env,
+  and their values are masked in any hook output reported on stderr.
   ## Module hook contract
 
   A module hook must export:
@@ -23,7 +26,7 @@ defmodule TinyCI.Hooks do
       @spec run(keyword(), map()) :: :ok | {:error, reason :: term()}
   """
 
-  alias TinyCI.Executor.Crash
+  alias TinyCI.Executor.{Crash, Env}
   alias TinyCI.Hook
   alias TinyCI.Output
 
@@ -62,15 +65,22 @@ defmodule TinyCI.Hooks do
        when not is_nil(cmd) do
     IO.puts("Hook: #{name}")
     store = Map.get(context, :store, %{})
-    pipeline_env = Map.get(context, :pipeline_env, %{})
     hook_env = build_hook_env(context)
     resolved_env = resolve_env(env, store)
-    merged_env = pipeline_env |> Map.merge(hook_env) |> Map.merge(resolved_env)
+    # `Env.base/1` layers the run's secrets under the pipeline env, exactly as
+    # a step sees them.
+    merged_env = context |> Env.base() |> Map.merge(hook_env) |> Map.merge(resolved_env)
     actual_timeout = timeout || @default_timeout
+    redact = Map.get(context, :secret_values, [])
 
     # Buffered so hook output does not interleave with pipeline output, and with a
     # timeout that kills the hook's process subtree rather than orphaning it.
-    case Output.run_cmd(cmd, mode: :buffered, env: merged_env, timeout: actual_timeout) do
+    case Output.run_cmd(cmd,
+           mode: :buffered,
+           env: merged_env,
+           timeout: actual_timeout,
+           redact: redact
+         ) do
       {:passed, _output} ->
         :ok
 

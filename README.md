@@ -202,6 +202,62 @@ env "APP": "myapp", "REGION": "us-east-1"
 
 `--dry-run` shows declared env vars at the pipeline and stage level.
 
+### Secrets
+
+The `secret` directive names a secret the pipeline needs. Every declared secret is
+resolved **before any step runs**, injected into every step's and hook's environment,
+and its value is masked wherever output leaves the run.
+
+```elixir
+secret :SLACK_WEBHOOK_URL
+secret "DEPLOY_TOKEN"
+
+stage :deploy do
+  step :ship, cmd: "curl -H \"Authorization: Bearer $DEPLOY_TOKEN\" https://..."
+end
+
+on_failure :alert, cmd: "curl -X POST -d 'build failed' $SLACK_WEBHOOK_URL"
+```
+
+`secret` is only valid at the top level of the file; names may be atoms or strings.
+
+**Sources.** Each name is looked up in order, first hit wins:
+
+1. an explicit provider map (what a server-side secrets store plugs into),
+2. the process environment,
+3. `.tiny_ci/secrets` under the project root.
+
+A declared secret found in none of them fails the run with exit code 1 and lists
+every missing name; with `--dry-run` it is a warning and the plan still prints
+(`Secrets: NAME, NAME` — names only, never values).
+
+**The `.tiny_ci/secrets` file** is one `KEY=value` per line. `#` as the first non-blank
+character starts a comment; blank lines are ignored; a leading `export ` is stripped;
+matching single or double quotes around the value are removed (no escapes, no
+interpolation); a line without `=` is an error. The file must be gitignored — tiny_ci
+warns when it is not.
+
+**Precedence.** Secrets are the *lowest* environment layer: a pipeline-, stage-, or
+step-level `env` of the same name wins, so the pipeline's explicit configuration is
+always authoritative.
+
+**Masking guarantees.** A secret value appearing in step output is replaced by `***`
+in the streaming and buffered console, in `StepResult.output` and therefore
+`--output json`, in every event before it reaches any sink (`--events` NDJSON,
+custom sinks, the provenance collector), in breakpoint payloads, in failed-hook
+output, and in signed attestations. One mechanism (`TinyCI.Redaction`) is applied
+at three choke points — command output, result creation, and event dispatch — so
+nothing downstream needs to know about secrets.
+
+**Limitations.**
+
+- Only literal occurrences are masked. A value that appears transformed (base64,
+  URL-encoded, split across lines) is not recognised.
+- Values shorter than 4 bytes are never masked; a 1–3 byte "secret" would rewrite
+  ordinary text.
+- Console lines are masked as complete lines, so a secret containing a newline is
+  only masked in the captured output.
+
 ### Stages
 
 By default, stages run sequentially. When any stage declares `needs:`, the pipeline switches to DAG execution: independent stages run in parallel while dependent stages wait for their prerequisites.
@@ -850,7 +906,7 @@ Module hooks also receive `:pipeline_result` (`:on_success` or `:on_failure`).
 
 Pipeline files are validated against an allowlist of permitted constructs before execution:
 
-- `name`, `stage`, `step`, `on_success`, `on_failure`, `set`
+- `name`, `env`, `secret`, `stage`, `step`, `on_success`, `on_failure`, `set`
 - Stage options: `:mode`, `:needs`, `:when`, `:working_dir`, `:matrix`, `:max_parallel`, `:allow_failure`
 - Step options: `:cmd`, `:module`, `:timeout`, `:env`, `:allow_failure`, `:when`, `:working_dir`, `:retry`, `:retry_delay`, `:cache`, `:artifact`
 - Condition expressions: `branch()`, `env/1`, `file_changed?/1`, `==`, `!=`, `and`, `or`, `not`, `if/else`

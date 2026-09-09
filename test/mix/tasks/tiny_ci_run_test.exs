@@ -540,6 +540,96 @@ defmodule Mix.Tasks.TinyCi.RunTest do
     end
   end
 
+  describe "secrets" do
+    defp secret_pipeline(root) do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      secret :TC_M003_TOKEN
+      stage :s, mode: :serial do
+        step :echo, cmd: "echo token=$TC_M003_TOKEN"
+      end
+      """)
+
+      path
+    end
+
+    test "a missing secret fails the run before any step starts", %{project_root: root} do
+      path = secret_pipeline(root)
+
+      {stdout, stderr} =
+        with_stderr(fn -> Mix.Tasks.TinyCi.Run.run(["--file", path, "--root", root]) end)
+
+      assert {:error, :missing_secrets} = stdout.result
+      assert stderr =~ "Missing secrets: TC_M003_TOKEN"
+      assert stderr =~ ".tiny_ci/secrets"
+      refute stdout.output =~ "token="
+    end
+
+    test "--dry-run warns about a missing secret and continues", %{project_root: root} do
+      path = secret_pipeline(root)
+
+      {stdout, stderr} =
+        with_stderr(fn ->
+          Mix.Tasks.TinyCi.Run.run(["--file", path, "--root", root, "--dry-run"])
+        end)
+
+      assert stdout.result == :ok
+      assert stderr =~ "Warning"
+      assert stderr =~ "Missing secrets: TC_M003_TOKEN"
+      assert stdout.output =~ "Secrets: TC_M003_TOKEN"
+    end
+
+    test "a .tiny_ci/secrets file supplies the value and the output is masked",
+         %{project_root: root} do
+      path = secret_pipeline(root)
+      File.mkdir_p!(Path.join(root, ".tiny_ci"))
+      File.write!(Path.join(root, ".tiny_ci/secrets"), "TC_M003_TOKEN=abcd1234wxyz\n")
+
+      {stdout, _stderr} =
+        with_stderr(fn -> Mix.Tasks.TinyCi.Run.run(["--file", path, "--root", root]) end)
+
+      assert stdout.result == :ok
+      assert stdout.output =~ "token=***"
+      refute stdout.output =~ "abcd1234wxyz"
+    end
+
+    test "warns when .tiny_ci/secrets is not gitignored, and not when it is",
+         %{project_root: root} do
+      path = secret_pipeline(root)
+      File.mkdir_p!(Path.join(root, ".tiny_ci"))
+      File.write!(Path.join(root, ".tiny_ci/secrets"), "TC_M003_TOKEN=abcd1234wxyz\n")
+      {_, 0} = System.cmd("git", ["init", "-q"], cd: root, stderr_to_stdout: true)
+
+      {_stdout, stderr} =
+        with_stderr(fn -> Mix.Tasks.TinyCi.Run.run(["--file", path, "--root", root]) end)
+
+      assert stderr =~ "Warning: .tiny_ci/secrets is not gitignored."
+
+      File.write!(Path.join(root, ".gitignore"), ".tiny_ci/secrets\n")
+
+      {_stdout, stderr} =
+        with_stderr(fn -> Mix.Tasks.TinyCi.Run.run(["--file", path, "--root", root]) end)
+
+      refute stderr =~ "not gitignored"
+    end
+
+    # Captures stderr and stdout separately, returning the function's result too.
+    defp with_stderr(fun) do
+      holder = self()
+
+      stderr =
+        capture_io(:stderr, fn ->
+          stdout = capture_io(fn -> send(holder, {:result, fun.()}) end)
+          send(holder, {:stdout, stdout})
+        end)
+
+      result = receive do: ({:result, r} -> r)
+      output = receive do: ({:stdout, o} -> o)
+      {%{result: result, output: output}, stderr}
+    end
+  end
+
   describe "--events" do
     test "writes a valid NDJSON event stream to a file", %{project_root: root} do
       path = Path.join(root, "tiny_ci.exs")

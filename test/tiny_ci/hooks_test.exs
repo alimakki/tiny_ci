@@ -231,6 +231,39 @@ defmodule TinyCI.HooksTest do
     end
   end
 
+  describe "run_hooks/3 with secrets" do
+    test "a resolved secret reaches the hook as an environment variable" do
+      marker = "hook-secret-#{System.unique_integer([:positive])}"
+
+      ctx =
+        Map.merge(@base_context, %{secrets: %{"TOKEN" => "abcd1234"}, secret_values: ["abcd1234"]})
+
+      hooks = %{
+        on_success: [
+          %Hook{name: :echo, cmd: "test \"$TOKEN\" = abcd1234 || echo #{marker}; false"}
+        ]
+      }
+
+      stderr =
+        ExUnit.CaptureIO.capture_io(:stderr, fn -> Hooks.run_hooks(hooks, :on_success, ctx) end)
+
+      refute stderr =~ marker
+    end
+
+    test "a failed hook's output is masked on stderr" do
+      ctx =
+        Map.merge(@base_context, %{secrets: %{"TOKEN" => "abcd1234"}, secret_values: ["abcd1234"]})
+
+      hooks = %{on_failure: [%Hook{name: :leak, cmd: "echo token=$TOKEN; false"}]}
+
+      stderr =
+        ExUnit.CaptureIO.capture_io(:stderr, fn -> Hooks.run_hooks(hooks, :on_failure, ctx) end)
+
+      assert stderr =~ "token=***"
+      refute stderr =~ "abcd1234"
+    end
+  end
+
   describe "run_hooks/3 with module hooks" do
     test "a raising module hook is reported and the next hook still runs" do
       marker = "hook-after-crash-#{System.unique_integer([:positive])}"

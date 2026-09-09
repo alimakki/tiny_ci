@@ -23,6 +23,10 @@ defmodule TinyCI.DSL.Interpreter do
 
       on_failure :alert, cmd: "curl -X POST $SLACK_WEBHOOK"
 
+  A `secret :NAME` directive declares a secret the pipeline needs; names are
+  collected on `%TinyCI.PipelineSpec{secrets: [...]}` and resolved by
+  `TinyCI.Secrets` at run start.
+
   ## Errors
 
   Returns `{:error, reason}` for:
@@ -179,6 +183,11 @@ defmodule TinyCI.DSL.Interpreter do
         _ -> path |> Path.basename(".exs") |> String.to_atom()
       end
 
+    {secret_exprs, rest} = Enum.split_with(rest, &match?({:secret, _, _}, &1))
+
+    secrets =
+      Enum.uniq(for {:secret, _, [secret_name]} <- secret_exprs, do: to_string(secret_name))
+
     {stages, pipeline_env, hooks} =
       Enum.reduce(rest, {[], %{}, %{on_success: [], on_failure: []}}, fn expr,
                                                                          {stages, env_acc, hooks} ->
@@ -199,7 +208,14 @@ defmodule TinyCI.DSL.Interpreter do
         end
       end)
 
-    %PipelineSpec{name: name, stages: stages, hooks: hooks, root: root, env: pipeline_env}
+    %PipelineSpec{
+      name: name,
+      stages: stages,
+      hooks: hooks,
+      root: root,
+      env: pipeline_env,
+      secrets: secrets
+    }
   end
 
   # ---------------------------------------------------------------------------

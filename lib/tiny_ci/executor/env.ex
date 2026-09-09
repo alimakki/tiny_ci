@@ -2,12 +2,17 @@ defmodule TinyCI.Executor.Env do
   @moduledoc """
   Resolves the environment a step actually runs with.
 
-  Three layers merge, later winning over earlier:
+  Four layers merge, later winning over earlier:
 
-    1. `context.pipeline_env` — declared once for the whole pipeline
-    2. `context.stage_env`    — the stage's `env:` (plus the matrix combination's vars)
-    3. the step's own `env:`  — where `{:store, key}` references are replaced with
+    1. `context.secrets`      — the run's resolved secrets (`secret` directives)
+    2. `context.pipeline_env` — declared once for the whole pipeline
+    3. `context.stage_env`    — the stage's `env:` (plus the matrix combination's vars)
+    4. the step's own `env:`  — where `{:store, key}` references are replaced with
        the current pipeline store value
+
+  Secrets sit at the bottom so a declared `env` of the same name wins; this
+  keeps a pipeline's explicit configuration authoritative over whatever the
+  environment happened to supply.
 
   This lives in its own module because two callers need the *same* answer: the
   executor, when it launches the command, and `TinyCI.Control.Session`, when it
@@ -18,17 +23,22 @@ defmodule TinyCI.Executor.Env do
   @type env :: %{optional(String.t()) => String.t()}
 
   @doc """
-  Returns the pipeline+stage environment, before any step-level `env:` is applied.
+  Returns the secrets+pipeline+stage environment, before any step-level `env:`
+  is applied.
 
   ## Examples
 
       iex> TinyCI.Executor.Env.base(%{pipeline_env: %{"A" => "1"}, stage_env: %{"A" => "2"}})
       %{"A" => "2"}
+
+      iex> TinyCI.Executor.Env.base(%{secrets: %{"T" => "s3cr3t"}, pipeline_env: %{"A" => "1"}})
+      %{"A" => "1", "T" => "s3cr3t"}
   """
   @spec base(map()) :: env()
   def base(context) do
     context
-    |> Map.get(:pipeline_env, %{})
+    |> Map.get(:secrets, %{})
+    |> Map.merge(Map.get(context, :pipeline_env, %{}))
     |> Map.merge(Map.get(context, :stage_env, %{}))
   end
 

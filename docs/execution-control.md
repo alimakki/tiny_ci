@@ -103,6 +103,11 @@ Notes that matter in practice:
 
 ## What a breakpoint shows you
 
+Everything below is redacted first: the payload's `env`, `store`, and `result`
+pass through `TinyCI.Redaction` with the run's secret values (and any secrets
+granted to a sandboxed action), so a token in the store reads `***` at the prompt
+and in the `breakpoint_hit` event.
+
 ```
 ⏸  breakpoint before deploy.push
    stage:  deploy

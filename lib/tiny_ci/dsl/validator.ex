@@ -18,6 +18,8 @@ defmodule TinyCI.DSL.Validator do
 
   **Top-level (file scope):**
   - `name :atom`
+  - `env KEY: "value", ...`
+  - `secret :NAME` / `secret "NAME"`
   - `stage :name, opts do ... end`
   - `on_success :name, opts` / `on_success :name, opts do ... end`
   - `on_failure :name, opts` / `on_failure :name, opts do ... end`
@@ -111,6 +113,11 @@ defmodule TinyCI.DSL.Validator do
 
   defp validate_top_level({:env, meta, _}),
     do: [diag("env requires a keyword list, e.g. env MIX_ENV: \"test\"", meta)]
+
+  defp validate_top_level({:secret, _, [name]}) when is_atom(name) or is_binary(name), do: []
+
+  defp validate_top_level({:secret, meta, _}),
+    do: [diag("secret expects a single atom or string name, e.g. `secret :API_TOKEN`", meta)]
 
   defp validate_top_level({:defmodule, meta, _}),
     do: [
@@ -238,6 +245,9 @@ defmodule TinyCI.DSL.Validator do
 
   defp validate_stage_expr({:env, meta, _}),
     do: [diag("env requires a keyword list, e.g. env MIX_ENV: \"test\"", meta)]
+
+  defp validate_stage_expr({:secret, meta, _}),
+    do: [diag("secret is only valid at the top level of the pipeline file", meta)]
 
   defp validate_stage_expr(node),
     do: [diag("Unexpected expression in stage body: #{Macro.to_string(node)}", meta_of(node))]

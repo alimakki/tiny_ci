@@ -220,4 +220,35 @@ defmodule TinyCI.ProvenanceTest do
       detail: ~s(tag = "v2")
     }
   end
+
+  describe "masking" do
+    test "an attestation built from a run with secrets never carries their values" do
+      {:ok, agent} = Agent.start_link(fn -> [] end)
+
+      stages = [
+        %Stage{name: :s, mode: :serial, steps: [%Step{name: :echo, cmd: "echo token=$TOKEN"}]}
+      ]
+
+      {:ok, _} =
+        TinyCI.Executor.run_pipeline(stages, nil,
+          listener: TinyCI.Listener.Silent,
+          output: :buffered,
+          secrets: %{"TOKEN" => "abcd1234wxyz"},
+          extra_sinks: [{Provenance.Collector, agent: agent}]
+        )
+
+      events = Provenance.Collector.events(agent)
+      Agent.stop(agent)
+
+      assert Enum.any?(events, &match?(%StepCompleted{step: :echo, output: "token=***\n"}, &1))
+      refute inspect(events) =~ "abcd1234wxyz"
+
+      run_spec = %PipelineSpec{name: :p, stages: stages, hooks: %{on_success: [], on_failure: []}}
+
+      statement =
+        Provenance.build(events: events, spec: run_spec, actions: [], commit: "c", branch: "b")
+
+      refute Jason.encode!(statement) =~ "abcd1234wxyz"
+    end
+  end
 end

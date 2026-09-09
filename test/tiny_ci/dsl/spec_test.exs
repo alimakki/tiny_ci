@@ -7,7 +7,15 @@ defmodule TinyCI.DSL.SpecTest do
   describe "directives/1" do
     test "top-level offers the file-scope directives" do
       names = Spec.directives(:top_level) |> Enum.map(& &1.name) |> Enum.sort()
-      assert names == [:env, :name, :on_failure, :on_success, :stage]
+      assert names == [:env, :name, :on_failure, :on_success, :secret, :stage]
+    end
+
+    test "secret is a top-level-only directive with a masking summary" do
+      assert %Entry{kind: :directive, contexts: [:top_level], type: "atom or string"} =
+               entry = Spec.lookup(:secret, :top_level)
+
+      assert entry.summary ==
+               "Declares a secret the pipeline needs. Resolved at run start; its value is masked everywhere."
     end
 
     test "stage body offers step and env" do

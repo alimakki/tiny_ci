@@ -11,11 +11,17 @@ defmodule TinyCI.Events.Dispatcher do
 
   Sinks are isolated from the run: an exception in one sink is caught and logged,
   and never affects pipeline pass/fail or the other sinks.
+
+  When started with `redact: values`, every event is passed through
+  `TinyCI.Redaction.redact/2` once, before the sink loop, so no sink — console,
+  NDJSON, provenance collector, or a custom one — can see a secret value.
   """
 
   use GenServer
 
   require Logger
+
+  alias TinyCI.Redaction
 
   @typedoc "A sink spec: a module implementing `TinyCI.EventSink` plus its init opts."
   @type sink_spec :: {module(), keyword()}
@@ -25,10 +31,14 @@ defmodule TinyCI.Events.Dispatcher do
 
   Each spec is `{sink_module, opts}`; `sink_module.init(opts)` is called once
   here to obtain the sink's initial state.
+
+  ## Options
+
+    * `:redact` — secret values to mask in every event before delivery (default `[]`)
   """
-  @spec start_link([sink_spec()]) :: GenServer.on_start()
-  def start_link(sink_specs) when is_list(sink_specs) do
-    GenServer.start_link(__MODULE__, sink_specs)
+  @spec start_link([sink_spec()], keyword()) :: GenServer.on_start()
+  def start_link(sink_specs, opts \\ []) when is_list(sink_specs) and is_list(opts) do
+    GenServer.start_link(__MODULE__, {sink_specs, Keyword.get(opts, :redact, [])})
   end
 
   @doc """
@@ -51,15 +61,16 @@ defmodule TinyCI.Events.Dispatcher do
   end
 
   @impl GenServer
-  def init(sink_specs) do
+  def init({sink_specs, redact}) do
     Process.flag(:trap_exit, true)
     sinks = Enum.map(sink_specs, fn {mod, opts} -> {mod, init_sink(mod, opts)} end)
-    {:ok, %{seq: 0, sinks: sinks}}
+    {:ok, %{seq: 0, sinks: sinks, redact: redact}}
   end
 
   @impl GenServer
-  def handle_call({:emit, event}, _from, %{seq: seq, sinks: sinks} = state) do
+  def handle_call({:emit, event}, _from, %{seq: seq, sinks: sinks, redact: redact} = state) do
     next = seq + 1
+    event = Redaction.redact(event, redact)
     sinks = Enum.map(sinks, fn sink -> deliver(sink, next, event) end)
     {:reply, :ok, %{state | seq: next, sinks: sinks}}
   end

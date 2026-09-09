@@ -73,6 +73,12 @@ defmodule TinyCI.DryRun do
     commit = Map.get(context, :commit, "unknown")
     IO.puts("  Branch: #{branch} | Commit: #{commit}#{base_info(context)}")
 
+    # Names only — a dry run must never print a secret value.
+    case Map.get(context, :secret_names, []) do
+      [] -> :ok
+      names -> IO.puts("  Secrets: #{Enum.join(names, ", ")}")
+    end
+
     pipeline_env = Map.get(context, :pipeline_env, %{})
 
     unless map_size(pipeline_env) == 0 do

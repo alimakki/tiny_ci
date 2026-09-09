@@ -95,6 +95,10 @@ The decoded payload:
 - **Only executed actions are listed.** A step skipped by a `when:` condition is
   recorded with `"status": "skipped"` and contributes no action.
 - **A run altered by hand is never signed.** See below.
+- **Attestations inherit masking.** The events the statement is built from are
+  redacted by the dispatcher before the collector sees them, so a declared
+  secret's value (see the README's "Secrets" section) can never end up inside a
+  signed statement.
 
 ## Divergent runs
 

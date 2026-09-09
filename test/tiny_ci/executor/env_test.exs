@@ -14,6 +14,16 @@ defmodule TinyCI.Executor.EnvTest do
     test "tolerates a context with neither layer" do
       assert Env.base(%{}) == %{}
     end
+
+    test "secrets are the lowest layer" do
+      ctx = %{secrets: %{"T" => "s3cr3t"}, pipeline_env: %{"P" => "1"}}
+      assert Env.base(ctx) == %{"T" => "s3cr3t", "P" => "1"}
+    end
+
+    test "a declared env var wins over a secret of the same name" do
+      ctx = %{secrets: %{"T" => "s3cr3t"}, pipeline_env: %{"T" => "declared"}}
+      assert Env.base(ctx) == %{"T" => "declared"}
+    end
   end
 
   describe "resolve/2" do

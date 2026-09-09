@@ -91,10 +91,10 @@ defmodule TinyCI.Control.SessionTest do
       assert session.store["n"] == 1.5
     end
 
-    test "masks known secret values in the store and env" do
+    test "masks the run's secret values in the store and env" do
       ctx =
         context(%{
-          secrets: ["s3cr3t"],
+          secret_values: ["s3cr3t"],
           store: %{token: "s3cr3t"},
           pipeline_env: %{"TOKEN" => "s3cr3t"}
         })
@@ -103,6 +103,19 @@ defmodule TinyCI.Control.SessionTest do
 
       assert session.store["token"] == "***"
       assert session.env["TOKEN"] == "***"
+    end
+
+    test "masks sandbox-granted secrets as well" do
+      ctx =
+        context(%{
+          secret_values: ["s3cr3t"],
+          sandbox: [secrets: ["gr4nted"]],
+          store: %{a: "s3cr3t", b: "gr4nted"}
+        })
+
+      session = Session.build(ctx, phase: :before, scope: :stage)
+
+      assert session.store == %{"a" => "***", "b" => "***"}
     end
 
     test "summarizes the result on an :after boundary" do

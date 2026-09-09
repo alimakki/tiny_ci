@@ -164,6 +164,38 @@ defmodule TinyCI.DSL.ValidatorTest do
     end
   end
 
+  describe "secret directive" do
+    test "accepts an atom name" do
+      assert :ok = validate("secret :SLACK_WEBHOOK_URL\nstage :s do\n  step :a, cmd: \"ok\"\nend")
+    end
+
+    test "accepts a string name" do
+      assert :ok = validate("secret \"DEPLOY_TOKEN\"\nstage :s do\n  step :a, cmd: \"ok\"\nend")
+    end
+
+    test "rejects a non-name argument" do
+      assert {:error, [msg]} = validate("secret 1")
+      assert msg =~ "secret expects a single atom or string name"
+    end
+
+    test "rejects extra arguments" do
+      assert {:error, [msg]} = validate("secret :A, x: 1")
+      assert msg =~ "secret expects a single atom or string name"
+    end
+
+    test "rejects secret inside a stage with a specific message" do
+      assert {:error, [msg]} =
+               validate("""
+               stage :s do
+                 secret :A
+                 step :a, cmd: "ok"
+               end
+               """)
+
+      assert msg =~ "secret is only valid at the top level"
+    end
+  end
+
   describe "rejected top-level constructs" do
     test "rejects defmodule with a descriptive message" do
       assert {:error, [msg]} =

@@ -43,6 +43,37 @@ defmodule TinyCI.Events.DispatcherTest do
 
   defp event, do: %StageStarted{run_id: "r", timestamp: DateTime.utc_now(), stage: :s}
 
+  describe "redact:" do
+    defp output_line(line) do
+      %TinyCI.Events.StepOutputLine{
+        run_id: "r",
+        timestamp: DateTime.utc_now(),
+        stage: :s,
+        step: :echo,
+        line: line
+      }
+    end
+
+    test "masks every event once before any sink sees it" do
+      {:ok, d} =
+        Dispatcher.start_link([{ForwardSink, pid: self(), tag: :a}], redact: ["abcd1234"])
+
+      :ok = Dispatcher.emit(d, output_line("token=abcd1234"))
+
+      assert_receive {:event, :a, 1, %TinyCI.Events.StepOutputLine{line: "token=***"}}
+      Dispatcher.stop(d)
+    end
+
+    test "leaves events untouched without the option" do
+      {:ok, d} = Dispatcher.start_link([{ForwardSink, pid: self(), tag: :a}])
+
+      :ok = Dispatcher.emit(d, output_line("token=abcd1234"))
+
+      assert_receive {:event, :a, 1, %TinyCI.Events.StepOutputLine{line: "token=abcd1234"}}
+      Dispatcher.stop(d)
+    end
+  end
+
   test "emit assigns a monotonic seq starting at 1" do
     {:ok, d} = Dispatcher.start_link([{ForwardSink, pid: self(), tag: :a}])
 

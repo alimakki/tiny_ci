@@ -132,6 +132,40 @@ defmodule TinyCI.OutputTest do
     end
   end
 
+  describe "run_cmd/2 with redact:" do
+    test "masks each printed line and the returned output in streaming mode" do
+      {result, printed} =
+        with_io(fn ->
+          Output.run_cmd("echo token=abcd1234", mode: :streaming, redact: ["abcd1234"])
+        end)
+
+      assert printed =~ "token=***"
+      refute printed =~ "abcd1234"
+      assert result == {:passed, "token=***\n"}
+    end
+
+    test "masks the returned output in buffered mode" do
+      assert {:passed, "token=***\n"} =
+               Output.run_cmd("echo token=abcd1234", mode: :buffered, redact: ["abcd1234"])
+    end
+
+    test "masks a secret split across chunks once the line is complete" do
+      cmd = "printf 'abcd'; sleep 0.05; printf '1234\\n'"
+
+      assert {:passed, "***\n"} =
+               Output.run_cmd(cmd, mode: :buffered, redact: ["abcd1234"])
+    end
+
+    test "masks a prefixed streaming line" do
+      {_result, printed} =
+        with_io(fn ->
+          Output.run_cmd("echo abcd1234", mode: :streaming, prefix: :s, redact: ["abcd1234"])
+        end)
+
+      assert printed =~ "[s] ***"
+    end
+  end
+
   describe "run_cmd/2 in streaming mode with prefix" do
     test "prefixes each output line with the step name" do
       {_result, io_output} =

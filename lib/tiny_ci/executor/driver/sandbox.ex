@@ -6,7 +6,7 @@ defmodule TinyCI.Executor.Driver.Sandbox do
   `TinyCI.Action.Metadata`, serializes a request (config + a sanitized context)
   with `TinyCI.Sandbox.Protocol`, hands it to the host's `TinyCI.Sandbox.Backend`
   (Seatbelt on macOS, Bubblewrap on Linux), and decodes the response — masking
-  any granted secrets on the way out (`TinyCI.Sandbox.Redaction`).
+  any granted secrets on the way out (`TinyCI.Redaction`).
 
   Only the documented action-facing context fields cross the boundary; executor
   handles (`:events`, `:run_id`, …) never leave the runner. If no backend is
@@ -17,7 +17,8 @@ defmodule TinyCI.Executor.Driver.Sandbox do
 
   alias TinyCI.Action
   alias TinyCI.Sandbox.Backend
-  alias TinyCI.Sandbox.{Policy, Protocol, Redaction}
+  alias TinyCI.Redaction
+  alias TinyCI.Sandbox.{Policy, Protocol}
 
   @context_keys [:branch, :commit, :changed_files, :store, :timestamp]
 

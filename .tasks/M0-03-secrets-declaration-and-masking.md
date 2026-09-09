@@ -1,6 +1,6 @@
 # M0-03 — `secret` directive and masking in every sink and result
 
-**Milestone:** M0 · **Size:** M · **Depends on:** M0-01 · **Status:** ⬜ Not started
+**Milestone:** M0 · **Size:** M · **Depends on:** M0-01 · **Status:** ✅ Done (2026-09-08)
 **Written against:** commit `b9496e7` (2026-08-08)
 
 ## Summary
@@ -203,17 +203,39 @@ declared. Names only.
 
 ## Acceptance criteria
 
-- [ ] `secret :NAME` / `secret "NAME"` are valid only at top level; misuse gives a clear message.
-- [ ] A declared secret missing from provider, env, and file fails the run before any step
+- [x] `secret :NAME` / `secret "NAME"` are valid only at top level; misuse gives a clear message.
+      — `validator_test.exs` "secret directive" (five tests).
+- [x] A declared secret missing from provider, env, and file fails the run before any step
       starts, with every missing name listed; `--dry-run` warns instead.
-- [ ] Secret values reach shell steps and hooks as environment variables.
-- [ ] A secret value present in step output is `***` in: streaming console, buffered console,
+      — `secrets_test.exs` "reports missing names in declaration order";
+      `tiny_ci_run_test.exs` "a missing secret fails the run before any step starts" and
+      "--dry-run warns about a missing secret and continues".
+- [x] Secret values reach shell steps and hooks as environment variables.
+      — `executor_test.exs` "a secret reaches the shell step…" / "secrets are the lowest env
+      layer"; `hooks_test.exs` "a resolved secret reaches the hook as an environment variable";
+      `env_test.exs` "secrets are the lowest layer".
+- [x] A secret value present in step output is `***` in: streaming console, buffered console,
       `StepResult.output`, `--output json`, NDJSON, the breakpoint payload, and the
       attestation (existing provenance tests extended with one masked case).
-- [ ] Values shorter than 4 bytes are not masked, and this is documented.
-- [ ] `.tiny_ci/secrets` is parsed per the documented grammar; a not-gitignored file warns.
-- [ ] LSP completion offers `secret` at top level (it reads `Spec`; verify with
+      — streaming: `output_test.exs` "masks each printed line…"; buffered console:
+      `tiny_ci_run_test.exs` "a .tiny_ci/secrets file supplies the value and the output is
+      masked"; result + JSON + events: `executor_test.exs` "a secret reaches the shell step and
+      is masked in the result and events" and "a crashed step's output is masked too";
+      dispatcher: `dispatcher_test.exs` "masks every event once before any sink sees it";
+      breakpoint: `executor_test.exs` "the breakpoint payload is masked", `session_test.exs`
+      "masks the run's secret values…" / "masks sandbox-granted secrets as well";
+      attestation: `provenance_test.exs` "an attestation built from a run with secrets never
+      carries their values".
+- [x] Values shorter than 4 bytes are not masked, and this is documented.
+      — `redaction_test.exs` "ignores values shorter than 4 bytes"; README "Secrets" →
+      Limitations.
+- [x] `.tiny_ci/secrets` is parsed per the documented grammar; a not-gitignored file warns.
+      — `secrets_test.exs` "parse_file/1" (six tests); `tiny_ci_run_test.exs` "warns when
+      .tiny_ci/secrets is not gitignored, and not when it is".
+- [x] LSP completion offers `secret` at top level (it reads `Spec`; verify with
       `test/tiny_ci/dsl/spec_test.exs` rather than by running the LSP).
+      — `spec_test.exs` "top-level offers the file-scope directives" and "secret is a
+      top-level-only directive with a masking summary".
 
 ## Pitfalls
 
@@ -234,6 +256,31 @@ declared. Names only.
 - `docs/events.md`: one paragraph "Masking" stating events are redacted before any sink.
 - `docs/execution-control.md`: note that breakpoint payloads are redacted.
 - `docs/provenance.md`: note that attestations inherit masking.
+
+## Deviations
+
+- **`Session.build/2` read `ctx.secrets` as a list** (the sandbox's granted secrets). It now
+  uses `ctx.secret_values ++ Driver.opts(ctx)[:secrets]` as designed, since `ctx.secrets` is
+  the name → value map. The existing session test was rewritten to `secret_values:` and a
+  second test covers the sandbox grants.
+- **`TinyCI.Secrets.attach/2`** (not in the spec) puts `:secrets` and `:secret_values` on a
+  context. `Executor.run_pipeline/3` uses it for the `secrets:` option, and the Mix task uses
+  it on the context it hands to both the executor and `Hooks.run_hooks/3`, so hooks see the
+  same secrets as steps without a second plumbing path. `run_pipeline/3` also honours secrets
+  already attached to the context when the option is absent.
+- **Dry run lists `ctx.secret_names`**, which the Mix task sets from `spec.secrets`, rather
+  than the keys of the resolved map — under `--dry-run` with a missing secret the resolved map
+  is empty, and the plan should still list every declared name.
+- **A malformed `.tiny_ci/secrets` is its own error**, `{:error, {:secrets_file, path,
+  {:line, n, reason}}}` from `Secrets.resolve/2`; the CLI prints `Cannot parse PATH:LINE:
+  reason` and exits 1. The spec only described the missing-secret case.
+- **`Output.run_cmd/2` masks the returned output as a whole** (a superset of per-line
+  masking) and printed lines per line; the documented limitation is that a secret containing
+  a newline is only masked in the captured output.
+- **The deprecated-delegate test calls `TinyCI.Sandbox.Redaction.redact/2` via `apply/3`** so
+  the `@deprecated` warning does not appear in the test build.
+- `Secrets.values/1` (public) is where the "blank or shorter than 4 bytes" filter lives, so
+  the executor, the Mix task, and the docs agree on one rule.
 
 ## Follow-ups
 

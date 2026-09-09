@@ -488,6 +488,28 @@ defmodule TinyCI.DSL.InterpreterTest do
     end
   end
 
+  describe "secrets" do
+    test "collects declared secret names in order, as strings, deduplicated" do
+      assert {:ok, %PipelineSpec{secrets: ["A", "B"]}} =
+               Interpreter.interpret_string(
+                 """
+                 secret :A
+                 secret "B"
+                 secret :A
+                 stage :test do
+                   step :unit, cmd: "mix test"
+                 end
+                 """,
+                 "buffer.exs"
+               )
+    end
+
+    test "defaults to an empty list" do
+      assert {:ok, %PipelineSpec{secrets: []}} =
+               Interpreter.interpret_string("stage :t do\n  step :u, cmd: \"x\"\nend", "b.exs")
+    end
+  end
+
   describe "diagnose_string/2" do
     alias TinyCI.DSL.Diagnostic
 

@@ -21,14 +21,14 @@ defmodule TinyCI.Control.Session do
   NDJSON event stream. `coerce/1` keeps JSON-native scalars as they are and renders
   everything else with `inspect/1`, so a pid or a struct in the store can never
   break the stream. The whole payload then passes through
-  `TinyCI.Sandbox.Redaction.redact/2` with the run's known secret values, so a
+  `TinyCI.Redaction.redact/2` with the run's known secret values, so a
   secret cannot leak into an event or the console via a breakpoint.
   """
 
   alias TinyCI.Control.Breakpoint
   alias TinyCI.Events.BreakpointHit
-  alias TinyCI.Executor.Env
-  alias TinyCI.Sandbox.Redaction
+  alias TinyCI.Executor.{Driver, Env}
+  alias TinyCI.Redaction
 
   @type t :: %__MODULE__{
           pause_id: String.t(),
@@ -79,7 +79,7 @@ defmodule TinyCI.Control.Session do
   """
   @spec build(map(), keyword()) :: t()
   def build(context, opts) do
-    secrets = Map.get(context, :secrets, [])
+    secrets = Map.get(context, :secret_values, []) ++ sandbox_secrets(context)
 
     %__MODULE__{
       pause_id: generate_pause_id(),
@@ -163,6 +163,8 @@ defmodule TinyCI.Control.Session do
   end
 
   def coerce(term), do: inspect(term)
+
+  defp sandbox_secrets(context), do: Keyword.get(Driver.opts(context), :secrets, [])
 
   defp redact(nil, _secrets), do: nil
   defp redact(term, secrets), do: Redaction.redact(term, secrets)

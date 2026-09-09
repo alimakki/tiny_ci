@@ -49,6 +49,22 @@ defmodule TinyCI.DryRunTest do
       assert output =~ "mix credo"
     end
 
+    test "lists declared secret names and never a value" do
+      stages = [%Stage{name: :s, steps: [%Step{name: :a, cmd: "true"}]}]
+      ctx = %{branch: "main", secret_names: ["A", "B"], secrets: %{"A" => "supersecretvalue"}}
+
+      output = capture_io(fn -> DryRun.print_plan(stages, ctx) end)
+
+      assert output =~ "Secrets: A, B"
+      refute output =~ "supersecretvalue"
+    end
+
+    test "omits the secrets line when none are declared" do
+      stages = [%Stage{name: :s, steps: [%Step{name: :a, cmd: "true"}]}]
+      output = capture_io(fn -> DryRun.print_plan(stages, %{branch: "main"}) end)
+      refute output =~ "Secrets:"
+    end
+
     test "prints module steps" do
       stages = [
         %Stage{

@@ -2134,4 +2134,68 @@ defmodule TinyCI.ExecutorTest do
       assert_receive {:event, %PipelineCompleted{status: :failed}}
     end
   end
+
+  describe "secrets" do
+    defmodule Leaker do
+      @moduledoc false
+      def execute(_config, _ctx), do: {:ok, %{leaked: "abcd1234"}}
+    end
+
+    @secret_opts [
+      listener: TinyCI.Listener.Silent,
+      output: :buffered,
+      secrets: %{"TOKEN" => "abcd1234"}
+    ]
+
+    test "a secret reaches the shell step and is masked in the result and events" do
+      stage = %Stage{name: :s, mode: :serial, steps: [%Step{name: :echo, cmd: "echo $TOKEN"}]}
+      opts = @secret_opts ++ [extra_sinks: [{TinyCI.TestSink, pid: self()}]]
+
+      assert {:ok, [%StageResult{step_results: [%StepResult{output: "***\n"}]} = result]} =
+               Executor.run_pipeline([stage], nil, opts)
+
+      assert_receive {:event, %TinyCI.Events.StepOutputLine{step: :echo, line: "***"}}
+      assert_receive {:event, %StepCompleted{step: :echo, output: "***\n"}}
+
+      json = TinyCI.Results.to_json(:ok, [result])
+      refute json =~ "abcd1234"
+      assert json =~ "***"
+    end
+
+    test "secrets are the lowest env layer" do
+      stage = %Stage{name: :s, mode: :serial, steps: [%Step{name: :echo, cmd: "echo $TOKEN"}]}
+      ctx = TinyCI.Context.build(pipeline_env: %{"TOKEN" => "declared"})
+
+      assert {:ok, [%StageResult{step_results: [%StepResult{output: "declared\n"}]}]} =
+               Executor.run_pipeline([stage], ctx, @secret_opts)
+    end
+
+    test "a crashed step's output is masked too" do
+      step = %Step{name: :cfg, module: Boom, config_block: fn -> raise "leak abcd1234" end}
+      stage = %Stage{name: :s, mode: :serial, steps: [step]}
+
+      assert {:error, _, [%StageResult{step_results: [%StepResult{output: output}]}]} =
+               Executor.run_pipeline([stage], nil, @secret_opts)
+
+      assert output =~ "leak ***"
+      refute output =~ "abcd1234"
+    end
+
+    test "the breakpoint payload is masked" do
+      stage = %Stage{name: :s, mode: :serial, steps: [%Step{name: :m, module: Leaker}]}
+
+      opts =
+        @secret_opts ++
+          [
+            extra_sinks: [{TinyCI.TestSink, pid: self()}],
+            control: [breakpoints: ["after:s.m"], timeout: 10, timeout_action: :continue]
+          ]
+
+      assert {:ok, [%StageResult{store: %{leaked: "abcd1234"}}]} =
+               Executor.run_pipeline([stage], nil, opts)
+
+      assert_receive {:event, %TinyCI.Events.BreakpointHit{store: store}}
+      assert store["leaked"] == "***"
+    end
+  end
 end

@@ -31,6 +31,8 @@ defmodule TinyCI.Output do
   on both Linux and macOS (which has no `setsid`).
   """
 
+  alias TinyCI.Redaction
+
   # Grace period between SIGTERM and SIGKILL when reaping a timed-out subtree.
   @kill_grace_ms 100
 
@@ -71,6 +73,10 @@ defmodule TinyCI.Output do
     * `:working_dir` — directory to run the command in
     * `:timeout` — milliseconds after which the command's process subtree is
       killed (default: no timeout)
+    * `:redact` — list of secret values; every printed line and the returned
+      output have them replaced with `***` (see `TinyCI.Redaction`). Lines are
+      masked once complete, so a secret split across two port chunks is still
+      caught; a secret containing a newline is only masked in the returned output.
 
   ## Returns
 
@@ -86,12 +92,13 @@ defmodule TinyCI.Output do
     prefix = if output_mode == :streaming, do: opts[:prefix], else: :buffered
     working_dir = opts[:working_dir]
     timeout = opts[:timeout]
+    redact = opts[:redact] || []
 
-    run_port(cmd, env, working_dir, prefix, timeout)
+    run_port(cmd, env, working_dir, {prefix, redact}, timeout)
   end
 
   # `prefix` is a string/nil for streaming, or the `:buffered` atom to suppress printing.
-  defp run_port(cmd, env, working_dir, prefix, timeout) do
+  defp run_port(cmd, env, working_dir, {_prefix, redact} = printer, timeout) do
     sh = System.find_executable("sh") || "/bin/sh"
     port_opts = [:stderr_to_stdout, :binary, :exit_status, {:env, charlist_env(env)}]
 
@@ -101,26 +108,26 @@ defmodule TinyCI.Output do
     port = Port.open({:spawn_executable, sh}, [{:args, [~c"-c", cmd]} | port_opts])
     os_pid = port_os_pid(port)
     deadline = if timeout, do: System.monotonic_time(:millisecond) + timeout, else: nil
-    {status, chunks} = collect_port(port, os_pid, deadline, prefix, [], "")
-    {status, IO.iodata_to_binary(chunks)}
+    {status, chunks} = collect_port(port, os_pid, deadline, printer, [], "")
+    {status, Redaction.redact(IO.iodata_to_binary(chunks), redact)}
   end
 
-  defp collect_port(port, os_pid, deadline, prefix, chunks, line_buf) do
+  defp collect_port(port, os_pid, deadline, printer, chunks, line_buf) do
     receive do
       {^port, {:data, data}} ->
         {lines, remaining} = split_lines(line_buf <> data)
-        print_lines(lines, prefix)
-        collect_port(port, os_pid, deadline, prefix, [chunks, data], remaining)
+        print_lines(lines, printer)
+        collect_port(port, os_pid, deadline, printer, [chunks, data], remaining)
 
       {^port, {:exit_status, exit_code}} ->
-        flush_line(line_buf, prefix)
+        flush_line(line_buf, printer)
         status = if exit_code == 0, do: :passed, else: :failed
         {status, chunks}
     after
       remaining_ms(deadline) ->
         kill_subtree(os_pid)
         close_port(port)
-        flush_line(line_buf, prefix)
+        flush_line(line_buf, printer)
         {:timeout, chunks}
     end
   end
@@ -186,8 +193,8 @@ defmodule TinyCI.Output do
     :ok
   end
 
-  defp flush_line("", _prefix), do: :ok
-  defp flush_line(line, prefix), do: print_lines([line], prefix)
+  defp flush_line("", _printer), do: :ok
+  defp flush_line(line, printer), do: print_lines([line], printer)
 
   defp split_lines(text) do
     parts = String.split(text, "\n", parts: :infinity)
@@ -195,17 +202,18 @@ defmodule TinyCI.Output do
     {complete, remaining}
   end
 
-  defp print_lines([], _prefix), do: :ok
+  defp print_lines([], _printer), do: :ok
 
-  defp print_lines(_lines, :buffered), do: :ok
+  defp print_lines(_lines, {:buffered, _redact}), do: :ok
 
-  defp print_lines(lines, nil) do
-    Enum.each(lines, &IO.puts/1)
+  # Masking happens here, on complete lines, so it is per line by construction.
+  defp print_lines(lines, {nil, redact}) do
+    Enum.each(lines, &IO.puts(Redaction.redact(&1, redact)))
   end
 
-  defp print_lines(lines, prefix) do
+  defp print_lines(lines, {prefix, redact}) do
     Enum.each(lines, fn line ->
-      IO.puts("  [#{prefix}] #{line}")
+      IO.puts("  [#{prefix}] #{Redaction.redact(line, redact)}")
     end)
   end
 

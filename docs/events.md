@@ -37,6 +37,15 @@ boundary emits `breakpoint_hit` before blocking, and the control plane emits
 The dispatcher is per-run (its pid lives on the run context), so concurrent runs
 never interleave and `async: true` tests stay isolated.
 
+## Masking
+
+Every event is passed through `TinyCI.Redaction.redact/2` with the run's resolved
+secret values (`secret` directives, see the README's "Secrets" section) **once,
+inside the dispatcher, before the sink loop**. No sink — console, NDJSON, the
+provenance collector, or one you write — ever receives a secret value; it sees
+`***` instead. Masking is by literal value only, and values shorter than 4 bytes
+are not masked.
+
 ## NDJSON line format
 
 Each line is a single JSON object: the event's own fields plus three envelope
