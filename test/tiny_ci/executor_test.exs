@@ -1769,9 +1769,10 @@ defmodule TinyCI.ExecutorTest do
 
     test "cache hit: restores dirs and skips step", %{root: root} do
       {:ok, key} = TinyCI.Cache.compute_key(Path.join(root, "mix.lock"))
-      cached_file = Path.join([TinyCI.Cache.cache_entry_dir(root, key), "deps", "marker.txt"])
-      File.mkdir_p!(Path.dirname(cached_file))
-      File.write!(cached_file, "cached content")
+      seed = Path.join(Path.dirname(root), "seed")
+      File.mkdir_p!(Path.join(seed, "deps"))
+      File.write!(Path.join(seed, "deps/marker.txt"), "cached content")
+      TinyCI.Cache.save(root, key, ["deps"], seed)
 
       stage = %Stage{
         name: :install,

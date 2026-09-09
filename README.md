@@ -421,11 +421,17 @@ end
 - A cache miss runs the step and saves the directories afterward; the reporter shows `[cache miss]`
 - `--dry-run` shows `[cache: key=mix.lock, paths=[deps, _build]]` in the step plan
 - `--no-cache` bypasses all cache lookups for the current run
-- `mix tiny_ci.cache clean` removes all cache entries for the current project:
+
+**Atomicity.** An entry is either complete or absent. A save copies into a staging directory and publishes it with a single rename, so an interrupted save never produces a hit. Savers and restorers of the same key serialise on a filesystem lock that works across OS processes, so parallel matrix combinations, DAG stages, and concurrent runs cannot interleave. Copies clone blocks where the filesystem supports it (`cp -c` on APFS, `--reflink=auto` on Linux) and fall back to a plain copy otherwise.
+
+**Eviction.** The cache is pruned after every save and on demand: entries unused for more than `max_age_days` are removed, then least-recently-used entries until the total is under `max_bytes`. Defaults are 30 days and 5 GiB, overridable with `TINY_CI_CACHE_MAX_AGE_DAYS` / `TINY_CI_CACHE_MAX_BYTES` or the `:tiny_ci` application env keys `:cache_max_age_days` / `:cache_max_bytes`.
 
 ```bash
-mix tiny_ci.cache clean
+mix tiny_ci.cache clean                       # remove this project's entries
 mix tiny_ci.cache clean --root /path/to/project
+mix tiny_ci.cache prune                       # apply the default limits now
+mix tiny_ci.cache prune --max-bytes 1073741824 --max-age-days 7
+mix tiny_ci.cache stats                       # entries, size, projects
 ```
 
 ### Artifact Persistence

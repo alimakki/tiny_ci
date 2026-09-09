@@ -1,4 +1,5 @@
 defmodule TinyCI.CacheTest do
+  # async: false — points the cache at a temp dir through global application env.
   use ExUnit.Case, async: false
 
   alias TinyCI.Cache
@@ -53,9 +54,10 @@ defmodule TinyCI.CacheTest do
     test "returns true when all paths exist in cache", %{tmp: tmp} do
       root = tmp
       key = "abc123"
-      entry_dir = Cache.cache_entry_dir(root, key)
-      File.mkdir_p!(Path.join(entry_dir, "deps"))
-      File.write!(Path.join(entry_dir, "_build"), "data")
+      work = Path.join(tmp, "work")
+      File.mkdir_p!(Path.join(work, "deps"))
+      File.write!(Path.join(work, "_build"), "data")
+      Cache.save(root, key, ["deps", "_build"], work)
 
       assert Cache.hit?(root, key, ["deps", "_build"]) == true
     end
@@ -63,10 +65,120 @@ defmodule TinyCI.CacheTest do
     test "returns false when only some paths are cached", %{tmp: tmp} do
       root = tmp
       key = "partial"
+      work = Path.join(tmp, "work")
+      File.mkdir_p!(Path.join(work, "deps"))
+      Cache.save(root, key, ["deps"], work)
+
+      assert Cache.hit?(root, key, ["deps", "_build"]) == false
+    end
+
+    test "an entry without metadata is a miss", %{tmp: tmp} do
+      root = tmp
+      key = "legacy"
       entry_dir = Cache.cache_entry_dir(root, key)
       File.mkdir_p!(Path.join(entry_dir, "deps"))
 
-      assert Cache.hit?(root, key, ["deps", "_build"]) == false
+      assert Cache.hit?(root, key, ["deps"]) == false
+    end
+  end
+
+  describe "atomicity" do
+    defp write_tree(base, files) do
+      Enum.each(files, fn {rel, content} ->
+        path = Path.join(base, rel)
+        File.mkdir_p!(Path.dirname(path))
+        File.write!(path, content)
+      end)
+
+      base
+    end
+
+    defp tmp_entries(root) do
+      dir = Path.join([Cache.base_dir(), Cache.project_id(root), ".tmp"])
+      if File.dir?(dir), do: File.ls!(dir), else: []
+    end
+
+    test "save publishes atomically with metadata", %{tmp: tmp} do
+      root = tmp
+      work = write_tree(Path.join(tmp, "work"), %{"deps/a.ex" => "a", "out.txt" => "o"})
+
+      assert :ok = Cache.save(root, "k1", ["deps", "out.txt", "missing"], work)
+
+      meta = Path.join(Cache.cache_entry_dir(root, "k1"), ".meta.json")
+      assert File.exists?(meta)
+      decoded = Jason.decode!(File.read!(meta))
+      assert decoded["paths"] == ["deps", "out.txt"]
+      assert is_integer(decoded["bytes"]) and decoded["bytes"] > 0
+      assert {:ok, _, _} = DateTime.from_iso8601(decoded["saved_at"])
+      assert {:ok, _, _} = DateTime.from_iso8601(decoded["last_used_at"])
+      assert tmp_entries(root) == []
+    end
+
+    test "an interrupted save is invisible", %{tmp: tmp} do
+      root = tmp
+      work = write_tree(Path.join(tmp, "work"), %{"deps/a.ex" => "a"})
+
+      stage = Cache.stage_entry(root, "k2", ["deps"], work)
+      assert File.exists?(Path.join(stage, "deps/a.ex"))
+      refute Cache.hit?(root, "k2", ["deps"])
+
+      assert :ok = Cache.commit_entry(root, "k2", stage)
+      assert Cache.hit?(root, "k2", ["deps"])
+      assert tmp_entries(root) == []
+    end
+
+    test "a second save replaces the entry wholesale", %{tmp: tmp} do
+      root = tmp
+      first = write_tree(Path.join(tmp, "w1"), %{"deps/one.ex" => "1"})
+      second = write_tree(Path.join(tmp, "w2"), %{"deps/two.ex" => "2"})
+
+      Cache.save(root, "k3", ["deps"], first)
+      Cache.save(root, "k3", ["deps"], second)
+
+      entry = Cache.cache_entry_dir(root, "k3")
+      assert File.exists?(Path.join(entry, "deps/two.ex"))
+      refute File.exists?(Path.join(entry, "deps/one.ex"))
+      assert tmp_entries(root) == []
+    end
+
+    test "concurrent saves of one key leave one consistent entry", %{tmp: tmp} do
+      root = tmp
+
+      works =
+        for i <- 1..4 do
+          write_tree(Path.join(tmp, "w#{i}"), %{
+            "deps/shared.ex" => "from #{i}",
+            "deps/marker-#{i}" => "#{i}"
+          })
+        end
+
+      works
+      |> Enum.map(fn work -> Task.async(fn -> Cache.save(root, "k4", ["deps"], work) end) end)
+      |> Task.await_many(30_000)
+
+      entry = Path.join(Cache.cache_entry_dir(root, "k4"), "deps")
+      markers = entry |> File.ls!() |> Enum.filter(&String.starts_with?(&1, "marker-"))
+      assert [<<"marker-", i::binary>>] = markers
+      assert File.read!(Path.join(entry, "shared.ex")) == "from #{i}"
+      assert Cache.hit?(root, "k4", ["deps"])
+      assert tmp_entries(root) == []
+    end
+
+    test "restore touches last_used_at", %{tmp: tmp} do
+      root = tmp
+      work = write_tree(Path.join(tmp, "work"), %{"deps/a.ex" => "a"})
+      Cache.save(root, "k5", ["deps"], work)
+
+      meta_path = Path.join(Cache.cache_entry_dir(root, "k5"), ".meta.json")
+      old = Jason.decode!(File.read!(meta_path))
+      File.write!(meta_path, Jason.encode!(%{old | "last_used_at" => "2020-01-01T00:00:00Z"}))
+
+      Cache.restore(root, "k5", ["deps"], Path.join(tmp, "restored"))
+
+      touched = Jason.decode!(File.read!(meta_path))
+      assert touched["saved_at"] == old["saved_at"]
+      assert touched["last_used_at"] != "2020-01-01T00:00:00Z"
+      assert File.read!(Path.join(tmp, "restored/deps/a.ex")) == "a"
     end
   end
 

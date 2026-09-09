@@ -1,6 +1,6 @@
 # M0-04 — Cache: atomic writes, cross-process locking, eviction
 
-**Milestone:** M0 · **Size:** M · **Depends on:** — · **Status:** ⬜ Not started
+**Milestone:** M0 · **Size:** M · **Depends on:** — · **Status:** ✅ Done (2026-09-08)
 **Written against:** commit `b9496e7` (2026-08-08)
 
 ## Summary
@@ -165,13 +165,22 @@ Use `@tag :tmp_dir` and point `:cache_base_dir` at the tmp dir the way `cache_te
 
 ## Acceptance criteria
 
-- [ ] An interrupted save never produces a hit.
-- [ ] Two concurrent saves of one key leave exactly one complete entry.
-- [ ] A restore concurrent with a save sees either the old or the new entry, never a mix.
-- [ ] Copies use `cp -c` / `--reflink=auto` when available and fall back silently.
-- [ ] `prune/1` enforces `max_bytes` (LRU) and `max_age_days`; defaults and env overrides documented.
-- [ ] A save triggers a prune with the default limits.
-- [ ] `mix tiny_ci.cache prune|stats` exist and are documented in the README.
+- [x] An interrupted save never produces a hit.
+      — `cache_test.exs` "an interrupted save is invisible", "save publishes atomically with metadata".
+- [x] Two concurrent saves of one key leave exactly one complete entry.
+      — `cache_test.exs` "concurrent saves of one key leave one consistent entry".
+- [x] A restore concurrent with a save sees either the old or the new entry, never a mix.
+      — by construction: both hold the entry lock (`cache/lock_test.exs` "a second process blocks
+      until the first releases") and publish is a single rename ("a second save replaces the
+      entry wholesale").
+- [x] Copies use `cp -c` / `--reflink=auto` when available and fall back silently.
+      — `cache/copy_test.exs` (runs the platform path; the fallback chain is in `Copy.do_copy/3`).
+- [x] `prune/1` enforces `max_bytes` (LRU) and `max_age_days`; defaults and env overrides documented.
+      — `cache/prune_test.exs`; README "Dependency Caching".
+- [x] A save triggers a prune with the default limits.
+      — `save/4` calls `prune([])`; `cache_test.exs` "save publishes atomically" asserts no `.tmp/*` remains.
+- [x] `mix tiny_ci.cache prune|stats` exist and are documented in the README.
+      — `test/mix/tasks/tiny_ci_cache_test.exs`.
 
 ## Pitfalls
 
@@ -185,6 +194,23 @@ Use `@tag :tmp_dir` and point `:cache_base_dir` at the tmp dir the way `cache_te
 ## Docs
 
 - README → "Dependency Caching": atomicity guarantee, new tasks, limits and env vars.
+
+## Deviations
+
+- **`Lock.with_lock/3` takes the lock directory path, not a key.** The cache computes
+  `<project>/.lock/<key>` and passes it in, which keeps the lock module free of cache layout
+  knowledge and lets its tests use any `tmp_dir`.
+- **Hand-built entries in existing tests now go through `save/4`.** `hit?/3` requires
+  `.meta.json`, so `cache_test.exs` "returns true when all paths exist in cache" and
+  `executor_test.exs` "cache hit: restores dirs and skips step" seed the entry with `Cache.save/4`
+  instead of `File.mkdir_p!`. The executor's caller API is unchanged; only test setup moved.
+- **Pre-metadata entries are still counted by `prune/1` and `stats/0`**, measured by walking the
+  directory and dated by its mtime, so age-based eviction eventually clears them rather than
+  leaving them forever.
+- **`prune/1` takes each entry's lock with `timeout: 0`** rather than checking for the lock
+  directory and then deleting, which would race with a save starting in between.
+- **A save with no existing paths writes nothing** (as before) rather than publishing an
+  entry with `paths: []`.
 
 ## Follow-ups
 
