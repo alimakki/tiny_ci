@@ -46,7 +46,10 @@ defmodule TinyCI.DSL.ConditionEval do
   @spec eval(term(), map()) :: term()
   def eval({:branch, _, []}, ctx), do: Map.get(ctx, :branch, "unknown")
 
-  def eval({:env, _, [var]}, _ctx) when is_binary(var), do: System.get_env(var)
+  def eval({:env, _, [var]}, ctx) when is_binary(var) do
+    env = Map.get(ctx, :env) || TinyCI.Executor.Env.base(ctx)
+    Map.get_lazy(env, var, fn -> System.get_env(var) end)
+  end
 
   def eval({:file_changed?, _, [glob]}, ctx) when is_binary(glob),
     do: Context.any_file_matches?(Map.get(ctx, :changed_files, []), glob)
@@ -54,9 +57,9 @@ defmodule TinyCI.DSL.ConditionEval do
   def eval({:==, _, [left, right]}, ctx), do: eval(left, ctx) == eval(right, ctx)
   def eval({:!=, _, [left, right]}, ctx), do: eval(left, ctx) != eval(right, ctx)
 
-  def eval({:and, _, [left, right]}, ctx), do: eval(left, ctx) and eval(right, ctx)
-  def eval({:or, _, [left, right]}, ctx), do: eval(left, ctx) or eval(right, ctx)
-  def eval({:not, _, [expr]}, ctx), do: not eval(expr, ctx)
+  def eval({:and, _, [left, right]}, ctx), do: eval(left, ctx) && eval(right, ctx)
+  def eval({:or, _, [left, right]}, ctx), do: eval(left, ctx) || eval(right, ctx)
+  def eval({:not, _, [expr]}, ctx), do: !eval(expr, ctx)
 
   def eval({:if, _, [cond_expr, [do: then_expr, else: else_expr]]}, ctx) do
     if eval(cond_expr, ctx), do: eval(then_expr, ctx), else: eval(else_expr, ctx)

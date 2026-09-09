@@ -72,6 +72,26 @@ defmodule TinyCI.Cache do
     end
   end
 
+  @doc """
+  Hashes the key file's contents together with explicit execution inputs.
+
+  Callers supply deterministic terms describing command/action, runtime, matrix,
+  environment, and effective working directory as appropriate. Use maps for
+  unordered inputs; list and tuple order is significant. No ambient context is
+  captured. File contents and inputs are encoded as a deterministic Erlang tuple
+  before hashing so their boundaries cannot collide.
+
+  Returns `{:ok, hex_key}` or `{:error, reason}` if the file cannot be read.
+  `compute_key/1` retains its content-only key format.
+  """
+  @spec compute_key(String.t(), term()) :: {:ok, String.t()} | {:error, term()}
+  def compute_key(key_file_path, inputs) do
+    with {:ok, content} <- File.read(key_file_path) do
+      encoded = :erlang.term_to_binary({content, inputs}, [:deterministic])
+      {:ok, :crypto.hash(:sha256, encoded) |> Base.encode16(case: :lower)}
+    end
+  end
+
   @doc "Returns the full cache entry directory path for the given root and key."
   @spec cache_entry_dir(String.t(), String.t()) :: String.t()
   def cache_entry_dir(root, key) do
@@ -94,28 +114,42 @@ defmodule TinyCI.Cache do
   @doc """
   Restores cached directories into `working_dir` (falls back to `root`).
 
-  Each path in `paths` is copied from the cache entry into `working_dir/<path>`.
-  Existing destination trees are replaced. Runs under the entry's lock, so a
-  concurrent save cannot swap the entry mid-copy, and marks the entry as used.
+  Returns `:ok` even on a miss. Use `restore_if_present/4` when deciding whether
+  execution can be skipped.
   """
   @spec restore(String.t(), String.t(), [String.t()], String.t() | nil) :: :ok
   def restore(root, key, paths, working_dir) do
+    restore_if_present(root, key, paths, working_dir)
+    :ok
+  end
+
+  @doc """
+  Checks completeness and restores an entry while holding the same entry lock.
+
+  Returns `:hit` after replacing all declared destination paths and marking the
+  entry as used, or `:miss` without modifying the working directory or metadata.
+  `working_dir` falls back to `root` when nil. Savers and pruners use this lock
+  too, so neither can remove or replace the entry between the check and copy.
+  """
+  @spec restore_if_present(String.t(), String.t(), [String.t()], String.t() | nil) :: :hit | :miss
+  def restore_if_present(root, key, paths, working_dir) do
     entry_dir = cache_entry_dir(root, key)
     dest_base = working_dir || root
 
     with_entry_lock(root, key, fn ->
-      Enum.each(paths, &restore_path(Path.join(entry_dir, &1), Path.join(dest_base, &1)))
-      touch_last_used(entry_dir)
+      if hit?(root, key, paths) do
+        Enum.each(paths, &restore_path(Path.join(entry_dir, &1), Path.join(dest_base, &1)))
+        touch_last_used(entry_dir)
+        :hit
+      else
+        :miss
+      end
     end)
-
-    :ok
   end
 
   defp restore_path(src, dst) do
-    if File.exists?(src) do
-      File.rm_rf!(dst)
-      :ok = Copy.copy_tree(src, dst)
-    end
+    File.rm_rf!(dst)
+    :ok = Copy.copy_tree(src, dst)
   end
 
   @doc """

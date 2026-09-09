@@ -8,7 +8,7 @@ defmodule TinyCI.LSP.CompletionTest do
 
   describe "items/1 by context" do
     test "top level offers the file-scope directives" do
-      assert labels(:top_level) == ["env", "name", "on_failure", "on_success", "stage"]
+      assert labels(:top_level) == ["env", "name", "on_failure", "on_success", "secret", "stage"]
     end
 
     test "stage body offers step and env" do

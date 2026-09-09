@@ -37,7 +37,7 @@ defmodule TinyCI.DSL.Validator do
   not in the allowlist.
   """
 
-  alias TinyCI.DSL.{Diagnostic, Spec}
+  alias TinyCI.DSL.{Diagnostic, Spec, Value}
 
   @doc """
   Validates a quoted AST and returns `:ok` or `{:error, messages}`.
@@ -78,7 +78,11 @@ defmodule TinyCI.DSL.Validator do
   """
   @spec diagnostics(term()) :: [Diagnostic.t()]
   def diagnostics(ast) do
-    ast |> unwrap_block() |> Enum.flat_map(&validate_top_level/1)
+    expressions = unwrap_block(ast)
+
+    duplicate_names(expressions, :name) ++
+      duplicate_names(expressions, :stage) ++
+      Enum.flat_map(expressions, &validate_top_level/1)
   end
 
   # ---------------------------------------------------------------------------
@@ -137,8 +141,10 @@ defmodule TinyCI.DSL.Validator do
   # ---------------------------------------------------------------------------
 
   defp validate_stage_call([opts], meta) when is_list(opts) do
-    {block, rest_opts} = Keyword.pop(opts, :do)
-    validate_stage_opts(rest_opts, meta) ++ validate_stage_body(block)
+    with_keyword(opts, meta, fn ->
+      {block, rest_opts} = Keyword.pop(opts, :do)
+      validate_stage_opts(rest_opts, meta) ++ validate_stage_body(block)
+    end)
   end
 
   defp validate_stage_call([opts, [do: block]], meta) when is_list(opts) do
@@ -148,8 +154,10 @@ defmodule TinyCI.DSL.Validator do
   defp validate_stage_call(_, meta), do: [diag("stage requires a keyword options list", meta)]
 
   defp validate_stage_opts(opts, meta) do
-    unknown_option_diags(opts, :stage, "stage", meta) ++
-      Enum.flat_map(opts, &validate_stage_opt(&1, meta))
+    with_keyword(opts, meta, fn ->
+      unknown_option_diags(opts, :stage, "stage", meta) ++
+        Enum.flat_map(opts, &validate_stage_opt(&1, meta))
+    end)
   end
 
   defp validate_stage_opt({:mode, mode}, _meta) when mode in [:serial, :parallel], do: []
@@ -222,6 +230,9 @@ defmodule TinyCI.DSL.Validator do
     end)
   end
 
+  defp validate_matrix_values(key, [], meta),
+    do: [diag("Matrix values for :#{key} must be nonempty", meta)]
+
   defp validate_matrix_values(key, values, meta) do
     Enum.flat_map(values, fn
       v when is_binary(v) -> []
@@ -231,8 +242,10 @@ defmodule TinyCI.DSL.Validator do
 
   defp validate_stage_body(nil), do: []
 
-  defp validate_stage_body(block),
-    do: block |> unwrap_block() |> Enum.flat_map(&validate_stage_expr/1)
+  defp validate_stage_body(block) do
+    expressions = unwrap_block(block)
+    duplicate_names(expressions, :step) ++ Enum.flat_map(expressions, &validate_stage_expr/1)
+  end
 
   defp validate_stage_expr({:step, meta, [name | rest]}) when is_atom(name),
     do: validate_step_call(rest, meta)
@@ -257,25 +270,33 @@ defmodule TinyCI.DSL.Validator do
   # ---------------------------------------------------------------------------
 
   defp validate_step_call([opts], meta) when is_list(opts) do
-    {block, rest_opts} = Keyword.pop(opts, :do)
-    validate_step_opts(rest_opts, meta) ++ validate_step_body(block)
+    with_keyword(opts, meta, fn ->
+      {block, rest_opts} = Keyword.pop(opts, :do)
+      validate_step_opts(rest_opts, meta) ++ validate_step_body(block)
+    end)
   end
 
   defp validate_step_call([opts, [do: block]], meta) when is_list(opts) do
     validate_step_opts(opts, meta) ++ validate_step_body(block)
   end
 
+  defp validate_step_call([], meta), do: validate_step_opts([], meta)
   defp validate_step_call(_, meta), do: [diag("step requires a keyword options list", meta)]
 
   defp validate_step_opts(opts, meta) do
-    unknown_option_diags(opts, :step, "step", meta) ++
-      Enum.flat_map(opts, &validate_step_opt(&1, meta))
+    with_keyword(opts, meta, fn ->
+      action_diagnostics(opts, meta) ++
+        unknown_option_diags(opts, :step, "step", meta) ++
+        Enum.flat_map(opts, &validate_step_opt(&1, meta))
+    end)
   end
 
   defp validate_step_opt({:cmd, v}, _meta) when is_binary(v), do: []
   defp validate_step_opt({:cmd, _}, meta), do: [diag("Step :cmd must be a string literal", meta)]
 
-  defp validate_step_opt({:module, {:__aliases__, _, _}}, _meta), do: []
+  defp validate_step_opt({:module, {:__aliases__, _, parts}}, meta),
+    do: validate_module_alias(parts, meta)
+
   defp validate_step_opt({:module, m}, _meta) when is_atom(m) and not is_nil(m), do: []
 
   defp validate_step_opt({:module, _}, meta),
@@ -339,6 +360,12 @@ defmodule TinyCI.DSL.Validator do
   defp validate_step_opt(_opt, _meta), do: []
 
   defp validate_cache_spec(spec, meta) do
+    with_keyword(spec, meta, fn ->
+      required_options(spec, [:key, :paths], "cache", meta) ++ cache_options(spec, meta)
+    end)
+  end
+
+  defp cache_options(spec, meta) do
     Enum.flat_map(spec, fn
       {:paths, paths} when is_list(paths) ->
         Enum.flat_map(paths, fn
@@ -361,6 +388,12 @@ defmodule TinyCI.DSL.Validator do
   end
 
   defp validate_artifact_spec(spec, meta) do
+    with_keyword(spec, meta, fn ->
+      required_options(spec, [:name, :paths], "artifact", meta) ++ artifact_options(spec, meta)
+    end)
+  end
+
+  defp artifact_options(spec, meta) do
     Enum.flat_map(spec, fn
       {:name, name} when is_binary(name) ->
         []
@@ -393,7 +426,21 @@ defmodule TinyCI.DSL.Validator do
   defp validate_step_body(block),
     do: block |> unwrap_block() |> Enum.flat_map(&validate_set_expr/1)
 
-  defp validate_set_expr({:set, _, [k, _v]}) when is_atom(k), do: []
+  defp validate_set_expr({:set, meta, [k, value]}) when is_atom(k) do
+    case Value.normalize(value) do
+      {:ok, _} ->
+        []
+
+      {:error, node} ->
+        [
+          diag(
+            "Invalid config value: #{Macro.to_string(node)}. " <>
+              "Only literals and store(:key) references are allowed.",
+            meta_or(meta_of(node), meta)
+          )
+        ]
+    end
+  end
 
   defp validate_set_expr({:set, meta, _}),
     do: [diag("set/2 key must be an atom, e.g. `set :app, \"my-app\"`", meta)]
@@ -406,26 +453,35 @@ defmodule TinyCI.DSL.Validator do
   # ---------------------------------------------------------------------------
 
   defp validate_hook_call([opts], meta) when is_list(opts) do
-    {block, rest_opts} = Keyword.pop(opts, :do)
-    validate_hook_opts(rest_opts, meta) ++ validate_hook_body(block)
+    with_keyword(opts, meta, fn ->
+      {block, rest_opts} = Keyword.pop(opts, :do)
+      validate_hook_opts(rest_opts, meta) ++ validate_hook_body(block)
+    end)
   end
 
   defp validate_hook_call([opts, [do: block]], meta) when is_list(opts) do
     validate_hook_opts(opts, meta) ++ validate_hook_body(block)
   end
 
+  defp validate_hook_call([], meta), do: validate_hook_opts([], meta)
+
   defp validate_hook_call(_, meta),
     do: [diag("on_success/on_failure requires a keyword options list", meta)]
 
   defp validate_hook_opts(opts, meta) do
-    unknown_option_diags(opts, :hook, "hook", meta) ++
-      Enum.flat_map(opts, &validate_hook_opt(&1, meta))
+    with_keyword(opts, meta, fn ->
+      action_diagnostics(opts, meta) ++
+        unknown_option_diags(opts, :hook, "hook", meta) ++
+        Enum.flat_map(opts, &validate_hook_opt(&1, meta))
+    end)
   end
 
   defp validate_hook_opt({:cmd, v}, _meta) when is_binary(v), do: []
   defp validate_hook_opt({:cmd, _}, meta), do: [diag("Hook :cmd must be a string literal", meta)]
 
-  defp validate_hook_opt({:module, {:__aliases__, _, _}}, _meta), do: []
+  defp validate_hook_opt({:module, {:__aliases__, _, parts}}, meta),
+    do: validate_module_alias(parts, meta)
+
   defp validate_hook_opt({:module, m}, _meta) when is_atom(m) and not is_nil(m), do: []
 
   defp validate_hook_opt({:module, _}, meta),
@@ -466,7 +522,57 @@ defmodule TinyCI.DSL.Validator do
 
       {_, _} ->
         [diag("Env map values must be string literals or store(:key) references", meta)]
+
+      _ ->
+        [diag("Env map must contain literal key/value pairs", meta)]
     end)
+  end
+
+  defp with_keyword(options, meta, fun) do
+    if Keyword.keyword?(options),
+      do: fun.(),
+      else: [diag("Expected a keyword options list", meta)]
+  end
+
+  defp action_diagnostics(options, meta) do
+    if length(Keyword.take(options, [:cmd, :module])) == 1 do
+      []
+    else
+      [diag("Specify exactly one of :cmd or :module", meta)]
+    end
+  end
+
+  defp required_options(options, keys, label, meta) do
+    for key <- keys,
+        not Keyword.has_key?(options, key),
+        do: diag("#{label} requires :#{key}", meta)
+  end
+
+  defp validate_module_alias(parts, meta) do
+    if parts != [] and Enum.all?(parts, &is_atom/1),
+      do: [],
+      else: [diag(":module must be a literal module alias", meta)]
+  end
+
+  defp duplicate_names(expressions, directive) do
+    expressions
+    |> Enum.reduce({MapSet.new(), []}, fn
+      {^directive, meta, [name | _]}, {seen, errors} ->
+        key = if directive == :name, do: :name, else: name
+
+        message =
+          if directive == :name,
+            do: "Only one name directive is allowed",
+            else: "Duplicate #{directive} name #{inspect(name)}"
+
+        errors = if MapSet.member?(seen, key), do: [diag(message, meta) | errors], else: errors
+        {MapSet.put(seen, key), errors}
+
+      _, acc ->
+        acc
+    end)
+    |> elem(1)
+    |> Enum.reverse()
   end
 
   # ---------------------------------------------------------------------------

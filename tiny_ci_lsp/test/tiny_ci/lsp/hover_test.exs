@@ -64,7 +64,7 @@ defmodule TinyCI.LSP.HoverTest do
 
     test "env inside a when value resolves to the primitive" do
       assert value("stage :b, when: en|v(\"CI\") != nil do\nend") =~
-               "environment variable, or nil"
+               "effective scoped environment"
     end
   end
 

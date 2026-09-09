@@ -77,6 +77,13 @@ defmodule TinyCI.Control.ServerTest do
   end
 
   describe "addressing" do
+    test "a dead process is not an addressable control server", ctx do
+      server = start_server(ctx)
+      GenServer.stop(server)
+      assert Server.whereis(server) == {:error, :not_found}
+      assert Server.whereis(ctx.run_id) == {:error, :not_found}
+    end
+
     test "registers under the run id so any process can reach it", ctx do
       server = start_server(ctx)
       assert Server.whereis(ctx.run_id) == {:ok, server}

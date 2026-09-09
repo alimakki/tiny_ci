@@ -145,15 +145,10 @@ defmodule Mix.Tasks.TinyCi.Run do
         true -> run_or_error(opts, root, name, filter)
       end
 
-    maybe_halt(result)
-    result
-  end
-
-  defp maybe_halt(:ok), do: halt_unless_test(0)
-  defp maybe_halt({:error, _}), do: halt_unless_test(1)
-
-  defp halt_unless_test(code) do
-    if Mix.env() != :test, do: System.halt(code)
+    case result do
+      :ok -> :ok
+      {:error, reason} -> Mix.raise("TinyCI run failed: #{inspect(reason)}")
+    end
   end
 
   defp parse_output_format(nil), do: {:ok, :human}
@@ -194,7 +189,7 @@ defmodule Mix.Tasks.TinyCi.Run do
 
   defp load_and_announce(path, output_format) do
     with {:ok, spec} <- Discovery.load_pipeline(path) do
-      if output_format != :json, do: IO.puts("Found pipeline: #{path}")
+      if output_format == :human, do: IO.puts("Found pipeline: #{path}")
       {:ok, spec}
     end
   end
@@ -217,6 +212,12 @@ defmodule Mix.Tasks.TinyCi.Run do
 
   defp run_or_error(opts, root, name, filter) do
     with {:ok, output_format} <- parse_output_format(opts[:output]) do
+      if opts[:events] == "-" and output_format == :json do
+        Mix.raise("--events - and --output json cannot share stdout")
+      end
+
+      output_format = if opts[:events] == "-", do: :events, else: output_format
+
       case resolve_pipeline(opts, root, name, output_format) do
         {:ok, spec} -> run_resolved(spec, opts, root, filter, output_format)
         {:error, reason} -> handle_error(reason)
@@ -382,7 +383,7 @@ defmodule Mix.Tasks.TinyCi.Run do
 
   # The terminal REPL only makes sense when a human is at an ANSI terminal and
   # stdout is not already committed to machine-readable JSON.
-  defp start_control_driver(:json), do: {:ok, [], false}
+  defp start_control_driver(format) when format in [:json, :events], do: {:ok, [], false}
 
   defp start_control_driver(_human) do
     if IO.ANSI.enabled?() do
@@ -556,27 +557,35 @@ defmodule Mix.Tasks.TinyCi.Run do
   defp execute_pipeline(
          %TinyCI.PipelineSpec{name: name, stages: stages, hooks: hooks} = spec,
          filter,
-         :json,
+         format,
          run_opts
-       ) do
+       )
+       when format in [:json, :events] do
     context = build_context(spec, run_opts)
 
-    pipeline_result =
-      Executor.run_pipeline(
-        stages,
-        context,
-        Keyword.merge(run_opts,
-          filter: filter,
-          output: :buffered,
-          listener: Listener.Silent,
-          pipeline_name: name
+    {duration_us, pipeline_result} =
+      :timer.tc(fn ->
+        Executor.run_pipeline(
+          stages,
+          context,
+          Keyword.merge(run_opts,
+            filter: filter,
+            output: :buffered,
+            listener: Listener.Silent,
+            pipeline_name: name
+          )
         )
-      )
+      end)
 
     stage_results = extract_stage_results(pipeline_result)
 
-    IO.puts(Results.to_json(simplify_result(pipeline_result), stage_results))
-    Hooks.run_hooks(hooks, hook_event(pipeline_result), context)
+    if format == :json do
+      IO.puts(
+        Results.to_json(simplify_result(pipeline_result), stage_results, div(duration_us, 1000))
+      )
+    end
+
+    Hooks.run_hooks(hooks, hook_event(pipeline_result), hook_context(context, stage_results))
 
     case pipeline_result do
       {:ok, _} -> :ok
@@ -597,13 +606,13 @@ defmodule Mix.Tasks.TinyCi.Run do
     case Executor.run_pipeline(stages, context, run_opts) do
       {:ok, stage_results} ->
         Reporter.print_summary(stage_results)
-        Hooks.run_hooks(hooks, :on_success, context)
+        Hooks.run_hooks(hooks, :on_success, hook_context(context, stage_results))
         IO.puts([IO.ANSI.green(), "Pipeline completed successfully.", IO.ANSI.reset()])
         :ok
 
       {:error, reason, stage_results} ->
         Reporter.print_summary(stage_results)
-        Hooks.run_hooks(hooks, :on_failure, context)
+        Hooks.run_hooks(hooks, :on_failure, hook_context(context, stage_results))
         IO.puts(:stderr, [IO.ANSI.red(), failure_message(reason), IO.ANSI.reset()])
         {:error, :pipeline_failed}
     end
@@ -615,6 +624,15 @@ defmodule Mix.Tasks.TinyCi.Run do
     do: "Pipeline aborted by execution control at stage :#{stage}."
 
   defp failure_message(_reason), do: "Pipeline failed."
+
+  defp hook_context(context, results) do
+    store =
+      Enum.reduce(results, context.store, fn result, store ->
+        Map.merge(store, result.store_delta)
+      end)
+
+    Map.put(context, :store, store)
+  end
 
   defp list_artifacts(root, artifacts_dir_override) do
     base_root = artifacts_dir_override || root

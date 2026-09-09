@@ -455,8 +455,7 @@ defmodule TinyCI.IntegrationTest do
       """)
 
       capture_io(fn ->
-        result = Mix.Tasks.TinyCi.Run.run(["--file", path])
-        assert result == {:error, :pipeline_failed}
+        assert_raise Mix.Error, fn -> Mix.Tasks.TinyCi.Run.run(["--file", path]) end
       end)
 
       assert File.exists?(output_path)

@@ -43,8 +43,9 @@ defmodule TinyCI.Sandbox.Backend.Bubblewrap do
           env_args(policy, scratch, request_path, response_path) ++
           ["--"] ++ Runtime.elixir_command()
 
-      case System.cmd("bwrap", args, stderr_to_stdout: true) do
+      case TinyCI.Output.run_executable("bwrap", args, mode: :buffered, timeout: opts[:timeout]) do
         {_out, 0} -> Runtime.read_response(response_path)
+        {_out, :timeout} -> {:error, :timeout}
         {out, code} -> {:error, {:sandbox_exit, code, String.trim(String.slice(out, 0, 800))}}
       end
     after

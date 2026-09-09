@@ -552,7 +552,7 @@ defmodule TinyCI.DSL.ValidatorTest do
                diagnostics("""
                stage :test do
                  step :unit, cmd: "mix test"
-                 step :lint, bogus: true
+                  step :lint, cmd: "mix credo", bogus: true
                end
                """)
 

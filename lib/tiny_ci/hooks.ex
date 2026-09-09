@@ -26,7 +26,9 @@ defmodule TinyCI.Hooks do
       @spec run(keyword(), map()) :: :ok | {:error, reason :: term()}
   """
 
-  alias TinyCI.Executor.{Crash, Env}
+  alias TinyCI.Executor.{Callback, Driver, Env}
+  alias TinyCI.DSL.Value
+  alias TinyCI.Redaction
   alias TinyCI.Hook
   alias TinyCI.Output
 
@@ -63,7 +65,7 @@ defmodule TinyCI.Hooks do
 
   defp run_hook(%Hook{name: name, cmd: cmd, env: env, timeout: timeout}, context)
        when not is_nil(cmd) do
-    IO.puts("Hook: #{name}")
+    IO.puts(:stderr, "Hook: #{name}")
     store = Map.get(context, :store, %{})
     hook_env = build_hook_env(context)
     resolved_env = resolve_env(env, store)
@@ -79,6 +81,7 @@ defmodule TinyCI.Hooks do
            mode: :buffered,
            env: merged_env,
            timeout: actual_timeout,
+           working_dir: Map.get(context, :root),
            redact: redact
          ) do
       {:passed, _output} ->
@@ -94,33 +97,42 @@ defmodule TinyCI.Hooks do
     end
   end
 
-  defp run_hook(%Hook{name: name, module: module, config_block: block}, context)
+  defp run_hook(%Hook{name: name, module: module, config_block: block} = hook, context)
        when not is_nil(module) do
-    IO.puts("Hook: #{name}")
-    config = if block, do: block.(), else: []
+    IO.puts(:stderr, "Hook: #{name}")
+    redact = Map.get(context, :secret_values, [])
+    context = Map.put(context, :env, Env.resolve(context, hook.env))
 
-    case invoke_module_hook(module, config, context) do
+    {outcome, output} =
+      Callback.run(fn -> invoke_module_hook(module, block, context) end, hook.timeout)
+
+    if output != "", do: IO.write(:stderr, Redaction.redact(output, redact))
+
+    case outcome do
       :ok ->
         :ok
 
+      {:error, :timeout} ->
+        IO.puts(:stderr, "Hook #{name} timed out after #{hook.timeout}ms")
+        :ok
+
       {:error, {:crashed, text}} ->
-        IO.puts(:stderr, "Hook #{name} failed: #{text}")
+        IO.puts(:stderr, Redaction.redact("Hook #{name} failed: #{text}", redact))
         :ok
 
       {:error, reason} ->
-        IO.puts(:stderr, "Hook #{name} failed: #{inspect(reason)}")
+        IO.puts(:stderr, Redaction.redact("Hook #{name} failed: #{inspect(reason)}", redact))
         :ok
     end
   end
 
-  # A raising hook is reported like a hook that returned `{:error, _}`: it must
-  # not abort the remaining hooks, and hooks never affect the exit code.
-  defp invoke_module_hook(module, config, context) do
-    apply(module, :run, [config, context])
-  rescue
-    e -> {:error, {:crashed, Crash.format(:error, e, __STACKTRACE__)}}
-  catch
-    kind, reason -> {:error, {:crashed, Crash.format(kind, reason, __STACKTRACE__)}}
+  defp invoke_module_hook(module, block, context) do
+    if TinyCI.Sandbox.Trust.trusted?(module, Driver.opts(context)) do
+      config = Value.resolve(if(block, do: block.(), else: []), Map.get(context, :store, %{}))
+      apply(module, :run, [config, context])
+    else
+      {:error, {:untrusted_hook, module}}
+    end
   end
 
   defp build_hook_env(context) do

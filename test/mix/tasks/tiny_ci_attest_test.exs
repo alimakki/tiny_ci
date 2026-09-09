@@ -109,8 +109,9 @@ defmodule Mix.Tasks.TinyCi.AttestTest do
       stderr =
         capture_io(:stderr, fn ->
           capture_io(fn ->
-            assert Mix.Tasks.TinyCi.Run.run(["--file", path, "--attest", out]) ==
-                     {:error, :attestation_failed}
+            assert_raise Mix.Error, fn ->
+              Mix.Tasks.TinyCi.Run.run(["--file", path, "--attest", out])
+            end
           end)
         end)
 
@@ -133,22 +134,24 @@ defmodule Mix.Tasks.TinyCi.AttestTest do
       stderr =
         capture_io(:stderr, fn ->
           capture_io(fn ->
-            assert Mix.Tasks.TinyCi.Run.run([
-                     "--file",
-                     path,
-                     "--attest",
-                     out,
-                     "--signing-key",
-                     key,
-                     "--events",
-                     events,
-                     "--break",
-                     "before:build.compile",
-                     "--break-timeout",
-                     "5000",
-                     "--break-timeout-action",
-                     "continue"
-                   ]) == {:error, :attestation_failed}
+            assert_raise Mix.Error, fn ->
+              Mix.Tasks.TinyCi.Run.run([
+                "--file",
+                path,
+                "--attest",
+                out,
+                "--signing-key",
+                key,
+                "--events",
+                events,
+                "--break",
+                "before:build.compile",
+                "--break-timeout",
+                "5000",
+                "--break-timeout-action",
+                "continue"
+              ])
+            end
           end)
         end)
 

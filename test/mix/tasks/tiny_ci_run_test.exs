@@ -57,7 +57,7 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       assert output =~ "Pipeline completed successfully"
     end
 
-    test "runs a failing pipeline and returns error", %{project_root: root} do
+    test "runs a failing pipeline and raises a Mix error", %{project_root: root} do
       path = Path.join(root, "tiny_ci.exs")
 
       File.write!(path, """
@@ -70,22 +70,49 @@ defmodule Mix.Tasks.TinyCi.RunTest do
         capture_io(:stderr, fn ->
           _stdout =
             capture_io(fn ->
-              result = Mix.Tasks.TinyCi.Run.run(["--file", path])
-              assert result == {:error, :pipeline_failed}
+              assert_raise Mix.Error, fn ->
+                Mix.Tasks.TinyCi.Run.run(["--file", path])
+              end
             end)
         end)
 
       assert stderr =~ "Pipeline failed"
     end
 
-    test "returns error when no pipeline file found" do
+    test "raises a Mix error when no pipeline file found" do
       stderr =
         capture_io(:stderr, fn ->
-          result = Mix.Tasks.TinyCi.Run.run(["--file", "/nonexistent/path/tiny_ci.exs"])
-          assert result == {:error, :no_pipeline}
+          assert_raise Mix.Error, fn ->
+            Mix.Tasks.TinyCi.Run.run(["--file", "/nonexistent/path/tiny_ci.exs"])
+          end
         end)
 
       assert stderr =~ "not found"
+    end
+
+    test "a failed step exits nonzero in a real MIX_ENV=test subprocess", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+      File.write!(path, "stage :fail do\n  step :boom, cmd: \"exit 1\"\nend\n")
+
+      {output, status} =
+        System.cmd("mix", ["tiny_ci.run", "--file", path, "--root", root],
+          env: [{"MIX_ENV", "test"}, {"ERL_FLAGS", "+S 2:2"}],
+          stderr_to_stdout: true
+        )
+
+      assert output =~ "Pipeline failed"
+      assert status == 1
+    end
+
+    test "invalid input exits nonzero in a real MIX_ENV=test subprocess" do
+      {output, status} =
+        System.cmd("mix", ["tiny_ci.run", "--output", "xml"],
+          env: [{"MIX_ENV", "test"}, {"ERL_FLAGS", "+S 2:2"}],
+          stderr_to_stdout: true
+        )
+
+      assert output =~ "Unknown --output format"
+      assert status == 1
     end
 
     test "accepts --file flag to specify pipeline path", %{project_root: root} do
@@ -187,13 +214,14 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       assert output =~ "Pipeline completed successfully"
     end
 
-    test "returns error when named pipeline does not exist", %{project_root: root} do
+    test "raises a Mix error when named pipeline does not exist", %{project_root: root} do
       stderr =
         capture_io(:stderr, fn ->
           _stdout =
             capture_io(fn ->
-              result = Mix.Tasks.TinyCi.Run.run(["--root", root, "nonexistent"])
-              assert result == {:error, :no_pipeline}
+              assert_raise Mix.Error, fn ->
+                Mix.Tasks.TinyCi.Run.run(["--root", root, "nonexistent"])
+              end
             end)
         end)
 
@@ -321,7 +349,7 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       assert output =~ "Pipeline completed successfully"
     end
 
-    test "--filter with unknown stage name prints error and returns error", %{project_root: root} do
+    test "--filter with unknown stage name prints error and raises", %{project_root: root} do
       path = Path.join(root, "tiny_ci.exs")
 
       File.write!(path, """
@@ -334,8 +362,9 @@ defmodule Mix.Tasks.TinyCi.RunTest do
         capture_io(:stderr, fn ->
           _stdout =
             capture_io(fn ->
-              result = Mix.Tasks.TinyCi.Run.run(["--file", path, "--filter", ":nonexistent"])
-              assert result == {:error, :no_pipeline}
+              assert_raise Mix.Error, fn ->
+                Mix.Tasks.TinyCi.Run.run(["--file", path, "--filter", ":nonexistent"])
+              end
             end)
         end)
 
@@ -406,7 +435,70 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       refute output =~ "Found pipeline"
     end
 
-    test "--output json on failed pipeline has status failed and returns error", %{
+    test "--output json remains valid with a shell hook", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      on_success :notify, cmd: "echo hook-output"
+      stage :test do
+        step :unit, cmd: "true"
+      end
+      """)
+
+      {stdout, stderr} =
+        with_stderr(fn -> Mix.Tasks.TinyCi.Run.run(["--file", path, "--output", "json"]) end)
+
+      assert stdout.result == :ok
+      assert {:ok, %{"status" => "passed"}} = Jason.decode(stdout.output)
+      assert stderr =~ "Hook: notify"
+    end
+
+    test "--output json reports concurrent wall time rather than summed stage time", %{
+      project_root: root
+    } do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :left do
+        step :work, cmd: "true"
+      end
+      stage :right do
+        step :work, cmd: "true"
+      end
+      stage :join, needs: [:left, :right] do
+        step :finish, cmd: "true"
+      end
+      """)
+
+      # Step breakpoints keep both stage clocks running concurrently for a known
+      # interval, without sleeping or relying on expensive fixture commands.
+      {elapsed_us, output} =
+        :timer.tc(fn ->
+          capture_io(fn ->
+            assert :ok =
+                     Mix.Tasks.TinyCi.Run.run([
+                       "--file",
+                       path,
+                       "--output",
+                       "json",
+                       "--break",
+                       "before:left.work",
+                       "--break",
+                       "before:right.work",
+                       "--break-timeout",
+                       "200",
+                       "--break-timeout-action",
+                       "continue"
+                     ])
+          end)
+        end)
+
+      assert {:ok, json} = Jason.decode(output)
+      assert json["duration_ms"] >= 200
+      assert json["duration_ms"] <= div(elapsed_us, 1000) + 1
+    end
+
+    test "--output json on failed pipeline has status failed and raises", %{
       project_root: root
     } do
       path = Path.join(root, "tiny_ci.exs")
@@ -419,8 +511,9 @@ defmodule Mix.Tasks.TinyCi.RunTest do
 
       output =
         capture_io(fn ->
-          result = Mix.Tasks.TinyCi.Run.run(["--file", path, "--output", "json"])
-          assert result == {:error, :pipeline_failed}
+          assert_raise Mix.Error, fn ->
+            Mix.Tasks.TinyCi.Run.run(["--file", path, "--output", "json"])
+          end
         end)
 
       assert {:ok, json} = Jason.decode(output)
@@ -448,7 +541,7 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       assert hd(stage["steps"])["name"] == "compile"
     end
 
-    test "unknown --output value prints error and returns error", %{project_root: root} do
+    test "unknown --output value prints error and raises", %{project_root: root} do
       path = Path.join(root, "tiny_ci.exs")
 
       File.write!(path, """
@@ -461,8 +554,9 @@ defmodule Mix.Tasks.TinyCi.RunTest do
         capture_io(:stderr, fn ->
           _stdout =
             capture_io(fn ->
-              result = Mix.Tasks.TinyCi.Run.run(["--file", path, "--output", "xml"])
-              assert result == {:error, :no_pipeline}
+              assert_raise Mix.Error, fn ->
+                Mix.Tasks.TinyCi.Run.run(["--file", path, "--output", "xml"])
+              end
             end)
         end)
 
@@ -470,7 +564,7 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       assert stderr =~ "json"
     end
 
-    test "returns validation error for legacy defmodule format", %{project_root: root} do
+    test "raises validation error for legacy defmodule format", %{project_root: root} do
       path = Path.join(root, "tiny_ci.exs")
 
       File.write!(path, """
@@ -487,8 +581,9 @@ defmodule Mix.Tasks.TinyCi.RunTest do
         capture_io(:stderr, fn ->
           _stdout =
             capture_io(fn ->
-              result = Mix.Tasks.TinyCi.Run.run(["--file", path])
-              assert result == {:error, :no_pipeline}
+              assert_raise Mix.Error, fn ->
+                Mix.Tasks.TinyCi.Run.run(["--file", path])
+              end
             end)
         end)
 
@@ -558,9 +653,13 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       path = secret_pipeline(root)
 
       {stdout, stderr} =
-        with_stderr(fn -> Mix.Tasks.TinyCi.Run.run(["--file", path, "--root", root]) end)
+        with_stderr(fn ->
+          assert_raise Mix.Error, fn ->
+            Mix.Tasks.TinyCi.Run.run(["--file", path, "--root", root])
+          end
+        end)
 
-      assert {:error, :missing_secrets} = stdout.result
+      assert %Mix.Error{} = stdout.result
       assert stderr =~ "Missing secrets: TC_M003_TOKEN"
       assert stderr =~ ".tiny_ci/secrets"
       refute stdout.output =~ "token="
@@ -631,6 +730,51 @@ defmodule Mix.Tasks.TinyCi.RunTest do
   end
 
   describe "--events" do
+    test "hooks receive completed DAG writes rather than the initial store", %{project_root: root} do
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :write do
+        step :write, module: TinyCI.RegressionActions
+      end
+      stage :noop do
+        step :noop, cmd: "true"
+      end
+      stage :next, needs: [:write, :noop] do
+      end
+      on_success :verify, cmd: "test $TAG = new", env: %{"TAG" => store(:tag)}
+      """)
+
+      {stdout, stderr} =
+        with_stderr(fn -> Mix.Tasks.TinyCi.Run.run(["--file", path, "--output", "json"]) end)
+
+      assert {:ok, %{"status" => "passed"}} = Jason.decode(stdout.output)
+      assert stderr =~ "Hook: verify"
+      refute stderr =~ "failed"
+    end
+
+    test "stdout contains only events, even with discovery and hooks", %{project_root: root} do
+      File.write!(Path.join(root, "tiny_ci.exs"), """
+      on_success :notify, cmd: "true"
+      stage :hello do
+        step :hello, cmd: "echo hello"
+      end
+      """)
+
+      {stdout, _stderr} =
+        with_stderr(fn -> Mix.Tasks.TinyCi.Run.run(["--root", root, "--events", "-"]) end)
+
+      events = stdout.output |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
+      assert Enum.all?(events, &Map.has_key?(&1, "type"))
+      assert List.last(events)["type"] == "run_finished"
+    end
+
+    test "rejects two machine formats sharing stdout", %{project_root: root} do
+      assert_raise Mix.Error, ~r/cannot share stdout/, fn ->
+        Mix.Tasks.TinyCi.Run.run(["--root", root, "--events", "-", "--output", "json"])
+      end
+    end
+
     test "writes a valid NDJSON event stream to a file", %{project_root: root} do
       path = Path.join(root, "tiny_ci.exs")
       events_path = Path.join(root, "run.ndjson")
@@ -725,8 +869,9 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       stderr =
         capture_io(:stderr, fn ->
           capture_io(fn ->
-            assert {:error, :no_pipeline} =
-                     Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "before:deploy"])
+            assert_raise Mix.Error, fn ->
+              Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "before:deploy"])
+            end
           end)
         end)
 
@@ -740,8 +885,9 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       stderr =
         capture_io(:stderr, fn ->
           capture_io(fn ->
-            assert {:error, :no_pipeline} =
-                     Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "during:deploy"])
+            assert_raise Mix.Error, fn ->
+              Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "during:deploy"])
+            end
           end)
         end)
 
@@ -755,8 +901,9 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       stderr =
         capture_io(:stderr, fn ->
           capture_io(fn ->
-            assert {:error, :no_pipeline} =
-                     Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "before:nope"])
+            assert_raise Mix.Error, fn ->
+              Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "before:nope"])
+            end
           end)
         end)
 
@@ -770,8 +917,9 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       stderr =
         capture_io(:stderr, fn ->
           capture_io(fn ->
-            assert {:error, :no_pipeline} =
-                     Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "after:test.nope"])
+            assert_raise Mix.Error, fn ->
+              Mix.Tasks.TinyCi.Run.run(["--file", path, "--break", "after:test.nope"])
+            end
           end)
         end)
 
@@ -785,14 +933,16 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       stderr =
         capture_io(:stderr, fn ->
           capture_io(fn ->
-            Mix.Tasks.TinyCi.Run.run([
-              "--file",
-              path,
-              "--break",
-              "during:deploy",
-              "--break",
-              "sideways:test"
-            ])
+            assert_raise Mix.Error, fn ->
+              Mix.Tasks.TinyCi.Run.run([
+                "--file",
+                path,
+                "--break",
+                "during:deploy",
+                "--break",
+                "sideways:test"
+              ])
+            end
           end)
         end)
 
@@ -806,15 +956,16 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       stderr =
         capture_io(:stderr, fn ->
           capture_io(fn ->
-            assert {:error, :no_pipeline} =
-                     Mix.Tasks.TinyCi.Run.run([
-                       "--file",
-                       path,
-                       "--break",
-                       "before:deploy",
-                       "--break-timeout-action",
-                       "sideways"
-                     ])
+            assert_raise Mix.Error, fn ->
+              Mix.Tasks.TinyCi.Run.run([
+                "--file",
+                path,
+                "--break",
+                "before:deploy",
+                "--break-timeout-action",
+                "sideways"
+              ])
+            end
           end)
         end)
 
@@ -828,15 +979,16 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       stderr =
         capture_io(:stderr, fn ->
           capture_io(fn ->
-            assert {:error, :no_pipeline} =
-                     Mix.Tasks.TinyCi.Run.run([
-                       "--file",
-                       path,
-                       "--break",
-                       "before:deploy",
-                       "--break-timeout",
-                       "0"
-                     ])
+            assert_raise Mix.Error, fn ->
+              Mix.Tasks.TinyCi.Run.run([
+                "--file",
+                path,
+                "--break",
+                "before:deploy",
+                "--break-timeout",
+                "0"
+              ])
+            end
           end)
         end)
 
@@ -850,17 +1002,18 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       stderr =
         capture_io(:stderr, fn ->
           capture_io(fn ->
-            assert {:error, :pipeline_failed} =
-                     Mix.Tasks.TinyCi.Run.run([
-                       "--file",
-                       path,
-                       "--break",
-                       "before:deploy",
-                       "--break-timeout",
-                       "50",
-                       "--events",
-                       events_path
-                     ])
+            assert_raise Mix.Error, fn ->
+              Mix.Tasks.TinyCi.Run.run([
+                "--file",
+                path,
+                "--break",
+                "before:deploy",
+                "--break-timeout",
+                "50",
+                "--events",
+                events_path
+              ])
+            end
           end)
         end)
 
@@ -884,6 +1037,30 @@ defmodule Mix.Tasks.TinyCi.RunTest do
 
       # The abort surfaces as its own status, not as a test failure.
       assert Enum.find(events, &(&1["type"] == "run_finished"))["status"] == "aborted"
+    end
+
+    test "--output json preserves aborted status", %{project_root: root} do
+      path = two_stage_pipeline(root)
+
+      output =
+        capture_io(fn ->
+          assert_raise Mix.Error, fn ->
+            Mix.Tasks.TinyCi.Run.run([
+              "--file",
+              path,
+              "--output",
+              "json",
+              "--break",
+              "before:deploy",
+              "--break-timeout",
+              "1"
+            ])
+          end
+        end)
+
+      assert {:ok, json} = Jason.decode(output)
+      assert json["status"] == "aborted"
+      assert Enum.find(json["stages"], &(&1["name"] == "deploy"))["status"] == "aborted"
     end
 
     test "--break-timeout-action continue lets the run finish", %{project_root: root} do

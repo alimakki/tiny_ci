@@ -237,7 +237,8 @@ defmodule TinyCI.DSL.Spec do
       kind: :option,
       contexts: [:step],
       type: "keyword list — paths: [string], key: string",
-      summary: "Restores/saves the given paths keyed by a file's contents.",
+      summary:
+        "Caches paths by file contents and execution inputs; module actions still execute.",
       example: ~s|cache: [paths: ["deps", "_build"], key: "mix.lock"]|
     },
     %Entry{
@@ -299,7 +300,7 @@ defmodule TinyCI.DSL.Spec do
       kind: :primitive,
       contexts: [:condition],
       type: "(String.t()) :: String.t() | nil",
-      summary: "The value of an OS environment variable, or nil when unset.",
+      summary: "The effective scoped environment value, falling back to the OS environment.",
       example: ~s|env("CI") != nil|
     },
     %Entry{

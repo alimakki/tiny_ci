@@ -77,11 +77,13 @@ defmodule TinyCI.Control.Server do
   armed no breakpoints or it has already finished.
   """
   @spec whereis(String.t() | pid()) :: {:ok, pid()} | {:error, :not_found}
-  def whereis(server) when is_pid(server), do: {:ok, server}
+  def whereis(server) when is_pid(server) do
+    if Process.alive?(server), do: {:ok, server}, else: {:error, :not_found}
+  end
 
   def whereis(run_id) when is_binary(run_id) do
     case Registry.lookup(TinyCI.Control.Registry, run_id) do
-      [{pid, _}] -> {:ok, pid}
+      [{pid, _}] -> whereis(pid)
       [] -> {:error, :not_found}
     end
   end

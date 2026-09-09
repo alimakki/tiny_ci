@@ -16,13 +16,15 @@ defmodule TinyCI.Results do
     * `pipeline_result` — the raw return value from `Executor.run_pipeline/3`:
       either `:ok` or `{:error, reason}`
     * `stage_results`   — the list of `%StageResult{}` structs from the run
+    * `duration_ms` - measured pipeline wall time; when omitted, stage durations
+      are summed for callers that do not supply a run clock
 
   ## Returns
 
   A JSON-encoded binary string with the shape:
 
       {
-        "status": "passed" | "failed",
+        "status": "passed" | "failed" | "aborted",
         "duration_ms": integer,
         "stages": [
           {
@@ -34,11 +36,16 @@ defmodule TinyCI.Results do
           }
         ]
       }
+
+  ## Examples
+
+      iex> Jason.decode!(TinyCI.Results.to_json(:ok, [], 12))["duration_ms"]
+      12
   """
-  @spec to_json(:ok | {:error, term()}, [StageResult.t()]) :: String.t()
-  def to_json(pipeline_result, stage_results) do
+  @spec to_json(:ok | {:error, term()}, [StageResult.t()], non_neg_integer() | nil) :: String.t()
+  def to_json(pipeline_result, stage_results, duration_ms \\ nil) do
     status = pipeline_status(pipeline_result)
-    total_ms = Enum.sum(Enum.map(stage_results, & &1.duration_ms))
+    total_ms = duration_ms || Enum.sum(Enum.map(stage_results, & &1.duration_ms))
 
     %{
       status: status,
@@ -49,6 +56,7 @@ defmodule TinyCI.Results do
   end
 
   defp pipeline_status(:ok), do: "passed"
+  defp pipeline_status({:error, {:aborted, _stage}}), do: "aborted"
   defp pipeline_status({:error, _}), do: "failed"
 
   defp encode_stage(%StageResult{

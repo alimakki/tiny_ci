@@ -17,8 +17,7 @@ defmodule TinyCI.CacheTest do
       path = Path.join(tmp, "mix.lock")
       File.write!(path, "hello")
       {:ok, key} = Cache.compute_key(path)
-      assert byte_size(key) == 64
-      assert String.match?(key, ~r/^[0-9a-f]+$/)
+      assert key == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
     end
 
     test "same contents produce same key", %{tmp: tmp} do
@@ -43,6 +42,86 @@ defmodule TinyCI.CacheTest do
 
     test "returns error for missing file" do
       assert {:error, _} = Cache.compute_key("/nonexistent/file.lock")
+    end
+  end
+
+  describe "compute_key/2" do
+    @describetag :tmp_dir
+
+    test "includes explicit execution inputs in the cache identity", %{tmp_dir: tmp} do
+      path = Path.join(tmp, "mix.lock")
+      File.write!(path, "locked dependencies")
+
+      inputs = %{
+        command: "mix test",
+        action: nil,
+        runtime: %{elixir: "1.19", otp: "28", os: "linux"},
+        matrix: %{target: "debug"},
+        env: %{"MIX_ENV" => "test"},
+        working_dir: "/project/app"
+      }
+
+      assert {:ok, key} = Cache.compute_key(path, inputs)
+      assert key =~ ~r/^[0-9a-f]{64}$/
+
+      for {field, value} <- [
+            command: "mix compile",
+            action: {"BuildAction", [mode: :release]},
+            runtime: %{elixir: "1.20", otp: "29", os: "darwin"},
+            matrix: %{target: "release"},
+            env: %{"MIX_ENV" => "prod"},
+            working_dir: "/project/other"
+          ] do
+        assert {:ok, changed_key} = Cache.compute_key(path, Map.put(inputs, field, value))
+        refute changed_key == key, "changing #{field} must change the cache key"
+      end
+    end
+
+    test "is deterministic regardless of nested map insertion order", %{tmp_dir: tmp} do
+      path = Path.join(tmp, "mix.lock")
+      File.write!(path, "locked dependencies")
+      pairs = Enum.map(1..40, fn i -> {"ENV_#{i}", "value_#{i}"} end)
+      first = %{env: Map.new(pairs), matrix: %{os: "linux", arch: "arm64"}}
+      second = %{matrix: Map.new(arch: "arm64", os: "linux"), env: Map.new(Enum.reverse(pairs))}
+
+      assert {:ok, key} = Cache.compute_key(path, first)
+      assert {:ok, ^key} = Cache.compute_key(path, second)
+    end
+
+    test "identical file contents and inputs give identical keys across file paths", %{
+      tmp_dir: tmp
+    } do
+      first = Path.join(tmp, "a.lock")
+      second = Path.join(tmp, "b.lock")
+      File.write!(first, "same")
+      File.write!(second, "same")
+
+      assert {:ok, key} = Cache.compute_key(first, %{command: "build"})
+      assert {:ok, ^key} = Cache.compute_key(second, %{command: "build"})
+    end
+
+    test "still includes the nominated file contents", %{tmp_dir: tmp} do
+      path = Path.join(tmp, "mix.lock")
+      File.write!(path, "before")
+      assert {:ok, before} = Cache.compute_key(path, %{command: "build"})
+      File.write!(path, "after")
+      assert {:ok, after_key} = Cache.compute_key(path, %{command: "build"})
+
+      refute before == after_key
+    end
+
+    test "keeps file contents and inputs unambiguously separated", %{tmp_dir: tmp} do
+      path = Path.join(tmp, "mix.lock")
+      File.write!(path, "ab")
+      assert {:ok, first} = Cache.compute_key(path, "c")
+      File.write!(path, "a")
+      assert {:ok, second} = Cache.compute_key(path, "bc")
+
+      refute first == second
+    end
+
+    test "returns file read errors", %{tmp_dir: tmp} do
+      assert {:error, :enoent} = Cache.compute_key(Path.join(tmp, "missing"), %{command: "build"})
     end
   end
 
@@ -245,6 +324,115 @@ defmodule TinyCI.CacheTest do
       Cache.restore(root, key, ["deps"], dst_dir)
 
       assert File.read!(Path.join(dst_dir, "deps/new.ex")) == "new"
+    end
+
+    @tag :tmp_dir
+    test "restore leaves the destination untouched when the entry became incomplete", %{
+      tmp_dir: tmp
+    } do
+      source = Path.join(tmp, "source")
+      destination = Path.join(tmp, "destination")
+      File.mkdir_p!(source)
+      File.mkdir_p!(destination)
+      File.write!(Path.join(source, "deps"), "cached")
+      File.write!(Path.join(source, "build"), "cached build")
+      File.write!(Path.join(destination, "deps"), "original")
+      Cache.save(tmp, "incomplete", ["deps", "build"], source)
+      assert Cache.hit?(tmp, "incomplete", ["deps", "build"])
+      File.rm!(Path.join(Cache.cache_entry_dir(tmp, "incomplete"), "build"))
+
+      assert :ok = Cache.restore(tmp, "incomplete", ["deps", "build"], destination)
+      assert File.read!(Path.join(destination, "deps")) == "original"
+    end
+  end
+
+  describe "restore_if_present/4" do
+    @describetag :tmp_dir
+
+    test "returns a hit only after restoring and touching a complete entry", %{tmp_dir: root} do
+      File.write!(Path.join(root, "output"), "cached")
+      Cache.save(root, "complete", ["output"], nil)
+      meta_path = Path.join(Cache.cache_entry_dir(root, "complete"), ".meta.json")
+      meta = Jason.decode!(File.read!(meta_path))
+      File.write!(meta_path, Jason.encode!(%{meta | "last_used_at" => "2020-01-01T00:00:00Z"}))
+      File.write!(Path.join(root, "output"), "changed")
+
+      assert :hit = Cache.restore_if_present(root, "complete", ["output"], nil)
+      assert File.read!(Path.join(root, "output")) == "cached"
+      assert Jason.decode!(File.read!(meta_path))["last_used_at"] != "2020-01-01T00:00:00Z"
+    end
+
+    test "returns a miss if an entry disappears after an earlier hit", %{tmp_dir: root} do
+      File.write!(Path.join(root, "output"), "cached")
+      Cache.save(root, "evicted", ["output"], nil)
+      assert Cache.hit?(root, "evicted", ["output"])
+      File.rm_rf!(Cache.cache_entry_dir(root, "evicted"))
+      File.write!(Path.join(root, "output"), "original")
+
+      assert :miss = Cache.restore_if_present(root, "evicted", ["output"], nil)
+      assert File.read!(Path.join(root, "output")) == "original"
+    end
+
+    test "does not partially restore or touch an incomplete entry", %{tmp_dir: root} do
+      File.write!(Path.join(root, "output"), "cached")
+      Cache.save(root, "partial", ["output"], nil)
+      meta_path = Path.join(Cache.cache_entry_dir(root, "partial"), ".meta.json")
+      meta = File.read!(meta_path)
+      File.write!(Path.join(root, "output"), "original")
+
+      assert :miss = Cache.restore_if_present(root, "partial", ["output", "missing"], nil)
+      assert File.read!(Path.join(root, "output")) == "original"
+      assert File.read!(meta_path) == meta
+    end
+
+    test "an entry without metadata is a miss", %{tmp_dir: root} do
+      entry = Cache.cache_entry_dir(root, "legacy")
+      File.mkdir_p!(entry)
+      File.write!(Path.join(entry, "output"), "cached")
+
+      assert :miss = Cache.restore_if_present(root, "legacy", ["output"], nil)
+      refute File.exists?(Path.join(root, "output"))
+    end
+
+    test "checks completeness after acquiring the entry lock", %{tmp_dir: root} do
+      File.write!(Path.join(root, "output"), "cached")
+      Cache.save(root, "locked", ["output"], nil)
+      entry = Cache.cache_entry_dir(root, "locked")
+      lock = Path.join([Path.dirname(entry), ".lock", "locked"])
+      parent = self()
+      destination = Path.join(root, "destination")
+
+      holder =
+        Task.async(fn ->
+          TinyCI.Cache.Lock.with_lock(lock, fn ->
+            send(parent, :held)
+
+            receive do
+              :evict -> File.rm_rf!(entry)
+            end
+          end)
+        end)
+
+      assert_receive :held
+
+      restorer =
+        Task.async(fn ->
+          send(parent, :restoring)
+          Cache.restore_if_present(root, "locked", ["output"], destination)
+        end)
+
+      on_exit(fn ->
+        Process.exit(holder.pid, :kill)
+        Process.exit(restorer.pid, :kill)
+      end)
+
+      assert_receive :restoring
+      ref = restorer.ref
+      refute_receive {^ref, _}, 50
+      send(holder.pid, :evict)
+      Task.await(holder)
+      assert Task.await(restorer) == :miss
+      refute File.exists?(destination)
     end
   end
 

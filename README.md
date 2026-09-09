@@ -4,6 +4,9 @@
 
 A local CI runner for Elixir projects. Define your build pipeline as code — stages, steps, conditions, hooks — and run it from the command line. No YAML, no cloud dependency.
 
+Use trusted repositories and dependencies. The DSL parser and action sandbox are
+not a complete boundary for untrusted builds; see [Reliability and trust](docs/reliability.md).
+
 ## Quick Start
 
 1. Create a `tiny_ci.exs` file in your project root:
@@ -49,7 +52,7 @@ mix tiny_ci.run [pipeline] [options]
 | `--no-cache` | | Bypass all cache lookups for this run |
 | `--artifacts-dir DIR` | | Override the base directory for artifact storage |
 | `--list-artifacts` | | Show artifacts from the most recent run and exit |
-| `--events FILE` | | Write the run's NDJSON event stream to `FILE` (`-` for stdout) |
+| `--events FILE` | | Write NDJSON to `FILE`; `-` reserves stdout for events and cannot be combined with `--output json` |
 | `--attest FILE` | | Write a signed provenance attestation for the run |
 | `--signing-key PATH` | | Ed25519 private key used by `--attest` |
 | `--break SPEC` | | Pause at a boundary — `before:STAGE[.STEP]` / `after:STAGE[.STEP]`. Repeatable |
@@ -100,6 +103,11 @@ names are listed in the error message.
 Add `--output json` to get a JSON object on stdout instead of human-readable
 text. All ANSI output, stage headers, and progress lines are suppressed — only
 the JSON object is printed.
+
+Hook diagnostics and filtered-dependency warnings go to stderr. `duration_ms`
+is measured wall time, not the sum of concurrently executing stage durations.
+An aborted run has status `"aborted"` and a nonzero exit code. Failures also exit
+nonzero when the runner itself is invoked with `MIX_ENV=test`.
 
 ```bash
 # Run and capture JSON
@@ -206,7 +214,7 @@ env "APP": "myapp", "REGION": "us-east-1"
 
 The `secret` directive names a secret the pipeline needs. Every declared secret is
 resolved **before any step runs**, injected into every step's and hook's environment,
-and its value is masked wherever output leaves the run.
+and its value is masked in managed command output, results, and events.
 
 ```elixir
 secret :SLACK_WEBHOOK_URL
@@ -257,6 +265,10 @@ nothing downstream needs to know about secrets.
   ordinary text.
 - Console lines are masked as complete lines, so a secret containing a newline is
   only masked in the captured output.
+- Ordinary module `IO` is captured, then redacted and reported after the callback
+  returns. Direct writes to named devices (including `IO.puts(:stderr, ...)`),
+  arbitrary Logger handlers, module-load callbacks, and independently spawned
+  processes can bypass capture. Do not treat redaction as a security boundary.
 
 ### Stages
 
@@ -339,6 +351,10 @@ The above generates four parallel runs:
 
 Each step in the stage receives its combination's values as uppercased environment variables (`ELIXIR`, `OTP`). The same values are also written into the pipeline store so module steps can read them via `ctx.store`.
 
+Matrix values do not install toolchains or select operating systems. Combinations
+share the working tree; use commands that do not race on mutable build outputs.
+Published artifacts have a separate destination per combination.
+
 **Limiting concurrency** — use `max_parallel:` to cap how many runs execute simultaneously:
 
 ```elixir
@@ -402,6 +418,14 @@ end
 | `:retry` | Number of times to retry on failure (e.g. `retry: 3` = up to 3 retries) |
 | `:retry_delay` | Milliseconds to wait between retry attempts (default: no delay) |
 
+Steps and hooks require exactly one `cmd:` or `module:` target. Stage names must
+be unique, and step names must be unique within their stage. `set` values may be
+nested literal maps, lists, tuples, numbers, strings, atoms, or `store(:key)`
+references. References resolve immediately before invocation; a missing required
+config reference fails clearly rather than passing AST to the action. Unsupported
+calls and calculations are rejected during validation. A module with no `set`
+block receives `[]`.
+
 ### Conditions
 
 The `:when` option is supported on both **stages** and **steps**. It accepts a boolean expression built from these primitives:
@@ -409,10 +433,14 @@ The `:when` option is supported on both **stages** and **steps**. It accepts a b
 | Expression | Description |
 |------------|-------------|
 | `branch()` | Current git branch name (string) |
-| `env("VAR")` | Value of environment variable, or `nil` if unset |
+| `env("VAR")` | Effective pipeline/stage/step environment value, falling back to the host environment; `nil` if unset |
 | `file_changed?("glob")` | `true` if any file matching the glob changed on this branch since it diverged from the base ref, or is uncommitted — see below |
 
 Combine with standard boolean operators: `and`, `or`, `not`, `==`, `!=`.
+
+Conditions use truthiness: only `false` and `nil` skip execution. An explicit
+`when: nil` skips, while omitting `when:` runs unconditionally. The `and`, `or`,
+and `not` condition operators also accept truthy/falsy operands.
 
 **Stage-level conditions** skip the entire stage when not met:
 
@@ -468,7 +496,7 @@ The `working_dir:` option sets the directory a shell command runs in. It can be 
 
 ```elixir
 # Stage-level: all steps run inside frontend/
-stage :frontend, working_dir: "frontend" do
+stage :frontend, mode: :serial, working_dir: "frontend" do
   step :install, cmd: "npm install"
   step :build,   cmd: "npm run build"
   step :test,    cmd: "npm test", working_dir: "frontend/packages/core"
@@ -481,7 +509,11 @@ stage :check do
 end
 ```
 
-Relative paths are resolved from the directory containing the pipeline file. Absolute paths are used as-is. If the directory does not exist, the step fails immediately with a clear error before any command is run. `--dry-run` shows the resolved path for each step.
+Relative paths are resolved from the project root (`--root`, or the directory
+where the CLI was invoked). That root is also the default shell-step and
+shell-hook working directory. Absolute paths are used as-is. If the directory
+does not exist, the step fails before any command runs. `--dry-run` shows explicit
+working-directory overrides.
 
 ### Dependency Caching
 
@@ -502,6 +534,14 @@ end
 - A cache miss runs the step and saves the directories afterward; the reporter shows `[cache miss]`
 - `--dry-run` shows `[cache: key=mix.lock, paths=[deps, _build]]` in the step plan
 - `--no-cache` bypasses all cache lookups for the current run
+
+The executor hashes the key file together with the command/module, effective
+environment, working directory, matrix combination, cached paths, and runner
+runtime identity. Old content-only entries are not reused by the executor.
+A hit is checked and restored under the same lock. Module actions may restore
+files, but still execute so their store writes are not lost. The nominated key
+file must still cover the relevant source inputs; this is not a hermetic build
+cache or proof that arbitrary external state is unchanged.
 
 **Atomicity.** An entry is either complete or absent. A save copies into a staging directory and publishes it with a single rename, so an interrupted save never produces a hit. Savers and restorers of the same key serialise on a filesystem lock that works across OS processes, so parallel matrix combinations, DAG stages, and concurrent runs cannot interleave. Copies clone blocks where the filesystem supports it (`cp -c` on APFS, `--reflink=auto` on Linux) and fall back to a plain copy otherwise.
 
@@ -537,7 +577,8 @@ end
 - `paths:` — list of paths (relative to the step's working directory or project root) to copy
 - `required:` — when `true`, a missing path fails the step; when `false` (default) a warning is printed and the step still passes
 - Artifacts are stored at `~/.local/share/tiny_ci/artifacts/<project_id>/<run_id>/<name>/`
-- Each run gets an isolated subdirectory (`<YYYYMMDD_HHMMSS>_<commit7>`) so runs never overwrite each other
+- Run directories use `<YYYYMMDD_HHMMSS>_<commit7>_<random128>` to distinguish concurrent runs of the same commit. Matrix artifacts use additional per-combination subdirectories.
+- Artifact names and paths must be relative and cannot contain `..`; escaping symlinks and directory cycles are rejected before copying.
 - After a step with `artifact:` completes, the artifact's storage path is written to the pipeline store under the key `artifact_<name>` — downstream module steps can read it via `ctx.store.artifact_release` and shell steps can use `store(:artifact_release)` in their `env:`
 - `--dry-run` shows `[artifact: name=..., paths=[...], dest=...]` in the step plan
 - `--artifacts-dir DIR` overrides the base storage location for the current run
@@ -593,6 +634,12 @@ end
 ```
 
 Hook failures are logged to stderr but do not change the pipeline exit code.
+
+Hooks receive the completed run's store writes, including writes made before a
+failure. Module-hook configuration resolves like action configuration; an explicit
+`timeout:` terminates a hung callback. Third-party module hooks are refused rather
+than executed inline (the action sandbox currently supports `execute/2`, not
+hook `run/2`). Hook diagnostics and captured module-hook output always use stderr.
 
 ### Module Steps and Hooks
 

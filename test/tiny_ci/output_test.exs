@@ -5,6 +5,19 @@ defmodule TinyCI.OutputTest do
 
   alias TinyCI.Output
 
+  describe "run_executable/3" do
+    test "passes argv literally and preserves the exit status" do
+      assert {"value; $HOME", 0} =
+               Output.run_executable("printf", ["%s", "value; $HOME"], mode: :buffered)
+
+      assert {"", 7} = Output.run_executable("sh", ["-c", "exit 7"], mode: :buffered)
+    end
+
+    test "enforces a deadline for a directly launched executable" do
+      assert {_, :timeout} = Output.run_executable("sleep", ["30"], mode: :buffered, timeout: 10)
+    end
+  end
+
   describe "resolve_mode/1" do
     test "returns :streaming for explicit :streaming" do
       assert Output.resolve_mode(:streaming) == :streaming

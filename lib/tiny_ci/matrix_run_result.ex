@@ -14,12 +14,14 @@ defmodule TinyCI.MatrixRunResult do
           status: status(),
           step_results: [TinyCI.StepResult.t()],
           duration_ms: non_neg_integer(),
-          store: map()
+          store: map(),
+          store_delta: map()
         }
 
   defstruct combination: [],
             status: :passed,
             step_results: [],
             duration_ms: 0,
-            store: %{}
+            store: %{},
+            store_delta: %{}
 end

@@ -104,6 +104,7 @@ defmodule TinyCI.DryRun do
   defp base_info(_context), do: ""
 
   defp print_stage(%Stage{} = stage, context) do
+    context = Map.put(context, :stage_env, stage.env)
     skipped? = skip_stage?(stage, context)
     root = Map.get(context, :root)
 
@@ -158,6 +159,8 @@ defmodule TinyCI.DryRun do
   end
 
   defp print_step(step, stage_wd, root, context) do
+    context = Map.put(context, :env, TinyCI.Executor.Env.resolve(context, step.env))
+
     if skip_step?(step, context) do
       IO.puts([
         "    ",
@@ -193,18 +196,18 @@ defmodule TinyCI.DryRun do
   defp skip_stage?(%{when_condition: nil}, _context), do: false
 
   defp skip_stage?(%{when_condition: f}, context) when is_function(f, 1),
-    do: not f.(context)
+    do: !f.(context)
 
   defp skip_stage?(%{when_condition: ast}, context),
-    do: not TinyCI.DSL.ConditionEval.eval(ast, context)
+    do: !TinyCI.DSL.ConditionEval.eval(ast, context)
 
   defp skip_step?(%{when_condition: nil}, _context), do: false
 
   defp skip_step?(%{when_condition: f}, context) when is_function(f, 1),
-    do: not f.(context)
+    do: !f.(context)
 
   defp skip_step?(%{when_condition: ast}, context),
-    do: not TinyCI.DSL.ConditionEval.eval(ast, context)
+    do: !TinyCI.DSL.ConditionEval.eval(ast, context)
 
   defp format_retry_info(nil, _), do: ""
   defp format_retry_info(0, _), do: ""

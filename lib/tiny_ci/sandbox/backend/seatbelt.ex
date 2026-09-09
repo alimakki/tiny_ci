@@ -45,8 +45,12 @@ defmodule TinyCI.Sandbox.Backend.Seatbelt do
         ["-f", profile_path, "env", "-i"] ++
           env_i_pairs(policy, scratch, request_path, response_path) ++ Runtime.elixir_command()
 
-      case System.cmd("sandbox-exec", args, stderr_to_stdout: true) do
+      case TinyCI.Output.run_executable("sandbox-exec", args,
+             mode: :buffered,
+             timeout: opts[:timeout]
+           ) do
         {_out, 0} -> Runtime.read_response(response_path)
+        {_out, :timeout} -> {:error, :timeout}
         {out, code} -> {:error, {:sandbox_exit, code, String.trim(String.slice(out, 0, 800))}}
       end
     after

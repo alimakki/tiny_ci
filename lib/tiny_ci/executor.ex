@@ -48,7 +48,8 @@ defmodule TinyCI.Executor do
   alias TinyCI.{Artifacts, Cache, Control, DAG, Matrix, MatrixRunResult, Output}
   alias TinyCI.{Redaction, Secrets, StageResult, StepResult}
   alias TinyCI.Events
-  alias TinyCI.Executor.{Crash, Driver, Env}
+  alias TinyCI.Executor.{Callback, Crash, Driver, Env}
+  alias TinyCI.DSL.Value
 
   require Logger
 
@@ -233,19 +234,17 @@ defmodule TinyCI.Executor do
     filter_set = MapSet.new(filter)
     all_names = MapSet.new(stages, & &1.name)
 
-    Enum.each(stages, fn stage ->
-      if MapSet.member?(filter_set, stage.name) do
-        stage.needs
-        |> Enum.filter(&(MapSet.member?(all_names, &1) and not MapSet.member?(filter_set, &1)))
-        |> Enum.each(fn dep ->
-          IO.puts([
-            IO.ANSI.yellow(),
-            ~s(Warning: ":#{stage.name}" needs ":#{dep}" which was filtered — running :#{stage.name} without it),
-            IO.ANSI.reset()
-          ])
-        end)
-      end
-    end)
+    for stage <- stages,
+        MapSet.member?(filter_set, stage.name),
+        dep <- stage.needs,
+        MapSet.member?(all_names, dep),
+        not MapSet.member?(filter_set, dep) do
+      IO.puts(:stderr, [
+        IO.ANSI.yellow(),
+        ~s(Warning: ":#{stage.name}" needs ":#{dep}" which was filtered — running :#{stage.name} without it),
+        IO.ANSI.reset()
+      ])
+    end
 
     stages
     |> Enum.filter(&MapSet.member?(filter_set, &1.name))
@@ -304,7 +303,7 @@ defmodule TinyCI.Executor do
         if output_mode == :buffered, do: Enum.each(stage_results, &listener.stage_finished/1)
 
         new_store =
-          Enum.reduce(stage_results, current_store, fn r, s -> Map.merge(s, r.store) end)
+          Enum.reduce(stage_results, current_store, fn r, s -> Map.merge(s, r.store_delta) end)
 
         {acc_results ++ stage_results, new_store, new_blocked}
       end)
@@ -371,6 +370,7 @@ defmodule TinyCI.Executor do
   end
 
   defp crashed_stage(stage, ctx, text) do
+    text = mask(ctx, text)
     Logger.error("Stage #{stage.name} crashed outside any step: #{text}")
 
     Events.emit(ctx, %StageCompleted{
@@ -504,6 +504,8 @@ defmodule TinyCI.Executor do
   end
 
   defp run_stage_or_skip(stage, context, output_mode, listener) do
+    context = Map.put(context, :stage_env, stage.env || %{})
+
     if skip_stage?(stage, context) do
       Events.emit(context, %StageSkipped{
         run_id: run_id(context),
@@ -543,11 +545,16 @@ defmodule TinyCI.Executor do
   # stage — the pipeline process in sequential mode, the stage's own task in DAG
   # mode — so pausing here leaves sibling stages untouched.
   defp run_stage_with_control(stage, ctx, output_mode, listener) do
-    case Control.checkpoint(ctx, phase: :before) do
-      {:abort, ctx, _overrides} -> aborted_stage(stage, ctx)
-      {:skip, ctx, _overrides} -> control_skipped_stage(stage, ctx)
-      {_continue_or_retry, ctx, _overrides} -> review_stage(stage, ctx, output_mode, listener)
-    end
+    {command, ctx, overrides} = Control.checkpoint(ctx, phase: :before)
+
+    result =
+      case command do
+        :abort -> aborted_stage(stage, ctx)
+        :skip -> control_skipped_stage(stage, ctx)
+        _ -> review_stage(stage, ctx, output_mode, listener)
+      end
+
+    %{result | store_delta: Map.merge(overrides, result.store_delta)}
   end
 
   defp review_stage(stage, ctx, output_mode, listener) do
@@ -556,11 +563,22 @@ defmodule TinyCI.Executor do
     # started with, so the operator inspects (and edits) what actually happened.
     after_ctx = Map.put(ctx, :store, result.store)
 
-    case Control.checkpoint(after_ctx, phase: :after, result: result) do
-      {:continue, ctx, _overrides} -> %{result | store: ctx.store}
-      {:skip, ctx, _overrides} -> %{result | status: :skipped, store: ctx.store}
-      {:abort, ctx, _overrides} -> %{result | status: :aborted, store: ctx.store}
-      {:retry, ctx, _overrides} -> review_stage(stage, ctx, output_mode, listener)
+    {command, ctx, overrides} = Control.checkpoint(after_ctx, phase: :after, result: result)
+    result = %{result | store: ctx.store, store_delta: Map.merge(result.store_delta, overrides)}
+
+    case command do
+      :continue ->
+        result
+
+      :skip ->
+        %{result | status: :skipped}
+
+      :abort ->
+        %{result | status: :aborted}
+
+      :retry ->
+        retried = review_stage(stage, ctx, output_mode, listener)
+        %{retried | store_delta: Map.merge(result.store_delta, retried.store_delta)}
     end
   end
 
@@ -610,7 +628,8 @@ defmodule TinyCI.Executor do
       status: rollup_status(step_results),
       step_results: step_results,
       duration_ms: duration_ms,
-      store: updated_store
+      store: updated_store,
+      store_delta: step_writes(step_results)
     }
   end
 
@@ -655,7 +674,7 @@ defmodule TinyCI.Executor do
     listener.matrix_stage_finished(run_results)
 
     merged_store =
-      Enum.reduce(run_results, context.store, fn r, acc -> Map.merge(acc, r.store) end)
+      Enum.reduce(run_results, %{}, fn r, acc -> Map.merge(acc, r.store_delta) end)
 
     %StageResult{
       name: stage.name,
@@ -663,7 +682,8 @@ defmodule TinyCI.Executor do
       step_results: [],
       matrix_runs: run_results,
       duration_ms: duration_ms,
-      store: merged_store
+      store: Map.merge(context.store, merged_store),
+      store_delta: merged_store
     }
   end
 
@@ -712,6 +732,7 @@ defmodule TinyCI.Executor do
       # Carried so a breakpoint inside a matrix stage can report *which*
       # combination it stopped in — otherwise N identical payloads are ambiguous.
       |> Map.put(:matrix_combination, combination)
+      |> matrix_artifacts(stage.name, combination)
 
     stage_for_run = %{stage | matrix: [], max_parallel: nil}
 
@@ -734,25 +755,39 @@ defmodule TinyCI.Executor do
       status: status,
       step_results: step_results,
       duration_ms: duration_ms,
-      store: updated_store
+      store: updated_store,
+      store_delta: Map.merge(combo_store, step_writes(step_results))
     }
   end
+
+  defp step_writes(results) do
+    Enum.reduce(results, %{}, fn result, writes -> Map.merge(writes, result.store_data) end)
+  end
+
+  defp matrix_artifacts(%{artifacts_dir: dir} = ctx, stage, combination) when is_binary(dir) do
+    digest = :crypto.hash(:sha256, :erlang.term_to_binary({stage, combination}, [:deterministic]))
+    Map.put(ctx, :artifacts_dir, Path.join(dir, "matrix-" <> Base.encode16(digest, case: :lower)))
+  end
+
+  defp matrix_artifacts(ctx, _stage, _combination), do: ctx
 
   defp skip_stage?(%{when_condition: nil}, _context), do: false
 
   defp skip_stage?(%{when_condition: f}, context) when is_function(f, 1),
-    do: not f.(context)
+    do: !f.(context)
 
   defp skip_stage?(%{when_condition: ast}, context),
-    do: not TinyCI.DSL.ConditionEval.eval(ast, context)
+    do: !TinyCI.DSL.ConditionEval.eval(ast, context)
 
-  defp resolve_working_dir(nil, _root), do: nil
+  defp resolve_working_dir(nil, root), do: root || File.cwd!()
 
   defp resolve_working_dir(dir, root) do
     if Path.type(dir) == :absolute, do: dir, else: Path.join(root || File.cwd!(), dir)
   end
 
   defp execute_step_or_skip(step, context, output_mode, prefix, working_dir, listener) do
+    context = Map.put(context, :env, Env.resolve(context, step.env))
+
     if skip_step?(step, context) do
       emit_step_skipped(context, step, "condition not met")
       %StepResult{name: step.name, status: :skipped, duration_ms: 0}
@@ -930,6 +965,10 @@ defmodule TinyCI.Executor do
           ])
 
           %{result | status: :failed}
+
+        {:error, {:unsafe_path, name, path}} ->
+          message = mask(ctx, "Unsafe path #{inspect(path)} in artifact #{inspect(name)}")
+          %{result | status: :failed, output: result.output <> message}
       end
     end
   end
@@ -957,8 +996,20 @@ defmodule TinyCI.Executor do
     root = Map.get(context, :root, File.cwd!())
     key_file = Path.join(root, cache.key)
 
+    inputs = %{
+      command: step.cmd,
+      module: step.module,
+      env: Map.merge(System.get_env(), Env.resolve(context, step.env)),
+      working_dir: working_dir,
+      matrix: Map.get(context, :matrix_combination),
+      paths: cache.paths,
+      runtime:
+        {System.version(), :erlang.system_info(:system_version),
+         :erlang.system_info(:system_architecture)}
+    }
+
     with false <- no_cache,
-         {:ok, key} <- Cache.compute_key(key_file) do
+         {:ok, key} <- Cache.compute_key(key_file, inputs) do
       cache_ctx = %{key: key, root: root, paths: cache.paths}
       run_cached(step, cache_ctx, context, output_mode, prefix, working_dir, listener)
     else
@@ -975,15 +1026,15 @@ defmodule TinyCI.Executor do
          wd,
          listener
        ) do
-    if Cache.hit?(root, key, paths) do
-      emit_cache_lookup(ctx, step.name, key, :hit)
-      Cache.restore(root, key, paths, wd)
+    cache_status = Cache.restore_if_present(root, key, paths, wd)
+    emit_cache_lookup(ctx, step.name, key, cache_status)
+
+    if cache_status == :hit and is_nil(step.module) do
       %StepResult{name: step.name, status: :passed, duration_ms: 0, cache_status: :hit}
     else
-      emit_cache_lookup(ctx, step.name, key, :miss)
       result = run_step_with_retries(step, ctx, output_mode, prefix, wd, listener)
       if result.status == :passed, do: Cache.save(root, key, paths, wd)
-      %{result | cache_status: :miss}
+      %{result | cache_status: cache_status}
     end
   end
 
@@ -1051,10 +1102,10 @@ defmodule TinyCI.Executor do
   defp skip_step?(%{when_condition: nil}, _context), do: false
 
   defp skip_step?(%{when_condition: f}, context) when is_function(f, 1),
-    do: not f.(context)
+    do: !f.(context)
 
   defp skip_step?(%{when_condition: ast}, context),
-    do: not TinyCI.DSL.ConditionEval.eval(ast, context)
+    do: !TinyCI.DSL.ConditionEval.eval(ast, context)
 
   defp execute_by_mode(%{steps: steps, working_dir: stage_wd} = stage, ctx, output_mode, listener) do
     case effective_mode(stage, ctx) do
@@ -1176,22 +1227,34 @@ defmodule TinyCI.Executor do
   end
 
   defp run_step(
-         %{module: module, name: name, config_block: block, allow_failure: allow_failure},
+         %{module: module, name: name, config_block: block, allow_failure: allow_failure} = step,
          ctx,
-         _output_mode,
+         output_mode,
          _prefix,
          _working_dir
        )
        when not is_nil(module) do
-    config = if block, do: block.(), else: %{}
-    ctx = Map.put(ctx, :env, Env.base(ctx))
-
+    ctx = Map.put(ctx, :env, Env.resolve(ctx, step.env))
     driver = Driver.select(module, ctx)
+    driver_opts = Keyword.put(Driver.opts(ctx), :timeout, step.timeout)
+    timeout = if driver == Driver.Inline, do: step.timeout
 
-    {duration_ms, outcome} =
-      measure(fn -> driver.run(module, config, ctx, Driver.opts(ctx)) end)
+    callback = fn ->
+      config = Value.resolve(if(block, do: block.(), else: []), ctx.store)
+      driver.run(module, config, ctx, driver_opts)
+    end
+
+    {duration_ms, {outcome, captured}} =
+      measure(fn -> Callback.run(callback, timeout) end)
+
+    outcome =
+      if outcome == {:error, :timeout},
+        do: {:error, "Step timed out after #{step.timeout}ms"},
+        else: outcome
 
     {status, store_data, output} = interpret_outcome(outcome)
+    output = mask(ctx, captured <> output)
+    if output_mode == :streaming and output != "", do: IO.write(output)
 
     %StepResult{
       name: name,

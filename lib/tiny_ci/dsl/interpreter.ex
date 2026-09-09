@@ -4,8 +4,9 @@ defmodule TinyCI.DSL.Interpreter do
 
   This is the entry point for the new flat DSL format. It replaces
   `Code.compile_file/1` entirely: no Elixir module is compiled, no bytecode
-  is produced, and no code runs during loading — only the restricted AST
-  grammar permitted by `TinyCI.DSL.Validator` is interpreted.
+  is produced, and only the restricted AST grammar permitted by
+  `TinyCI.DSL.Validator` is interpreted. Action validation can load compiled
+  modules, so loading dependencies still requires trusted code.
 
   ## Pipeline file format
 
@@ -37,6 +38,7 @@ defmodule TinyCI.DSL.Interpreter do
   """
 
   alias TinyCI.{DSL.Diagnostic, DSL.FlowAnalysis, DSL.Validator, Hook, PipelineSpec, Stage, Step}
+  alias TinyCI.DSL.Value
 
   @doc """
   Reads, validates, and interprets a pipeline file.
@@ -241,7 +243,7 @@ defmodule TinyCI.DSL.Interpreter do
       matrix: Keyword.get(opts, :matrix, []),
       max_parallel: Keyword.get(opts, :max_parallel),
       allow_failure: Keyword.get(opts, :allow_failure, false),
-      when_condition: Keyword.get(opts, :when),
+      when_condition: condition(opts),
       working_dir: Keyword.get(opts, :working_dir),
       env: stage_env,
       steps: steps
@@ -276,7 +278,7 @@ defmodule TinyCI.DSL.Interpreter do
       env: resolve_map(Keyword.get(opts, :env, {:%{}, [], []})),
       timeout: Keyword.get(opts, :timeout),
       allow_failure: Keyword.get(opts, :allow_failure, false),
-      when_condition: Keyword.get(opts, :when),
+      when_condition: condition(opts),
       working_dir: Keyword.get(opts, :working_dir),
       retry: Keyword.get(opts, :retry),
       retry_delay: Keyword.get(opts, :retry_delay),
@@ -313,7 +315,10 @@ defmodule TinyCI.DSL.Interpreter do
     pairs =
       block
       |> unwrap_block()
-      |> Enum.map(fn {:set, _, [k, v]} -> {k, v} end)
+      |> Enum.map(fn {:set, _, [k, v]} ->
+        {:ok, value} = Value.normalize(v)
+        {k, value}
+      end)
 
     fn -> pairs end
   end
@@ -324,6 +329,14 @@ defmodule TinyCI.DSL.Interpreter do
 
   defp kwlist_to_env(kwlist) do
     Map.new(kwlist, fn {k, v} -> {Atom.to_string(k), v} end)
+  end
+
+  defp condition(opts) do
+    case Keyword.fetch(opts, :when) do
+      :error -> nil
+      {:ok, nil} -> false
+      {:ok, expression} -> expression
+    end
   end
 
   defp resolve_cache(nil), do: nil

@@ -562,7 +562,7 @@ defmodule TinyCI.ExecutorTest do
 
       Executor.execute(stage)
       assert_received {:config_received, config}
-      assert config == %{}
+      assert config == []
     end
   end
 
@@ -1638,7 +1638,7 @@ defmodule TinyCI.ExecutorTest do
       ]
 
       output =
-        ExUnit.CaptureIO.capture_io(fn ->
+        ExUnit.CaptureIO.capture_io(:stderr, fn ->
           {:ok, _} = Executor.run_pipeline(stages, %{}, filter: [:test])
         end)
 
@@ -1657,7 +1657,7 @@ defmodule TinyCI.ExecutorTest do
       ]
 
       output =
-        ExUnit.CaptureIO.capture_io(fn ->
+        ExUnit.CaptureIO.capture_io(:stderr, fn ->
           {:ok, _} = Executor.run_pipeline(stages, %{}, filter: [:build, :test])
         end)
 
@@ -1760,39 +1760,33 @@ defmodule TinyCI.ExecutorTest do
       [step_result] = result.step_results
       assert step_result.cache_status == :miss
 
-      assert TinyCI.Cache.hit?(
-               root,
-               elem(TinyCI.Cache.compute_key(Path.join(root, "mix.lock")), 1),
-               ["deps"]
-             )
+      assert hd(Executor.execute(stage, ctx).step_results).cache_status == :hit
     end
 
     test "cache hit: restores dirs and skips step", %{root: root} do
-      {:ok, key} = TinyCI.Cache.compute_key(Path.join(root, "mix.lock"))
-      seed = Path.join(Path.dirname(root), "seed")
-      File.mkdir_p!(Path.join(seed, "deps"))
-      File.write!(Path.join(seed, "deps/marker.txt"), "cached content")
-      TinyCI.Cache.save(root, key, ["deps"], seed)
-
       stage = %Stage{
         name: :install,
         mode: :serial,
         steps: [
           %Step{
             name: :deps,
-            cmd: "false",
+            cmd:
+              "mkdir -p deps; printf 'cached content' > deps/marker.txt; printf x >> executions",
             cache: %{paths: ["deps"], key: "mix.lock"}
           }
         ]
       }
 
       ctx = %{root: root, store: %{}, no_cache: false}
+      assert Executor.execute(stage, ctx).status == :passed
+      File.rm_rf!(Path.join(root, "deps"))
       result = Executor.execute(stage, ctx)
 
       assert result.status == :passed
       [step_result] = result.step_results
       assert step_result.cache_status == :hit
       assert File.read!(Path.join(root, "deps/marker.txt")) == "cached content"
+      assert File.read!(Path.join(root, "executions")) == "x"
     end
 
     test "no_cache: bypasses cache lookup and runs step", %{root: root} do

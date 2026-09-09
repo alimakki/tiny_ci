@@ -9,6 +9,9 @@ defmodule TinyCI.StageResult do
   The `:store` field reflects the full pipeline store state after this
   stage's steps have been executed and their `store_data` merged. Later
   stages receive this store via the pipeline context.
+
+  `:store_delta` contains only explicit writes, including execution-control edits.
+  Parallel siblings merge these deltas, never their inherited store snapshots.
   """
 
   @type status :: :passed | :failed | :skipped | :aborted
@@ -19,7 +22,8 @@ defmodule TinyCI.StageResult do
           step_results: [TinyCI.StepResult.t()],
           matrix_runs: [TinyCI.MatrixRunResult.t()],
           duration_ms: non_neg_integer(),
-          store: map()
+          store: map(),
+          store_delta: map()
         }
 
   @enforce_keys [:name, :status]
@@ -28,5 +32,6 @@ defmodule TinyCI.StageResult do
             step_results: [],
             matrix_runs: [],
             duration_ms: 0,
-            store: %{}
+            store: %{},
+            store_delta: %{}
 end

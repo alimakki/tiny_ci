@@ -40,6 +40,10 @@ defmodule TinyCI.Sandbox.BubblewrapTest do
     assert {:ok, %{echoed: "hi", branch: "main", seed: 1}} = run(Echo, %{msg: "hi"})
   end
 
+  test "the sandbox process respects its execution deadline" do
+    assert {:error, :timeout} = run(Echo, %{msg: "hi"}, timeout: 1)
+  end
+
   describe "network capability" do
     test "an action without :network cannot open a socket" do
       port = listener()

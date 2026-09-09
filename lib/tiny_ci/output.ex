@@ -87,6 +87,25 @@ defmodule TinyCI.Output do
   """
   @spec run_cmd(String.t(), keyword()) :: {:passed | :failed | :timeout, String.t()}
   def run_cmd(cmd, opts \\ []) do
+    sh = System.find_executable("sh") || "/bin/sh"
+
+    case run_executable(sh, ["-c", cmd], opts) do
+      {output, 0} -> {:passed, output}
+      {output, :timeout} -> {:timeout, output}
+      {output, _code} -> {:failed, output}
+    end
+  end
+
+  @doc """
+  Executes an argv directly, without shell expansion, with the same output,
+  working-directory, redaction, and timeout options as `run_cmd/2`.
+
+  Returns `{output, exit_code}` like `System.cmd/3`, or `{output, :timeout}`
+  after terminating the executable's process subtree at its deadline.
+  """
+  @spec run_executable(String.t(), [String.t()], keyword()) ::
+          {String.t(), non_neg_integer() | :timeout}
+  def run_executable(executable, args, opts \\ []) do
     output_mode = resolve_mode(opts[:mode] || :auto)
     env = opts[:env] || %{}
     prefix = if output_mode == :streaming, do: opts[:prefix], else: :buffered
@@ -94,18 +113,19 @@ defmodule TinyCI.Output do
     timeout = opts[:timeout]
     redact = opts[:redact] || []
 
-    run_port(cmd, env, working_dir, {prefix, redact}, timeout)
+    executable = System.find_executable(executable) || executable
+    {status, output} = run_port(executable, args, env, working_dir, {prefix, redact}, timeout)
+    {output, status}
   end
 
   # `prefix` is a string/nil for streaming, or the `:buffered` atom to suppress printing.
-  defp run_port(cmd, env, working_dir, {_prefix, redact} = printer, timeout) do
-    sh = System.find_executable("sh") || "/bin/sh"
+  defp run_port(executable, args, env, working_dir, {_prefix, redact} = printer, timeout) do
     port_opts = [:stderr_to_stdout, :binary, :exit_status, {:env, charlist_env(env)}]
 
     port_opts =
       if working_dir, do: [{:cd, String.to_charlist(working_dir)} | port_opts], else: port_opts
 
-    port = Port.open({:spawn_executable, sh}, [{:args, [~c"-c", cmd]} | port_opts])
+    port = Port.open({:spawn_executable, executable}, [{:args, args} | port_opts])
     os_pid = port_os_pid(port)
     deadline = if timeout, do: System.monotonic_time(:millisecond) + timeout, else: nil
     {status, chunks} = collect_port(port, os_pid, deadline, printer, [], "")
@@ -121,8 +141,7 @@ defmodule TinyCI.Output do
 
       {^port, {:exit_status, exit_code}} ->
         flush_line(line_buf, printer)
-        status = if exit_code == 0, do: :passed, else: :failed
-        {status, chunks}
+        {exit_code, chunks}
     after
       remaining_ms(deadline) ->
         kill_subtree(os_pid)

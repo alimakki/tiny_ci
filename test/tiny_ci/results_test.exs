@@ -20,6 +20,26 @@ defmodule TinyCI.ResultsTest do
       assert json["status"] == "failed"
     end
 
+    test "aborted pipeline preserves its status" do
+      results = [%StageResult{name: :deploy, status: :aborted}]
+      json = decode(Results.to_json({:error, {:aborted, :deploy}}, results))
+
+      assert json["status"] == "aborted"
+      assert hd(json["stages"])["status"] == "aborted"
+    end
+
+    test "an explicit wall duration is not replaced by summed concurrent stage durations" do
+      results = [
+        %StageResult{name: :a, status: :passed, duration_ms: 100},
+        %StageResult{name: :b, status: :passed, duration_ms: 200}
+      ]
+
+      json = decode(Results.to_json(:ok, results, 210))
+
+      assert json["duration_ms"] == 210
+      assert Enum.map(json["stages"], & &1["duration_ms"]) == [100, 200]
+    end
+
     test "top-level duration_ms is sum of all stage durations" do
       results = [
         %StageResult{name: :a, status: :passed, duration_ms: 100},
