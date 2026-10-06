@@ -30,6 +30,10 @@ defmodule TinyCI.Executor do
   serializing results to JSON) — and still drives the buffered step-output, matrix,
   and retry-attempt renderings that have not yet moved to the event sink.
 
+  Every run whose context carries a project `:root` is also recorded to the run
+  store (`TinyCI.Runs`) by `TinyCI.Runs.Recorder`, another sink on the same stream;
+  pass `record: false` to turn that off. A standalone `execute/4` never records.
+
   Passing `control:` arms execution-control breakpoints (see `TinyCI.Control` and
   `docs/execution-control.md`): the process that reaches an armed step/stage
   boundary blocks awaiting a command, so an independent parallel branch keeps
@@ -46,7 +50,7 @@ defmodule TinyCI.Executor do
   """
 
   alias TinyCI.{Artifacts, Cache, Control, DAG, Matrix, MatrixRunResult, Output}
-  alias TinyCI.{Redaction, Secrets, StageResult, StepResult}
+  alias TinyCI.{Redaction, Runs, Secrets, StageResult, StepResult}
   alias TinyCI.Events
   alias TinyCI.Executor.{Callback, Crash, Driver, Env}
   alias TinyCI.DSL.Value
@@ -100,6 +104,8 @@ defmodule TinyCI.Executor do
       * `:filter`   — list of stage name atoms to run; others are omitted
       * `:control`  — execution-control options (`:breakpoints`, `:timeout`,
         `:timeout_action`, `:subscribers`, `:serial`). See `TinyCI.Control`.
+      * `:record`   — set to `false` to skip recording the run to the run store
+        (default: record when the context has a `:root`; see `TinyCI.Runs`)
       * `:secrets`  — resolved secrets as a `%{name => value}` map (see
         `TinyCI.Secrets`). They become the lowest env layer of every step and
         hook, and their values are masked in step output, results, and events.
@@ -128,19 +134,23 @@ defmodule TinyCI.Executor do
 
     {:ok, dispatcher} =
       Events.Dispatcher.start_link(
-        build_sink_specs(listener, output_mode, opts),
+        build_sink_specs(listener, output_mode, opts) ++ record_specs(ctx, opts),
         redact: ctx.secret_values
       )
 
     ctx = Map.put(ctx, :events, dispatcher)
     pipeline_name = opts[:pipeline_name] || :pipeline
-    {ctx, control} = start_control(ctx, opts[:control], dispatcher)
+    {ctx, control} = start_control_or_stop(ctx, opts[:control], dispatcher)
 
     try do
       Events.emit(ctx, %PipelineStarted{
         run_id: ctx.run_id,
         timestamp: now(),
-        pipeline_name: pipeline_name
+        pipeline_name: pipeline_name,
+        branch: Map.get(ctx, :branch),
+        commit: Map.get(ctx, :commit),
+        base_ref: Map.get(ctx, :base_ref),
+        root: Map.get(ctx, :root)
       })
 
       {duration_ms, result} =
@@ -189,6 +199,16 @@ defmodule TinyCI.Executor do
     end
   end
 
+  # The dispatcher, and so every sink, is already open when the control spec is
+  # validated. A bad spec raises; it must not leave them running behind the caller.
+  defp start_control_or_stop(ctx, control, dispatcher) do
+    start_control(ctx, control, dispatcher)
+  rescue
+    error ->
+      Events.Dispatcher.stop(dispatcher)
+      reraise error, __STACKTRACE__
+  end
+
   defp stop_control(nil), do: :ok
   defp stop_control(server), do: GenServer.stop(server)
 
@@ -205,6 +225,18 @@ defmodule TinyCI.Executor do
 
   defp ndjson_specs(nil), do: []
   defp ndjson_specs(path), do: [{Events.Sink.NDJSON, [path: path]}]
+
+  # Every run with a project root is recorded to the run store (see `TinyCI.Runs`)
+  # unless the caller passes `record: false`. This is deliberately not part of
+  # `build_sink_specs/3`: a standalone `execute/4` has no run id and no root, and
+  # must never write to the data dir.
+  defp record_specs(ctx, opts) do
+    case {Keyword.get(opts, :record), Map.get(ctx, :root)} do
+      {false, _root} -> []
+      {_default, root} when is_binary(root) -> [{Runs.Recorder, root: root, run_id: ctx.run_id}]
+      {_default, _no_root} -> []
+    end
+  end
 
   defp pipeline_status({:ok, _}), do: :passed
   defp pipeline_status({:error, {:aborted, _stage}, _}), do: :aborted
@@ -796,7 +828,8 @@ defmodule TinyCI.Executor do
         run_id: run_id(context),
         timestamp: now(),
         stage: stage_name(context),
-        step: step.name
+        step: step.name,
+        matrix_combination: combination(context)
       })
 
       run_step_guarded(step, context, output_mode, prefix, working_dir, listener)
@@ -895,7 +928,9 @@ defmodule TinyCI.Executor do
       step: step.name,
       status: result.status,
       duration_ms: result.duration_ms,
-      output: result.output
+      output: result.output,
+      allowed_failure: result.allowed_failure,
+      matrix_combination: combination(ctx)
     })
 
     result
@@ -907,11 +942,16 @@ defmodule TinyCI.Executor do
       timestamp: now(),
       stage: stage_name(ctx),
       step: step.name,
-      reason: reason
+      reason: reason,
+      matrix_combination: combination(ctx)
     })
   end
 
   defp stage_name(ctx), do: Map.get(ctx, :stage_name)
+
+  # The matrix combination a step ran in, or nil outside a matrix stage. Step-scoped
+  # events carry it so a fold can attribute them to the right combination.
+  defp combination(ctx), do: Map.get(ctx, :matrix_combination)
 
   defp emit_step_output(_context, _step, ""), do: :ok
 
@@ -924,7 +964,8 @@ defmodule TinyCI.Executor do
         timestamp: now(),
         stage: stage_name(context),
         step: step,
-        line: line
+        line: line,
+        matrix_combination: combination(context)
       })
     end)
   end
@@ -1045,7 +1086,8 @@ defmodule TinyCI.Executor do
       stage: stage_name(ctx),
       step: step,
       key: key,
-      result: result
+      result: result,
+      matrix_combination: combination(ctx)
     })
   end
 
@@ -1072,7 +1114,8 @@ defmodule TinyCI.Executor do
         timestamp: now(),
         stage: stage_name(ctx),
         step: step.name,
-        attempt: attempt
+        attempt: attempt,
+        matrix_combination: combination(ctx)
       })
     end
 

@@ -24,6 +24,9 @@ defmodule Mix.Tasks.TinyCi.Run do
     * `--output FORMAT` — output format: `json` for machine-readable output
     * `--events FILE` — write the structured run event stream as NDJSON to `FILE`
       (one JSON object per line); use `-` to write to stdout. See `docs/events.md`.
+    * `--no-record` — do not record this run to the run history. By default every run
+      is recorded under the data dir and read back with `mix tiny_ci.runs`. See
+      `docs/runs.md`.
     * `--break SPEC` — pause at a step/stage boundary. Repeatable. `SPEC` is
       `before:STAGE`, `after:STAGE`, `before:STAGE.STEP`, or `after:STAGE.STEP`.
     * `--break-timeout MS` — auto-resolve a breakpoint after `MS` milliseconds, so a
@@ -124,6 +127,7 @@ defmodule Mix.Tasks.TinyCi.Run do
           artifacts_dir: :string,
           list_artifacts: :boolean,
           events: :string,
+          record: :boolean,
           attest: :string,
           signing_key: :string,
           break: :keep,
@@ -267,6 +271,7 @@ defmodule Mix.Tasks.TinyCi.Run do
       base: opts[:base],
       artifacts_dir: opts[:artifacts_dir],
       events: opts[:events],
+      record: opts[:record],
       control: control,
       secrets: secrets
     ]

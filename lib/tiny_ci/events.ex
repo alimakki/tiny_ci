@@ -14,14 +14,26 @@ defmodule TinyCI.Events do
   ISO 8601 strings.
   """
 
-  @schema_version 2
+  @schema_version 3
 
   @doc """
   The current event-stream schema version, emitted on the `run_started` line.
-  Bump this when the event schema changes in a backwards-incompatible way.
+  Bump this whenever the event schema changes; `docs/events.md` says, per version,
+  whether the change was additive or breaking.
   """
   @spec schema_version() :: pos_integer()
   def schema_version, do: @schema_version
+
+  @doc false
+  # Step-scoped events carry the matrix combination they ran in, so a fold can
+  # attribute them. The key is written only inside matrix stages, which keeps every
+  # non-matrix line identical to what it was before schema 3.
+  @spec put_combination(map(), keyword(String.t()) | nil) :: map()
+  def put_combination(map, nil), do: map
+
+  def put_combination(map, combination),
+    do:
+      Map.put(map, "matrix_combination", Map.new(combination, fn {k, v} -> {to_string(k), v} end))
 
   @doc """
   Emits an event to the run's dispatcher, if one is present on the context.
@@ -96,15 +108,25 @@ defmodule TinyCI.Events do
 end
 
 defmodule TinyCI.Events.PipelineStarted do
-  @moduledoc "Emitted when a pipeline run begins."
+  @moduledoc """
+  Emitted when a pipeline run begins.
+
+  `branch`, `commit`, `base_ref` and `root` record the run's git identity (all
+  `nil` when the run had no such context). This is the only place the stream
+  records it, so a run listing can show it without a separate write.
+  """
 
   @enforce_keys [:run_id, :timestamp, :pipeline_name]
-  defstruct [:run_id, :timestamp, :pipeline_name]
+  defstruct [:run_id, :timestamp, :pipeline_name, :branch, :commit, :base_ref, :root]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
           timestamp: DateTime.t(),
-          pipeline_name: atom()
+          pipeline_name: atom(),
+          branch: String.t() | nil,
+          commit: String.t() | nil,
+          base_ref: String.t() | nil,
+          root: String.t() | nil
         }
 
   defimpl Jason.Encoder do
@@ -113,7 +135,11 @@ defmodule TinyCI.Events.PipelineStarted do
         %{
           "run_id" => event.run_id,
           "timestamp" => DateTime.to_iso8601(event.timestamp),
-          "pipeline_name" => to_string(event.pipeline_name)
+          "pipeline_name" => to_string(event.pipeline_name),
+          "branch" => event.branch,
+          "commit" => event.commit,
+          "base_ref" => event.base_ref,
+          "root" => event.root
         },
         opts
       )
@@ -237,13 +263,14 @@ defmodule TinyCI.Events.StepStarted do
   @moduledoc "Emitted when a step begins executing within a stage."
 
   @enforce_keys [:run_id, :timestamp, :stage, :step]
-  defstruct [:run_id, :timestamp, :stage, :step]
+  defstruct [:run_id, :timestamp, :stage, :step, :matrix_combination]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
           timestamp: DateTime.t(),
           stage: atom(),
-          step: atom()
+          step: atom(),
+          matrix_combination: keyword(String.t()) | nil
         }
 
   defimpl Jason.Encoder do
@@ -254,7 +281,8 @@ defmodule TinyCI.Events.StepStarted do
           "timestamp" => DateTime.to_iso8601(event.timestamp),
           "stage" => to_string(event.stage),
           "step" => to_string(event.step)
-        },
+        }
+        |> TinyCI.Events.put_combination(event.matrix_combination),
         opts
       )
     end
@@ -265,14 +293,15 @@ defmodule TinyCI.Events.StepSkipped do
   @moduledoc "Emitted when a step is skipped due to a condition."
 
   @enforce_keys [:run_id, :timestamp, :stage, :step, :reason]
-  defstruct [:run_id, :timestamp, :stage, :step, :reason]
+  defstruct [:run_id, :timestamp, :stage, :step, :reason, :matrix_combination]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
           timestamp: DateTime.t(),
           stage: atom(),
           step: atom(),
-          reason: String.t()
+          reason: String.t(),
+          matrix_combination: keyword(String.t()) | nil
         }
 
   defimpl Jason.Encoder do
@@ -284,7 +313,8 @@ defmodule TinyCI.Events.StepSkipped do
           "stage" => to_string(event.stage),
           "step" => to_string(event.step),
           "reason" => event.reason
-        },
+        }
+        |> TinyCI.Events.put_combination(event.matrix_combination),
         opts
       )
     end
@@ -302,7 +332,7 @@ defmodule TinyCI.Events.StepOutputLine do
   """
 
   @enforce_keys [:run_id, :timestamp, :stage, :step, :line]
-  defstruct [:run_id, :timestamp, :stage, :step, :line, stream: :stdout]
+  defstruct [:run_id, :timestamp, :stage, :step, :line, :matrix_combination, stream: :stdout]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
@@ -310,7 +340,8 @@ defmodule TinyCI.Events.StepOutputLine do
           stage: atom(),
           step: atom(),
           line: String.t(),
-          stream: :stdout | :stderr
+          stream: :stdout | :stderr,
+          matrix_combination: keyword(String.t()) | nil
         }
 
   defimpl Jason.Encoder do
@@ -323,7 +354,8 @@ defmodule TinyCI.Events.StepOutputLine do
           "step" => to_string(event.step),
           "line" => event.line,
           "stream" => to_string(event.stream)
-        },
+        }
+        |> TinyCI.Events.put_combination(event.matrix_combination),
         opts
       )
     end
@@ -334,14 +366,15 @@ defmodule TinyCI.Events.StepRetrying do
   @moduledoc "Emitted when a step is about to be retried after a failure."
 
   @enforce_keys [:run_id, :timestamp, :stage, :step, :attempt]
-  defstruct [:run_id, :timestamp, :stage, :step, :attempt]
+  defstruct [:run_id, :timestamp, :stage, :step, :attempt, :matrix_combination]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
           timestamp: DateTime.t(),
           stage: atom(),
           step: atom(),
-          attempt: pos_integer()
+          attempt: pos_integer(),
+          matrix_combination: keyword(String.t()) | nil
         }
 
   defimpl Jason.Encoder do
@@ -353,7 +386,8 @@ defmodule TinyCI.Events.StepRetrying do
           "stage" => to_string(event.stage),
           "step" => to_string(event.step),
           "attempt" => event.attempt
-        },
+        }
+        |> TinyCI.Events.put_combination(event.matrix_combination),
         opts
       )
     end
@@ -367,10 +401,23 @@ defmodule TinyCI.Events.StepCompleted do
   Carries the step's captured `output` so console/buffered consumers can render
   it without reaching into executor internals. May be empty when output was
   streamed live.
+
+  `allowed_failure` is `true` when the step failed but carried `allow_failure:`,
+  so its stage still passes.
   """
 
   @enforce_keys [:run_id, :timestamp, :stage, :step, :status, :duration_ms]
-  defstruct [:run_id, :timestamp, :stage, :step, :status, :duration_ms, output: ""]
+  defstruct [
+    :run_id,
+    :timestamp,
+    :stage,
+    :step,
+    :status,
+    :duration_ms,
+    :matrix_combination,
+    output: "",
+    allowed_failure: false
+  ]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
@@ -379,7 +426,9 @@ defmodule TinyCI.Events.StepCompleted do
           step: atom(),
           status: :passed | :failed | :skipped | :aborted,
           duration_ms: non_neg_integer(),
-          output: String.t()
+          output: String.t(),
+          allowed_failure: boolean(),
+          matrix_combination: keyword(String.t()) | nil
         }
 
   defimpl Jason.Encoder do
@@ -392,8 +441,10 @@ defmodule TinyCI.Events.StepCompleted do
           "step" => to_string(event.step),
           "status" => to_string(event.status),
           "duration_ms" => event.duration_ms,
-          "output" => event.output
-        },
+          "output" => event.output,
+          "allowed_failure" => event.allowed_failure
+        }
+        |> TinyCI.Events.put_combination(event.matrix_combination),
         opts
       )
     end
@@ -520,7 +571,7 @@ defmodule TinyCI.Events.CacheLookup do
   @moduledoc "Emitted when a cached step resolves its cache key (hit or miss)."
 
   @enforce_keys [:run_id, :timestamp, :stage, :step, :key, :result]
-  defstruct [:run_id, :timestamp, :stage, :step, :key, :result]
+  defstruct [:run_id, :timestamp, :stage, :step, :key, :result, :matrix_combination]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
@@ -528,7 +579,8 @@ defmodule TinyCI.Events.CacheLookup do
           stage: atom() | nil,
           step: atom(),
           key: String.t(),
-          result: :hit | :miss
+          result: :hit | :miss,
+          matrix_combination: keyword(String.t()) | nil
         }
 
   defimpl Jason.Encoder do
@@ -541,7 +593,8 @@ defmodule TinyCI.Events.CacheLookup do
           "step" => to_string(event.step),
           "key" => event.key,
           "result" => to_string(event.result)
-        },
+        }
+        |> TinyCI.Events.put_combination(event.matrix_combination),
         opts
       )
     end

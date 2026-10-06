@@ -1131,4 +1131,78 @@ defmodule TinyCI.EventsTest do
       assert step["status"] == "aborted"
     end
   end
+
+  describe "schema version 3" do
+    test "schema_version/0 is 3" do
+      assert Events.schema_version() == 3
+    end
+
+    test "PipelineStarted carries branch, commit, base_ref and root" do
+      json =
+        decode(%PipelineStarted{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          pipeline_name: :app,
+          branch: "main",
+          commit: "abc1234def",
+          base_ref: "origin/main",
+          root: "/work/app"
+        })
+
+      assert json["branch"] == "main"
+      assert json["commit"] == "abc1234def"
+      assert json["base_ref"] == "origin/main"
+      assert json["root"] == "/work/app"
+    end
+
+    test "PipelineStarted git fields default to null" do
+      json = decode(%PipelineStarted{run_id: @run_id, timestamp: @timestamp, pipeline_name: :app})
+
+      for key <- ~w(branch commit base_ref root) do
+        assert Map.has_key?(json, key)
+        assert json[key] == nil
+      end
+    end
+
+    test "StepCompleted encodes allowed_failure, defaulting to false" do
+      base = %StepCompleted{
+        run_id: @run_id,
+        timestamp: @timestamp,
+        stage: :t,
+        step: :u,
+        status: :failed,
+        duration_ms: 1
+      }
+
+      assert decode(base)["allowed_failure"] == false
+      assert decode(%{base | allowed_failure: true})["allowed_failure"] == true
+    end
+
+    @step_events [
+      {StepStarted, %{}},
+      {StepSkipped, %{reason: "r"}},
+      {StepOutputLine, %{line: "hi"}},
+      {StepRetrying, %{attempt: 2}},
+      {StepCompleted, %{status: :passed, duration_ms: 1}},
+      {CacheLookup, %{key: "k", result: :hit}}
+    ]
+
+    for {module, extra} <- @step_events do
+      test "#{inspect(module)} encodes matrix_combination only when set" do
+        fields =
+          Map.merge(
+            %{run_id: @run_id, timestamp: @timestamp, stage: :t, step: :u},
+            unquote(Macro.escape(extra))
+          )
+
+        plain = decode(struct!(unquote(module), fields))
+        refute Map.has_key?(plain, "matrix_combination")
+
+        combo =
+          struct!(unquote(module), Map.put(fields, :matrix_combination, os: "linux", otp: "27"))
+
+        assert decode(combo)["matrix_combination"] == %{"os" => "linux", "otp" => "27"}
+      end
+    end
+  end
 end

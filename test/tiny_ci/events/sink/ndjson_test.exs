@@ -4,7 +4,7 @@ defmodule TinyCI.Events.Sink.NDJSONTest do
   import ExUnit.CaptureIO
 
   alias TinyCI.Events.Sink.NDJSON
-  alias TinyCI.Events.{PipelineStarted, StageStarted}
+  alias TinyCI.Events.{PipelineStarted, StageStarted, StepOutputLine}
 
   @ts ~U[2024-01-15 10:30:00.000000Z]
   @iso "2024-01-15T10:30:00.000000Z"
@@ -86,5 +86,48 @@ defmodule TinyCI.Events.Sink.NDJSONTest do
     lines = path |> File.read!() |> String.split("\n", trim: true)
     assert length(lines) == 2
     Enum.each(lines, fn line -> assert {:ok, _} = Jason.decode(line) end)
+  end
+
+  describe "encode_line/2" do
+    test "is the stable envelope: exact keys for a StepOutputLine" do
+      event = %StepOutputLine{run_id: "r1", timestamp: @ts, stage: :test, step: :unit, line: "ok"}
+
+      decoded = 7 |> NDJSON.encode_line(event) |> Jason.decode!()
+
+      assert decoded == %{
+               "seq" => 7,
+               "type" => "step_output",
+               "run_id" => "r1",
+               "ts" => @iso,
+               "stage" => "test",
+               "step" => "unit",
+               "line" => "ok",
+               "stream" => "stdout"
+             }
+    end
+
+    test "run_started carries schema_version and the git identity" do
+      event = %PipelineStarted{
+        run_id: "r1",
+        timestamp: @ts,
+        pipeline_name: :app,
+        branch: "main",
+        commit: "abc",
+        base_ref: nil,
+        root: "/w"
+      }
+
+      decoded = NDJSON.encode_line(1, event) |> Jason.decode!()
+
+      assert decoded["schema_version"] == 3
+
+      assert Map.take(decoded, ~w(branch commit base_ref root)) ==
+               %{"branch" => "main", "commit" => "abc", "base_ref" => nil, "root" => "/w"}
+    end
+
+    test "returns a single line with no trailing newline" do
+      line = NDJSON.encode_line(1, %StageStarted{run_id: "r", timestamp: @ts, stage: :a})
+      refute String.contains?(line, "\n")
+    end
   end
 end

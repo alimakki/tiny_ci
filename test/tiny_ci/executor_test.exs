@@ -2192,4 +2192,117 @@ defmodule TinyCI.ExecutorTest do
       assert store["leaked"] == "***"
     end
   end
+
+  describe "schema 3 event fields" do
+    alias TinyCI.Events.{
+      PipelineStarted,
+      StepCompleted,
+      StepOutputLine,
+      StepRetrying,
+      StepSkipped,
+      StepStarted
+    }
+
+    @events_opts [listener: TinyCI.Listener.Silent, output: :buffered, record: false]
+
+    # `emit/2` is synchronous, so by the time `run_pipeline/3` returns every event
+    # is already in the mailbox; draining with `after 0` is not a wait.
+    defp run_events(stages, context \\ nil) do
+      opts = @events_opts ++ [extra_sinks: [{TinyCI.TestSink, pid: self()}]]
+      Executor.run_pipeline(stages, context, opts)
+      drain_events([])
+    end
+
+    defp drain_events(acc) do
+      receive do
+        {:event, event} -> drain_events([event | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    test "run_started carries the run's git identity and root" do
+      ctx = %{
+        store: %{},
+        branch: "feature/x",
+        commit: "abc1234def5678",
+        base_ref: "origin/main",
+        root: "/work/app"
+      }
+
+      stage = %Stage{name: :s, mode: :serial, steps: [%Step{name: :a, cmd: "true"}]}
+
+      assert %PipelineStarted{
+               branch: "feature/x",
+               commit: "abc1234def5678",
+               base_ref: "origin/main",
+               root: "/work/app"
+             } = run_events([stage], ctx) |> Enum.find(&match?(%PipelineStarted{}, &1))
+    end
+
+    test "run_started git fields are nil when the context has none" do
+      stage = %Stage{name: :s, mode: :serial, steps: [%Step{name: :a, cmd: "true"}]}
+
+      assert %PipelineStarted{root: nil} =
+               run_events([stage], %{store: %{}}) |> Enum.find(&match?(%PipelineStarted{}, &1))
+    end
+
+    test "step_finished reports allowed_failure only for a tolerated failure" do
+      stage = %Stage{
+        name: :s,
+        mode: :serial,
+        steps: [
+          %Step{name: :flaky, cmd: "false", allow_failure: true},
+          %Step{name: :fine, cmd: "true"}
+        ]
+      }
+
+      events = run_events([stage])
+
+      assert %StepCompleted{status: :failed, allowed_failure: true} =
+               Enum.find(events, &match?(%StepCompleted{step: :flaky}, &1))
+
+      assert %StepCompleted{status: :passed, allowed_failure: false} =
+               Enum.find(events, &match?(%StepCompleted{step: :fine}, &1))
+    end
+
+    test "step events outside a matrix stage carry no combination" do
+      stage = %Stage{name: :s, mode: :serial, steps: [%Step{name: :a, cmd: "echo hi"}]}
+
+      step_events =
+        run_events([stage])
+        |> Enum.filter(&(&1.__struct__ in [StepStarted, StepOutputLine, StepCompleted]))
+
+      assert length(step_events) == 3
+      assert Enum.all?(step_events, &is_nil(&1.matrix_combination))
+    end
+
+    test "step events inside a matrix stage name the combination they ran in" do
+      stage = %Stage{
+        name: :compat,
+        mode: :serial,
+        matrix: [v: ["a", "b"]],
+        steps: [
+          %Step{name: :say, cmd: "echo $V"},
+          %Step{name: :skipped, cmd: "true", when_condition: fn _ctx -> false end},
+          # Last: a serial stage halts on its first failure.
+          %Step{name: :flaky, cmd: "false", retry: 1}
+        ]
+      }
+
+      events = run_events([stage])
+      scoped = [StepStarted, StepOutputLine, StepRetrying, StepSkipped, StepCompleted]
+      step_events = Enum.filter(events, &(&1.__struct__ in scoped))
+
+      assert Enum.all?(step_events, &(&1.matrix_combination in [[v: "a"], [v: "b"]]))
+
+      for combo <- [[v: "a"], [v: "b"]], module <- scoped do
+        assert Enum.any?(
+                 step_events,
+                 &(&1.__struct__ == module and &1.matrix_combination == combo)
+               ),
+               "no #{inspect(module)} for #{inspect(combo)}"
+      end
+    end
+  end
 end

@@ -1,6 +1,6 @@
 # M0-06 — Persist every run; `runs` list/show; a shared projection
 
-**Milestone:** M0 · **Size:** M · **Depends on:** M0-03 · **Status:** ⬜ Not started
+**Milestone:** M0 · **Size:** M · **Depends on:** M0-03 · **Status:** ✅ Done (2026-10-06)
 **Written against:** commit `b9496e7` (2026-08-08)
 
 ## Summary
@@ -201,14 +201,30 @@ must **not** add a recorder). `PipelineStarted` is emitted with the new fields.
 
 ## Acceptance criteria
 
-- [ ] Every `mix tiny_ci.run` (not `--dry-run`, not `--no-record`) leaves `events.ndjson` and
+- [x] Every `mix tiny_ci.run` (not `--dry-run`, not `--no-record`) leaves `events.ndjson` and
       `meta.json` under the data dir.
-- [ ] `run_started` carries branch, commit, base_ref, root; schema version is 3 and documented.
-- [ ] `Projection.fold/1` over a recorded stream reproduces the run's statuses, durations,
+      — `tiny_ci_runs_test.exs` "a run leaves events.ndjson and meta.json in the run store",
+      "--no-record leaves nothing", "--dry-run leaves nothing", "a failing run is recorded too";
+      `tiny_ci_run_test.exs` "a failed step exits nonzero in a real MIX_ENV=test subprocess"
+      (records into a temporary `XDG_DATA_HOME`).
+- [x] `run_started` carries branch, commit, base_ref, root; schema version is 3 and documented.
+      — `events_test.exs` `describe "schema version 3"`; `executor_test.exs` "run_started
+      carries the run's git identity and root"; `docs/events.md`.
+- [x] `Projection.fold/1` over a recorded stream reproduces the run's statuses, durations,
       output, matrix runs, attempts, and divergence.
-- [ ] A run killed mid-way lists as `interrupted`.
-- [ ] `mix tiny_ci.runs`, `runs show`, `runs prune` work and are documented.
-- [ ] The recorder never affects the run's exit code.
+      — `runs/projection_test.exs`, including `describe "parity with Results.to_json/3 for a real
+      run"` (key paths, statuses, attempts, `allowed_failure`, output) and the breakpoint and
+      divergence tests.
+- [x] A run killed mid-way lists as `interrupted`.
+      — `runs_test.exs` "a run directory with events but no meta lists as interrupted";
+      `recorder_test.exs` "a stream that ends without run_finished is recorded as interrupted";
+      also checked by hand with `kill -9` on a running pipeline.
+- [x] `mix tiny_ci.runs`, `runs show`, `runs prune` work and are documented.
+      — `tiny_ci_runs_test.exs` (list, `--output json`, `--limit`, `show`, `show --events`,
+      `prune`); `docs/runs.md`; README "Run History".
+- [x] The recorder never affects the run's exit code.
+      — `recorder_test.exs` `describe "never failing the run"`; `executor_recording_test.exs`
+      "a recorder that cannot write does not change the run's result".
 
 ## Pitfalls
 
@@ -227,6 +243,79 @@ must **not** add a recorder). `PipelineStarted` is emitted with the new fields.
 - `docs/events.md`: schema 3 fields.
 - README: `--no-record` in the flag table; a "Run history" subsection pointing at `docs/runs.md`.
 
+## Deviations
+
+Written against `b9496e7`; implemented on `33f9779`.
+
+- **Schema 3 carries two more fields than the spec listed.** `step_finished.allowed_failure`, and
+  `matrix_combination` on every step-scoped event inside a matrix stage (written only there, so
+  non-matrix lines are unchanged). Without the first the projection cannot reproduce
+  `Results.to_json`; without the second the steps of concurrent matrix combinations cannot be told
+  apart, so `matrix_runs[].steps` would be empty. Approved before implementation.
+- **Recorder wired in `run_pipeline/3`, not `build_sink_specs/3`.** That helper has no context and
+  the ephemeral-dispatcher path calls it too. `record_specs/2` adds the recorder when the context
+  has a binary `:root` and `record:` is not `false` (the Mix task passes `nil` when the flag is
+  absent).
+- **`Projection` grew three functions:** `finalize/1` (a run, stage, step or matrix run still
+  running becomes `interrupted`; used by the recorder's `close/1` and when folding an unfinished
+  file), `from_json/1` (so `Runs.list/2` can read `meta.json` back), and `to_stage_results/1` (so
+  `runs show` reuses `Reporter.print_summary/1`).
+- **Step `output` is one string, not a list of lines.** While a step runs it is built from the
+  `step_output` lines, joined by `"\n"`; appending a line to a list per event is quadratic, and the
+  recorder does it inside the dispatcher, while binary append is cheap. When the step finishes,
+  `step_finished.output` replaces it when non-empty, because the line events drop blank lines and
+  the trailing newline. So a finished step's output equals `Results.to_json/3`'s exactly, and the
+  JSON is a true superset.
+- **Stages, steps, and matrix runs are nested structs** (`Projection.Stage`, `.Step`,
+  `.MatrixRun`), per AGENTS.md, rather than the maps the spec's types showed.
+- **Breakpoints:** one entry per `pause_id`, with the resume fields merged in, rather than two
+  appended entries.
+- **Step updates are upserts.** A `when:`-skipped step emits `step_skipped` with no `step_started`.
+- **`Runs.projection/2` folds `events.ndjson`** (the authoritative source); `list/2` prefers
+  `meta.json`, falling back to the fold when it is missing or corrupt. `Runs.load/2` skips blank
+  and undecodable lines, since a killed run can leave a truncated last line.
+- **`Runs` expands the root** before hashing it into a project id, and refuses a `run_id` that is
+  not a bare directory name.
+- **Recorder writes with `:file.write/2`.** `IO.binwrite/2` raises on a dead device, which would
+  have bypassed the recorder's quiet self-disable.
+- **The "branch contains `/`" pitfall no longer applies.** `Artifacts.generate_run_id/1` is
+  `<ts>_<commit7>_<random>` and has no branch in it.
+- **Test isolation.** `test/test_helper.exs` redirects `:runs_base_dir` to a temporary directory
+  for the whole suite, since recording is on by default and the Mix task tests run with the repo
+  as the root. The one test that spawns a real `mix tiny_ci.run` subprocess sets
+  `XDG_DATA_HOME`, because a fresh VM ignores the redirect. Recording tests live in their own
+  `async: false` file, `executor_recording_test.exs`.
+- **`mix tiny_ci.runs` also accepts an explicit `list`**, rejects a non-positive `--limit`, and
+  parses options with `strict:`, so a typo such as `prune --kepp=0` is an error rather than a
+  silent no-op.
+- **`runs show` prints why steps failed.** Beyond the spec's tree, it prints the last 50 lines of
+  each failed (not `allow_failure`) step's output, since the tree alone cannot explain a failure
+  and that is the point of looking at yesterday's run.
+- **The recorder warns on stderr, not through `Logger`.** `Logger` writes to stdout and would put
+  a log line in front of `--output json` or `--events -` when the data dir is unwritable.
+- **A run that emitted no events leaves nothing behind.** `Recorder.close/1` removes the empty
+  events file and run directory (non-recursively), so a run that failed before it began is not
+  listed as a nameless interrupted run.
+- **A bad `control:` spec no longer leaves the run's dispatcher running.** `run_pipeline/3` stops
+  it and reraises (`start_control_or_stop/3`); otherwise the recorder's file handle would leak.
+- **`Runs.list/2` tolerates a malformed run.** A `meta.json` of the wrong shape falls back to the
+  recording, and a recording that cannot be read is omitted rather than failing the listing.
+- **Parallel-stage step order.** `runs show` lists steps in the order they started, which can
+  differ from definition order in a parallel stage. Documented in `docs/runs.md`.
+
 ## Follow-ups
 
-_(none yet)_
+- Invalid UTF-8 in step output makes `Jason.encode!` raise inside `NDJSON.encode_line/2`; the
+  dispatcher drops that event with a logged error, so `--events` and the recording both have a
+  gap for that step. Scrub invalid bytes in `encode_line/2`.
+- `Artifacts.base_dir/0` ignores `XDG_DATA_HOME`; `Runs.base_dir/0` honours it.
+- A run still in progress lists as `interrupted` until it finishes. An mtime heuristic or a lock
+  file would let the listing tell live from dead.
+- `runs show` needs the full run id; a unique prefix or `latest` would help.
+- The recorder keeps the whole projection, including step output, in memory, and `meta.json`
+  carries output, so listings read it. Revisit if either gets large.
+- A killed run task never reaches the recorder's `close/1`; M2-01's `Runs.mark/3` covers that.
+- A hand-corrupted `meta.json` whose scalar fields have the wrong types (for example
+  `"started_at": 5`) still decodes and can crash the listing's formatting; only a wrong overall
+  shape falls back to the recording. A recording that cannot be read is omitted from the listing
+  without a note, and `prune` still counts it toward `--keep`.
