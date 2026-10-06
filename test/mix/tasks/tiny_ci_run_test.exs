@@ -94,14 +94,23 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       path = Path.join(root, "tiny_ci.exs")
       File.write!(path, "stage :fail do\n  step :boom, cmd: \"exit 1\"\nend\n")
 
+      # The subprocess is a fresh VM, so it ignores the suite's runs-dir redirect and
+      # would record into the developer's real data dir. XDG_DATA_HOME moves it.
+      data_home = Path.join(root, "xdg")
+
       {output, status} =
         System.cmd("mix", ["tiny_ci.run", "--file", path, "--root", root],
-          env: [{"MIX_ENV", "test"}, {"ERL_FLAGS", "+S 2:2"}],
+          env: [{"MIX_ENV", "test"}, {"ERL_FLAGS", "+S 2:2"}, {"XDG_DATA_HOME", data_home}],
           stderr_to_stdout: true
         )
 
       assert output =~ "Pipeline failed"
       assert status == 1
+
+      # Every real run is recorded, a failed one included.
+      assert [meta] = Path.wildcard(Path.join(data_home, "tiny_ci/runs/*/*/meta.json"))
+      assert meta |> File.read!() |> Jason.decode!() |> Map.fetch!("status") == "failed"
+      assert File.regular?(Path.join(Path.dirname(meta), "events.ndjson"))
     end
 
     test "invalid input exits nonzero in a real MIX_ENV=test subprocess" do

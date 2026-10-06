@@ -46,7 +46,10 @@ defmodule TinyCI.Events.Sink.NDJSON do
     end
   end
 
-  defp encode_line(seq, event) do
+  @doc false
+  # Public so `TinyCI.Runs.Recorder` writes exactly the envelope `--events` does.
+  @spec encode_line(pos_integer(), TinyCI.Events.t()) :: String.t()
+  def encode_line(seq, event) do
     event
     |> Jason.encode!()
     |> Jason.decode!()

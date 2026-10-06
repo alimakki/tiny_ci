@@ -53,6 +53,7 @@ mix tiny_ci.run [pipeline] [options]
 | `--artifacts-dir DIR` | | Override the base directory for artifact storage |
 | `--list-artifacts` | | Show artifacts from the most recent run and exit |
 | `--events FILE` | | Write NDJSON to `FILE`; `-` reserves stdout for events and cannot be combined with `--output json` |
+| `--no-record` | | Do not record this run to the run history (see [Run History](#run-history)) |
 | `--attest FILE` | | Write a signed provenance attestation for the run |
 | `--signing-key PATH` | | Ed25519 private key used by `--attest` |
 | `--break SPEC` | | Pause at a boundary — `before:STAGE[.STEP]` / `after:STAGE[.STEP]`. Repeatable |
@@ -165,6 +166,24 @@ When `--file` is not given and no pipeline name is provided, TinyCI searches in 
 2. `.tiny_ci/pipeline.exs`
 
 Named pipelines live in `.tiny_ci/<name>.exs` or nested as `.tiny_ci/<dir>/<name>.exs`.
+
+### Run History
+
+Every run is recorded: its full [event stream](docs/events.md) and a summary are written
+under `~/.local/share/tiny_ci/runs/` (or `$XDG_DATA_HOME/tiny_ci/runs/`). Read them back
+with `mix tiny_ci.runs`:
+
+```bash
+mix tiny_ci.runs                      # this project's runs, newest first
+mix tiny_ci.runs show RUN_ID          # identity, the stage/step tree, why steps failed
+mix tiny_ci.runs show RUN_ID --events # the raw NDJSON recording
+mix tiny_ci.runs --output json        # machine-readable
+mix tiny_ci.runs prune --keep 50      # delete all but the newest 50
+mix tiny_ci.run --no-record           # skip recording one run
+```
+
+A run killed before it finished is listed as `interrupted`. Runs are never deleted
+automatically. See [docs/runs.md](docs/runs.md) for the layout and the projection contract.
 
 ## DSL Reference
 
@@ -1025,7 +1044,7 @@ mix tiny_ci.run jobs/nightly --dry-run
 ## Event System
 
 Every phase of a pipeline run emits a typed event struct. These events are the
-foundation for the event log, run history CLI, and web dashboard (coming in Phase 1).
+foundation for the [run history](#run-history) and the web dashboard (coming later).
 
 All events live under `TinyCI.Events.*` and share two mandatory fields:
 
@@ -1080,58 +1099,132 @@ Jason.encode!(event)
 ## Project Structure
 
 ```
-lib/
-  mix/tasks/
-    tiny_ci.run.ex        # CLI entry point (mix tiny_ci.run)
-  tiny_ci/
-    application.ex        # OTP application / task + control-registry supervisor
-    context.ex            # Git context builder
-    control.ex            # Execution control: checkpoint / subscribe / resume
-    control/
-      breakpoint.ex       # --break grammar: parse, format, match, validate
-      console.ex          # Terminal REPL driver for paused boundaries
-      server.ex           # Per-run control plane (armed breaks, paused sessions)
-      session.ex          # A paused boundary and its inspectable payload
-    discovery.ex          # Pipeline file discovery
-    dry_run.ex            # --dry-run plan printer
-    dsl/
-      condition_eval.ex   # Condition expression evaluator
-      interpreter.ex      # DSL file parser → PipelineSpec
-      validator.ex        # AST allowlist validator
-    dag.ex                # DAG level computation and cycle detection
-    events.ex             # Typed event vocabulary
-    executor.ex           # Stage/step execution engine
-    executor/
-      env.ex              # Resolves pipeline ⊕ stage ⊕ step env for a step
-    hooks.ex              # Hook runner
-    matrix.ex             # Matrix combination generator and helpers
-    matrix_run_result.ex  # MatrixRunResult struct
-    output.ex             # Command output streaming
-    pipeline_spec.ex      # PipelineSpec struct
-    reporter.ex           # Summary and output formatting
-    tiny_ci.ex            # Step and Stage struct definitions
-    step_result.ex        # StepResult struct
-    stage_result.ex       # StageResult struct
-test/
-  mix/tasks/
-    tiny_ci_run_test.exs  # Mix task integration tests
-  tiny_ci/
-    context_test.exs
-    control/
-      breakpoint_test.exs
-      console_test.exs
-      server_test.exs
-      session_test.exs
-    control_integration_test.exs
-    discovery_test.exs
-    dsl/
-      condition_eval_test.exs
-      interpreter_test.exs
-      validator_test.exs
-    events_test.exs
-    executor_test.exs
-    integration_test.exs
-    reporter_test.exs
+tiny_ci/
+  lib/
+    mix/tasks/                       # The CLI: one Mix task per command
+      tiny_ci.run.ex                 #   run a pipeline
+      tiny_ci.runs.ex                #   run history: list / show / prune
+      tiny_ci.cache.ex               #   dependency cache: clean / prune / stats
+      tiny_ci.gen.action.ex          #   scaffold a module action and its test
+      tiny_ci.actions.audit.ex       #   verify module actions against mix.lock
+      tiny_ci.actions.index.ex       #   scan installed packages for actions
+      tiny_ci.actions.search.ex      #   search the action registry
+      tiny_ci.attest.gen_key.ex      #   generate an Ed25519 signing key
+      tiny_ci.attest.verify.ex       #   verify a run attestation
+    tiny_ci/
+      application.ex                 # OTP application: task and control-registry supervisors
+      tiny_ci.ex                     # Step and Stage structs
+      pipeline_spec.ex               # PipelineSpec: the interpreter's resolved output
+      discovery.ex                   # Pipeline file discovery
+      dry_run.ex                     # --dry-run plan printer
+      context.ex                     # Git context: branch, commit, changed files, base ref
+      dag.ex                         # Stage dependency levels and cycle detection
+      matrix.ex                      # Matrix combinations and labels
+      secrets.ex                     # Resolves `secret` declarations before a run
+      redaction.ex                   # Masks secret values in any term
+      artifacts.ex                   # Per-run artifact persistence
+      output.ex                      # Command output capture and streaming
+      hook.ex                        # Hook struct
+      hooks.ex                       # Runs hooks after a pipeline completes
+      reporter.ex                    # Console summary tree
+      results.ex                     # Run results as JSON (--output json)
+      stage_result.ex                # StageResult struct
+      step_result.ex                 # StepResult struct
+      matrix_run_result.ex           # MatrixRunResult struct
+      listener.ex                    # Console progress behaviour
+      listener/
+        human.ex                     #   human-readable progress
+        silent.ex                    #   no output
+      dsl/                           # The pipeline DSL, as data: nothing here executes a file
+        interpreter.ex               #   parses a pipeline file into a PipelineSpec
+        validator.ex                 #   AST allowlist, derived from the spec
+        spec.ex                      #   single source of truth for the DSL
+        spec/entry.ex                #   one directive, option, or condition symbol
+        condition_eval.ex            #   evaluates `when:` conditions
+        value.ex                     #   keeps action config inert until runtime
+        diagnostic.ex                #   a load-time problem with a source span
+        flow_analysis.ex             #   semantic diagnostics over a resolved pipeline
+      executor.ex                    # Stage/step execution engine
+      executor/
+        env.ex                       #   resolves pipeline + stage + step env
+        crash.ex                     #   turns a caught crash into step output
+        callback.ex                  #   callback IO capture and timeouts
+        driver.ex                    #   how a `module:` action runs
+        driver/inline.ex             #     in the runner's BEAM
+        driver/sandbox.ex            #     inside an OS sandbox
+      events.ex                      # Typed event vocabulary and schema version
+      event_sink.ex                  # Behaviour for event consumers
+      events/
+        dispatcher.ex                #   per-run: assigns `seq`, fans out to sinks
+        sink/console.ex              #   human console output
+        sink/ndjson.ex               #   --events NDJSON writer
+      runs.ex                        # Run store: list / load / projection / prune
+      runs/
+        recorder.ex                  #   sink that records every run
+        projection.ex                #   folds events into a run summary
+      cache.ex                       # Dependency cache
+      cache/
+        copy.ex                      #   file and tree copy (cloning where possible)
+        lock.ex                      #   cross-process advisory lock
+      control.ex                     # Execution control: pause, inspect, resume
+      control/
+        breakpoint.ex                #   --break grammar: parse, match, validate
+        console.ex                   #   terminal driver for a paused boundary
+        server.ex                    #   per-run control plane
+        session.ex                   #   a paused boundary and its payload
+      action.ex                      # The contract for `module:` actions
+      action/
+        audit.ex                     #   verify / analyze a pipeline's actions
+        lockfile.ex                  #   mix.lock as the action lockfile
+        metadata.ex                  #   declarative action metadata
+        resolver.ex                  #   resolves actions against the lockfile
+      registry.ex                    # Curated index of action packages
+      registry/
+        entry.ex                     #   one indexed action
+        index.ex                     #   searchable collection of entries
+      provenance.ex                  # Builds a statement of what a run did
+      provenance/
+        attestation.ex               #   signed DSSE-style envelope
+        collector.ex                 #   sink that gathers a run's events
+        signer.ex                    #   signer behaviour
+        signer/local_key.ex          #   default Ed25519 signer
+      sandbox/                       # OS sandbox for third-party actions
+        backend.ex                   #   backend behaviour
+        backend/seatbelt.ex          #     macOS (sandbox-exec)
+        backend/bubblewrap.ex        #     Linux (bwrap)
+        backend/runtime.ex           #     shared by the OS backends
+        policy.ex                    #   the authority granted to an action
+        profile.ex                   #   renders a policy for a backend
+        protocol.ex                  #   wire format across the boundary
+        redaction.ex                 #   deprecated alias of TinyCI.Redaction
+        runner.ex                    #   entrypoint inside the sandbox
+        trust.ex                     #   inline vs sandboxed, by provenance
+  test/                              # Mirrors lib/: test/tiny_ci/<area>/<module>_test.exs
+    mix/tasks/                       #   Mix task tests
+    support/                         #   fixtures compiled into the test build
+      git_fixtures.ex                #     temporary git repositories
+      integration_fixtures.ex        #     pipelines for end-to-end tests
+      registry_fixtures.ex           #     registry entries
+      regression_actions.ex          #     action modules for regression tests
+      runs_fixtures.ex               #     run store redirection and sample recordings
+      sandbox_fixtures.ex            #     sandboxed action modules
+      test_sink.ex                   #     forwards events to the test process
+    tiny_ci/
+      executor_test.exs              #   engine behaviour
+      executor_recording_test.exs    #   run recording from the executor
+      execution_regression_test.exs  #   regressions found by review
+      integration_test.exs           #   end-to-end pipelines
+      control_integration_test.exs   #   breakpoints end to end
+    test_helper.exs                  #   excludes unavailable sandbox backends; redirects the run store
+  docs/                              # Guides: events, runs, actions, provenance, sandbox, ...
+    archive/                         #   superseded design documents
+  config/config.exs                  # Application config (empty by default)
+  .tiny_ci/                          # This project's own pipeline (dogfood)
+  .tasks/                            # Per-task agent specs; INDEX.md tracks status
+  tiny_ci_lsp/                       # Language server: a separate Mix project that depends on core
+  editors/vscode/                    # VS Code client for the language server
+  ROADMAP.md                         # Milestones and gates
+  AGENTS.md                          # Elixir style guide for contributors and agents
 ```
 
 ## Development

@@ -16,7 +16,8 @@ mix tiny_ci.run --events -            # write to stdout instead
 
 ```
 executor ──emit──▶ TinyCI.Events.Dispatcher ──┬─▶ TinyCI.Events.Sink.Console  (human output)
-                   (assigns monotonic seq)     └─▶ TinyCI.Events.Sink.NDJSON   (--events)
+                   (assigns monotonic seq)     ├─▶ TinyCI.Events.Sink.NDJSON   (--events)
+                                               └─▶ TinyCI.Runs.Recorder        (run history)
 ```
 
 - `TinyCI.Events` — the event vocabulary (one struct per event type) plus
@@ -33,6 +34,9 @@ Execution control (T10) both writes to and reads from this stream: a paused
 boundary emits `breakpoint_hit` before blocking, and the control plane emits
 `breakpoint_resumed` and `run_diverged`. See
 [execution-control.md](execution-control.md).
+
+`TinyCI.Runs.Recorder` is attached to every run that has a project root and writes the
+same stream to the run history. See [runs.md](runs.md).
 
 The dispatcher is per-run (its pid lives on the run context), so concurrent runs
 never interleave and `async: true` tests stay isolated.
@@ -57,13 +61,25 @@ fields the dispatcher/sink add.
 | `type`           | yes    | Event type discriminator (see table below)               |
 | `run_id`         | yes    | Identifier shared by every event in a run                |
 | `ts`             | yes    | ISO-8601 timestamp                                        |
-| `schema_version` | `run_started` only | Bumped on backwards-incompatible schema changes |
+| `schema_version` | `run_started` only | Bumped when the schema changes; each version's entry below says whether it was additive |
 
 Correlation IDs (`run_id`, `stage`, `step`, matrix `combination`) tie related
 events together. **Order is only guaranteed within a single correlation** — across
 correlations, rely on `seq`, not arrival order.
 
-The current `schema_version` is `2`.
+The current `schema_version` is `3`.
+
+**Changed in 3:** all additive, so a consumer that ignores unknown keys needs no change.
+
+- `run_started` now carries `branch`, `commit`, `base_ref`, and `root` (each `null` when the
+  run had no such context). This is the only place the stream records the run's git
+  identity.
+- `step_finished` now carries `allowed_failure` (`true` when the step failed but carried
+  `allow_failure:`, so its stage still passes).
+- Every step-scoped event (`step_started`, `step_skipped`, `step_output`, `step_retrying`,
+  `step_finished`, `cache_lookup`) inside a matrix stage now carries `matrix_combination`,
+  the combination it ran in. The key is absent outside matrix stages. Without it, the steps
+  of concurrent combinations could not be told apart.
 
 **Changed in 2:** the `status` field on `run_started`'s counterparts —
 `run_finished`, `stage_finished`, and `step_finished` — can now also be `"aborted"`
@@ -75,7 +91,7 @@ three `breakpoint_*` / `run_diverged` types below are additive.
 
 | `type`                | Emitted when…                          | Key fields beyond the envelope                 |
 |-----------------------|----------------------------------------|------------------------------------------------|
-| `run_started`         | a pipeline run begins                  | `pipeline_name`, `schema_version`              |
+| `run_started`         | a pipeline run begins                  | `pipeline_name`, `schema_version`, `branch`, `commit`, `base_ref`, `root` |
 | `run_finished`        | a pipeline run ends                    | `status`, `duration_ms`                        |
 | `stage_started`       | a stage begins                         | `stage`                                        |
 | `stage_skipped`       | a stage is skipped                     | `stage`, `reason`                              |
@@ -84,7 +100,7 @@ three `breakpoint_*` / `run_diverged` types below are additive.
 | `step_skipped`        | a step is skipped                      | `stage`, `step`, `reason`                      |
 | `step_output`         | a line of step output                  | `stage`, `step`, `line`, `stream`              |
 | `step_retrying`       | a step is retried after a failure      | `stage`, `step`, `attempt`                     |
-| `step_finished`       | a step finishes                        | `stage`, `step`, `status`, `duration_ms`, `output` |
+| `step_finished`       | a step finishes                        | `stage`, `step`, `status`, `duration_ms`, `output`, `allowed_failure` |
 | `cache_lookup`        | a cached step resolves its key         | `stage`, `step`, `key`, `result` (`hit`/`miss`)|
 | `matrix_run_started`  | one matrix combination begins          | `stage`, `combination`                         |
 | `matrix_run_finished` | one matrix combination finishes        | `stage`, `combination`, `status`, `duration_ms`|
@@ -100,6 +116,8 @@ three `breakpoint_*` / `run_diverged` types below are additive.
   stderr into stdout when running commands, so in practice every line is
   `"stdout"` today; the field exists so consumers can rely on it once the streams
   are separated.
+- `matrix_combination` (schema 3) is an object like `{"elixir":"1.18","otp":"27"}`, present
+  on step-scoped events only inside a matrix stage.
 - `step_finished.output` carries the step's captured output so buffered/offline
   consumers can render it without reaching into executor internals; it may be
   empty when output was streamed live.
@@ -127,13 +145,13 @@ three `breakpoint_*` / `run_diverged` types below are additive.
 ## Example lines
 
 ```json
-{"seq":1,"type":"run_started","run_id":"abc123","ts":"2024-01-15T10:30:00.000000Z","pipeline_name":"app","schema_version":1}
+{"seq":1,"type":"run_started","run_id":"abc123","ts":"2024-01-15T10:30:00.000000Z","pipeline_name":"app","schema_version":3,"branch":"main","commit":"4f1c8a2b9d0e","base_ref":"origin/main","root":"/repo"}
 {"seq":2,"type":"stage_started","run_id":"abc123","ts":"2024-01-15T10:30:00.010000Z","stage":"test"}
 {"seq":3,"type":"step_started","run_id":"abc123","ts":"2024-01-15T10:30:00.011000Z","stage":"test","step":"unit"}
 {"seq":4,"type":"cache_lookup","run_id":"abc123","ts":"2024-01-15T10:30:00.012000Z","stage":"test","step":"unit","key":"deps-9f1c","result":"miss"}
 {"seq":5,"type":"step_output","run_id":"abc123","ts":"2024-01-15T10:30:00.230000Z","stage":"test","step":"unit","line":"1 test, 0 failures","stream":"stdout"}
 {"seq":6,"type":"step_retrying","run_id":"abc123","ts":"2024-01-15T10:30:00.240000Z","stage":"test","step":"unit","attempt":2}
-{"seq":7,"type":"step_finished","run_id":"abc123","ts":"2024-01-15T10:30:00.250000Z","stage":"test","step":"unit","status":"passed","duration_ms":239,"output":"1 test, 0 failures"}
+{"seq":7,"type":"step_finished","run_id":"abc123","ts":"2024-01-15T10:30:00.250000Z","stage":"test","step":"unit","status":"passed","duration_ms":239,"output":"1 test, 0 failures","allowed_failure":false}
 {"seq":8,"type":"matrix_run_started","run_id":"abc123","ts":"2024-01-15T10:30:00.260000Z","stage":"compat","combination":{"elixir":"1.18","otp":"27"}}
 {"seq":9,"type":"matrix_run_finished","run_id":"abc123","ts":"2024-01-15T10:30:01.100000Z","stage":"compat","combination":{"elixir":"1.18","otp":"27"},"status":"passed","duration_ms":840}
 {"seq":10,"type":"stage_skipped","run_id":"abc123","ts":"2024-01-15T10:30:01.110000Z","stage":"deploy","reason":"condition not met"}

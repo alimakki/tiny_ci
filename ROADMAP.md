@@ -73,7 +73,7 @@ Every milestone below is justified by at least one row of this table.
 
 Status legend: ⬜ not started · 🟡 in progress · ✅ done
 
-### M0 — Finish the fundamentals ⬜
+### M0 — Finish the fundamentals ✅
 
 The remaining correctness and safety gaps in the runner. All small, all blocking.
 
