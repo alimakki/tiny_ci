@@ -1,0 +1,887 @@
+defmodule TinyCI.CLI.Run do
+  @moduledoc false
+  # The body of `tiny_ci run` / `mix tiny_ci.run`. User-facing documentation is
+  # `help/1`, which the Mix task reuses as its @moduledoc so it is written once.
+
+  @behaviour TinyCI.CLI.Subcommand
+
+  alias TinyCI.{Artifacts, Discovery, DryRun, Executor, Hooks, Provenance, Reporter, Results}
+  alias TinyCI.Secrets
+  alias TinyCI.Action.Audit
+  alias TinyCI.Control
+  alias TinyCI.Listener
+
+  @switches [
+    file: :string,
+    root: :string,
+    base: :string,
+    dry_run: :boolean,
+    list: :boolean,
+    filter: :string,
+    output: :string,
+    no_cache: :boolean,
+    no_color: :boolean,
+    artifacts_dir: :string,
+    list_artifacts: :boolean,
+    events: :string,
+    record: :boolean,
+    attest: :string,
+    signing_key: :string,
+    break: :keep,
+    break_timeout: :integer,
+    break_timeout_action: :string,
+    debug_serial: :boolean
+  ]
+
+  @aliases [f: :file, r: :root]
+
+  @doc """
+  The `tiny_ci run` help text, with commands written as `cmd` (`"tiny_ci run"`, or
+  `"mix tiny_ci.run"` for the Mix task's documentation).
+  """
+  @spec help(String.t()) :: String.t()
+  def help(cmd) do
+    mix? = String.starts_with?(cmd, "mix")
+    runs_cmd = if mix?, do: "mix tiny_ci.runs", else: "tiny_ci runs"
+
+    usage_exit =
+      if mix? do
+        "usage error: an unknown flag, a value of the wrong type (such as " <>
+          "`--break-timeout abc`), or `--events -` together with `--output json`. " <>
+          "This task raises a Mix error (exit `1`) for those and for every failed run; " <>
+          "the standalone `tiny_ci run` exits `2` for the usage errors."
+      else
+        "usage error: an unknown flag, a value of the wrong type (such as " <>
+          "`--break-timeout abc`), or `--events -` together with `--output json`. " <>
+          "Any other invalid value (`--output xml`, a bad `--break` spec, an unknown " <>
+          "`--filter` stage) is reported as a failed run and exit `1`."
+      end
+
+    """
+    Discovers and executes a TinyCI pipeline definition file.
+
+    ## Usage
+
+        #{cmd} [NAME] [options]
+
+    An optional `NAME` selects a pipeline by name from the `.tiny_ci/` directory.
+    Slash-separated names resolve to nested files (e.g. `jobs/release` looks for
+    `.tiny_ci/jobs/release.exs`).
+
+    ## Options
+
+      * `--file PATH` / `-f` — path to a specific pipeline file (skips discovery)
+      * `--root DIR` / `-r` — project root directory (defaults to current directory)
+      * `--base REF` — ref or SHA that `file_changed?` diffs against (see
+        `TinyCI.Context.detect_base/2` for the default; `TINY_CI_BASE_REF` also sets it)
+      * `--dry-run` — show what would execute without running anything
+      * `--list` — list all available pipelines in `.tiny_ci/` and exit
+      * `--filter STAGES` — run only the named stage(s), comma-separated
+      * `--output FORMAT` — output format: `json` for machine-readable output
+      * `--events FILE` — write the structured run event stream as NDJSON to `FILE`
+        (one JSON object per line); use `-` to write to stdout. See `docs/events.md`.
+      * `--no-cache` — ignore the dependency cache for this run
+      * `--no-color` — treat the terminal as non-interactive: no live output streaming and
+        no breakpoint prompt. Colour escape codes in console output are not yet removed.
+      * `--artifacts-dir DIR` — store (or, with `--list-artifacts`, read) artifacts under `DIR`
+      * `--list-artifacts` — list the artifacts of the most recent run and exit
+      * `--attest PATH` — write a signed provenance attestation of the run to `PATH`
+        (not written for `--dry-run`). See `docs/provenance.md`.
+      * `--signing-key PATH` — the private key to sign with (or set `TINY_CI_SIGNING_KEY`)
+      * `--no-record` — do not record this run to the run history. By default every run
+        is recorded under the data dir and read back with `#{runs_cmd}`. See
+        `docs/runs.md`.
+      * `--break SPEC` — pause at a step/stage boundary. Repeatable. `SPEC` is
+        `before:STAGE`, `after:STAGE`, `before:STAGE.STEP`, or `after:STAGE.STEP`.
+      * `--break-timeout MS` — auto-resolve a breakpoint after `MS` milliseconds, so a
+        forgotten breakpoint cannot hang CI. Required when no interactive terminal is
+        attached to answer the prompt.
+      * `--break-timeout-action ACTION` — `abort` (default) or `continue` on timeout
+      * `--debug-serial` — force serial scheduling while breakpoints are armed, for
+        predictable stepping. Off by default: pausing one branch must not freeze the
+        independent ones.
+
+    ## Execution control
+
+    A breakpoint pauses the process that reached the boundary, prints the resolved
+    environment, working directory, store snapshot, git context, and matrix
+    combination, and reads a command: `continue`, `skip`, `retry`, `abort`, or
+    `set KEY VALUE`. `set`, a forced `skip`, and a forced `retry` mark the run
+    **divergent** — it is no longer a CI result and `--attest` refuses to sign it.
+    See `docs/execution-control.md`.
+
+    ## Pipeline Selection
+
+    Resolution order (first match wins):
+
+      1. `--file PATH` — explicit path, no discovery
+      2. `NAME` positional argument — loads `.tiny_ci/<NAME>.exs`
+      3. Auto-discovery — checks `tiny_ci.exs`, then `.tiny_ci/pipeline.exs`
+
+    ## Examples
+
+        # Run the default pipeline
+        #{cmd}
+
+        # Run a named pipeline from .tiny_ci/
+        #{cmd} deploy
+
+        # Run a nested pipeline from .tiny_ci/jobs/release.exs
+        #{cmd} jobs/release
+
+        # List all available pipelines
+        #{cmd} --list
+
+        # Preview a named pipeline without executing
+        #{cmd} deploy --dry-run
+
+        # Machine-readable JSON output
+        #{cmd} --output json
+
+        # Write the structured event stream as NDJSON
+        #{cmd} --events run.ndjson
+        #{cmd} --events -            # to stdout
+
+        # Pause before the deploy stage and after a specific step
+        #{cmd} --break before:deploy
+        #{cmd} --break after:test.unit --debug-serial
+
+        # Headless: give up on a breakpoint after 30s and abort
+        #{cmd} --break before:deploy --break-timeout 30000
+
+    ## Secrets
+
+    Every `secret :NAME` the pipeline declares is resolved before any step runs, from
+    the process environment or a gitignored `.tiny_ci/secrets` file (`KEY=value` per
+    line). A missing secret fails the run with exit code 1 and lists every missing
+    name; with `--dry-run` it is a warning. Resolved values are masked as `***` in
+    the console, `--output json`, `--events`, breakpoint payloads, and attestations.
+    See the README's "Secrets" section.
+
+    ## Exit Codes
+
+      * `0` — pipeline completed successfully (or `--list` / `--dry-run`)
+      * `1` — pipeline failed, was aborted through execution control, a declared
+        secret could not be resolved, or no pipeline file was found
+      * `2` — #{usage_exit}
+    """
+  end
+
+  @impl TinyCI.CLI.Subcommand
+  def help, do: help("tiny_ci run")
+
+  @impl TinyCI.CLI.Subcommand
+  def run(args) do
+    with {:ok, opts, positional} <- parse(args) do
+      if opts[:no_color], do: TinyCI.CLI.disable_color()
+      run_parsed(opts, positional)
+    end
+  end
+
+  @doc false
+  # Strict parsing: an unknown flag, or a value of the wrong type, is a usage error
+  # that names the offender (`--break-timeout abc`).
+  @spec parse([String.t()]) :: {:ok, keyword(), [String.t()]} | {:error, {:usage, String.t()}}
+  def parse(args) do
+    case OptionParser.parse(args, strict: @switches, aliases: @aliases) do
+      {opts, positional, []} -> {:ok, opts, positional}
+      {_opts, _positional, invalid} -> {:error, {:usage, invalid_message(invalid)}}
+    end
+  end
+
+  defp invalid_message(invalid) do
+    "Invalid option(s): " <> Enum.map_join(invalid, ", ", &invalid_option/1)
+  end
+
+  defp invalid_option({flag, nil}), do: flag
+  defp invalid_option({flag, value}), do: "#{flag} #{value}"
+
+  defp run_parsed(opts, positional) do
+    root = opts[:root] || File.cwd!()
+    name = List.first(positional)
+    filter = parse_filter(opts[:filter])
+
+    cond do
+      opts[:list] -> list_available_pipelines(root)
+      opts[:list_artifacts] -> list_artifacts(root, opts[:artifacts_dir])
+      true -> run_or_error(opts, root, name, filter)
+    end
+  end
+
+  defp parse_output_format(nil), do: {:ok, :human}
+  defp parse_output_format("json"), do: {:ok, :json}
+
+  defp parse_output_format(other) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Unknown --output format: #{inspect(other)}.",
+      IO.ANSI.reset(),
+      " Supported formats: json"
+    ])
+
+    {:error, :no_pipeline}
+  end
+
+  defp resolve_pipeline(opts, root, name, output_format) do
+    cond do
+      opts[:file] ->
+        Discovery.load_pipeline(opts[:file])
+
+      name ->
+        case Discovery.find_pipeline_by_name(root, name) do
+          {:ok, path} -> load_and_announce(path, output_format)
+          {:error, :not_found} -> {:error, {:named_not_found, name}}
+        end
+
+      true ->
+        discover_and_load(root, output_format)
+    end
+  end
+
+  defp discover_and_load(root, output_format) do
+    with {:ok, path} <- Discovery.find_pipeline(root) do
+      load_and_announce(path, output_format)
+    end
+  end
+
+  defp load_and_announce(path, output_format) do
+    with {:ok, spec} <- Discovery.load_pipeline(path) do
+      if output_format == :human, do: IO.puts("Found pipeline: #{path}")
+      {:ok, spec}
+    end
+  end
+
+  defp list_available_pipelines(root) do
+    case Discovery.list_pipelines(root) do
+      [] ->
+        IO.puts("No pipelines found in .tiny_ci/")
+
+      pipelines ->
+        IO.puts("Available pipelines:")
+
+        Enum.each(pipelines, fn {name, path} ->
+          IO.puts("  #{name}  #{path}")
+        end)
+    end
+
+    :ok
+  end
+
+  defp run_or_error(opts, root, name, filter) do
+    with {:ok, output_format} <- parse_output_format(opts[:output]),
+         :ok <- check_stdout_conflict(opts[:events], output_format) do
+      output_format = if opts[:events] == "-", do: :events, else: output_format
+
+      case resolve_pipeline(opts, root, name, output_format) do
+        {:ok, spec} -> run_resolved(spec, opts, root, filter, output_format)
+        {:error, reason} -> handle_error(reason)
+      end
+    end
+  end
+
+  defp check_stdout_conflict("-", :json),
+    do: {:error, {:usage, "--events - and --output json cannot share stdout"}}
+
+  defp check_stdout_conflict(_events, _output_format), do: :ok
+
+  defp run_resolved(spec, opts, root, filter, output_format) do
+    # Anchor working_dir/artifact/cache resolution to the project root the user
+    # invoked from, not the pipeline file's own directory. Otherwise a pipeline in
+    # `.tiny_ci/` would resolve relative paths against `.tiny_ci/` rather than the
+    # repo root.
+    spec = %{spec | root: Path.expand(root)}
+
+    with {:ok, secrets} <- resolve_secrets(spec, opts[:dry_run]),
+         :ok <- verify_actions(spec, opts[:dry_run]),
+         {:ok, control} <- resolve_control(opts, spec, output_format) do
+      run_and_attest(spec, opts, root, filter, output_format, control, secrets)
+    else
+      {:error, {:missing_secrets, _} = reason} ->
+        print_error(reason)
+        {:error, :missing_secrets}
+
+      {:error, {:secrets_file, _, _} = reason} ->
+        print_error(reason)
+        {:error, :missing_secrets}
+
+      {:error, reason} ->
+        handle_error(reason)
+    end
+  end
+
+  # Runs the pipeline and, when `--attest` is given, writes a signed provenance
+  # attestation built from the run's event stream (skipped for --dry-run).
+  defp run_and_attest(spec, opts, root, filter, output_format, control, secrets) do
+    attest_path = if opts[:dry_run], do: nil, else: opts[:attest]
+    {run_opts, agent} = maybe_collector(base_run_opts(opts, control, secrets), attest_path)
+
+    result = run_with_filter(spec, opts[:dry_run], filter, output_format, run_opts)
+
+    finalize_attest(agent, attest_path, spec, opts, root, result)
+  end
+
+  defp base_run_opts(opts, control, secrets) do
+    [
+      no_cache: opts[:no_cache] || false,
+      base: opts[:base],
+      artifacts_dir: opts[:artifacts_dir],
+      events: opts[:events],
+      record: opts[:record],
+      control: control,
+      secrets: secrets
+    ]
+  end
+
+  # ---------------------------------------------------------------------------
+  # Secrets (M0-03)
+  # ---------------------------------------------------------------------------
+
+  # Declared secrets are settled before anything runs: a missing one fails the run
+  # (or warns under --dry-run, which runs nothing anyway). A secrets file that is
+  # not gitignored is the classic way to leak a token, so it is called out.
+  defp resolve_secrets(spec, dry_run) do
+    warn_unignored_secrets_file(spec.root)
+
+    case {Secrets.resolve(spec.secrets, root: spec.root), dry_run} do
+      {{:ok, secrets}, _} ->
+        {:ok, secrets}
+
+      {{:error, {:missing_secrets, names}}, true} ->
+        print_warning(missing_secrets_message(names))
+        {:ok, %{}}
+
+      {{:error, _} = error, _} ->
+        error
+    end
+  end
+
+  defp warn_unignored_secrets_file(root) do
+    path = Secrets.file_path(root)
+
+    if File.exists?(path) and not gitignored?(root, path) do
+      print_warning(".tiny_ci/secrets is not gitignored.")
+    end
+  end
+
+  defp gitignored?(root, path) do
+    args = ["check-ignore", "-q", Path.relative_to(path, root)]
+
+    case System.cmd("git", args, cd: root, stderr_to_stdout: true) do
+      {_, 0} -> true
+      _ -> false
+    end
+  rescue
+    # No git on the machine: nothing to check against.
+    ErlangError -> true
+  end
+
+  defp missing_secrets_message(names) do
+    "Missing secrets: #{Enum.join(names, ", ")}\n" <>
+      "  Set them in the environment or in .tiny_ci/secrets (KEY=value, gitignored)."
+  end
+
+  defp print_warning(message) do
+    IO.puts(:stderr, [IO.ANSI.yellow(), "Warning: ", message, IO.ANSI.reset()])
+  end
+
+  # ---------------------------------------------------------------------------
+  # Execution control (T10)
+  # ---------------------------------------------------------------------------
+
+  # Everything about `--break` is settled here, before a single step runs: specs
+  # parse, targets exist, and there is *something* that will eventually release the
+  # pause. A typo or a missing driver must never cost a whole run.
+  defp resolve_control(opts, spec, output_format) do
+    case Keyword.get_values(opts, :break) do
+      [] -> {:ok, nil}
+      specs -> build_control(specs, opts, spec, output_format)
+    end
+  end
+
+  defp build_control(specs, opts, spec, output_format) do
+    with {:ok, breakpoints} <- parse_breakpoints(specs),
+         :ok <- validate_breakpoints(breakpoints, spec.stages),
+         {:ok, action} <- parse_timeout_action(opts[:break_timeout_action]),
+         {:ok, subscribers, interactive?} <- start_control_driver(output_format),
+         {:ok, timeout} <- resolve_break_timeout(opts[:break_timeout], interactive?) do
+      {:ok,
+       [
+         breakpoints: breakpoints,
+         timeout: timeout,
+         timeout_action: action,
+         subscribers: subscribers,
+         serial: opts[:debug_serial] || false
+       ]}
+    end
+  end
+
+  defp parse_breakpoints(specs) do
+    {parsed, errors} =
+      Enum.reduce(specs, {[], []}, fn spec, {ok, errors} ->
+        case Control.Breakpoint.parse(spec) do
+          {:ok, breakpoint} -> {[breakpoint | ok], errors}
+          {:error, message} -> {ok, [message | errors]}
+        end
+      end)
+
+    if errors == [],
+      do: {:ok, Enum.reverse(parsed)},
+      else: {:error, {:breakpoints, Enum.reverse(errors)}}
+  end
+
+  defp validate_breakpoints(breakpoints, stages) do
+    case Control.Breakpoint.validate(breakpoints, stages) do
+      :ok -> :ok
+      {:error, errors} -> {:error, {:breakpoints, errors}}
+    end
+  end
+
+  defp parse_timeout_action(nil), do: {:ok, :abort}
+  defp parse_timeout_action("abort"), do: {:ok, :abort}
+  defp parse_timeout_action("continue"), do: {:ok, :continue}
+  defp parse_timeout_action(other), do: {:error, {:break_timeout_action, other}}
+
+  # The terminal REPL only makes sense when a human is at an ANSI terminal and
+  # stdout is not already committed to machine-readable JSON.
+  defp start_control_driver(format) when format in [:json, :events], do: {:ok, [], false}
+
+  defp start_control_driver(_human) do
+    if IO.ANSI.enabled?() do
+      {:ok, driver} = Control.Console.start_link()
+      {:ok, [driver], true}
+    else
+      {:ok, [], false}
+    end
+  end
+
+  # Without an interactive driver something else must release the pause. Rather
+  # than guess a default that silently changes CI behaviour, demand the timeout
+  # explicitly — this is the "a forgotten breakpoint can't hang CI" guarantee.
+  defp resolve_break_timeout(nil, true), do: {:ok, :infinity}
+  defp resolve_break_timeout(nil, false), do: {:error, :break_timeout_required}
+  defp resolve_break_timeout(ms, _interactive?) when is_integer(ms) and ms > 0, do: {:ok, ms}
+  defp resolve_break_timeout(ms, _interactive?), do: {:error, {:break_timeout, ms}}
+
+  defp maybe_collector(run_opts, nil), do: {run_opts, nil}
+
+  defp maybe_collector(run_opts, _attest_path) do
+    {:ok, agent} = Agent.start_link(fn -> [] end)
+    {run_opts ++ [extra_sinks: [{Provenance.Collector, agent: agent}]], agent}
+  end
+
+  defp finalize_attest(nil, _path, _spec, _opts, _root, result), do: result
+
+  defp finalize_attest(agent, path, spec, opts, root, result) do
+    events = Provenance.Collector.events(agent)
+    Agent.stop(agent)
+
+    case write_attestation(path, spec, opts, root, events) do
+      # A pipeline failure dominates; otherwise a failed attestation surfaces.
+      :ok -> result
+      {:error, _} = attest_error -> if result == :ok, do: attest_error, else: result
+    end
+  end
+
+  defp write_attestation(path, spec, opts, root, events) do
+    with :ok <- refuse_divergent(events),
+         {:ok, private} <- signing_key(opts),
+         {:ok, actions} <- Audit.analyze(spec, root, root_app: TinyCI.Project.root_app()),
+         ctx = TinyCI.Context.build(root: root),
+         statement =
+           Provenance.build(
+             events: events,
+             spec: spec,
+             actions: actions,
+             commit: ctx.commit,
+             branch: ctx.branch,
+             tool_version: TinyCI.Project.version()
+           ),
+         {:ok, envelope} <- Provenance.Attestation.sign(statement, private: private),
+         :ok <- File.write(path, Jason.encode!(envelope, pretty: true)) do
+      IO.puts(:stderr, "Wrote signed attestation to #{path}")
+      :ok
+    else
+      {:error, reason} ->
+        print_error({:attestation, reason})
+        {:error, :attestation_failed}
+    end
+  end
+
+  # Cross-cutting invariant 5: a run a human steered by hand records what an
+  # operator made happen, not what the pipeline does. Signing it would launder a
+  # manual result into a supply-chain claim.
+  defp refuse_divergent(events) do
+    if Provenance.divergent?(events), do: {:error, :divergent_run}, else: :ok
+  end
+
+  defp signing_key(opts) do
+    cond do
+      path = opts[:signing_key] -> read_signing_key(path)
+      key = System.get_env("TINY_CI_SIGNING_KEY") -> {:ok, String.trim(key)}
+      true -> {:error, :no_signing_key}
+    end
+  end
+
+  defp read_signing_key(path) do
+    case File.read(path) do
+      {:ok, content} -> {:ok, String.trim(content)}
+      {:error, _} -> {:error, {:key_unreadable, path}}
+    end
+  end
+
+  # Supply-chain gate: before executing, verify every module action is pinned in
+  # the lockfile and matches the locked version (T6). Skipped for --dry-run.
+  defp verify_actions(_spec, true), do: :ok
+
+  defp verify_actions(spec, _dry_run) do
+    Audit.verify(spec, spec.root, root_app: TinyCI.Project.root_app())
+  end
+
+  defp run_with_filter(spec, dry_run, filter, output_format, run_opts) do
+    with :ok <- validate_filter(filter, spec.stages) do
+      dispatch_pipeline(spec, dry_run, filter, output_format, run_opts)
+    end
+  end
+
+  defp dispatch_pipeline(spec, true, filter, _output_format, run_opts),
+    do: dry_run_pipeline(spec, filter, run_opts)
+
+  defp dispatch_pipeline(spec, _, filter, output_format, run_opts),
+    do: execute_pipeline(spec, filter, output_format, run_opts)
+
+  defp handle_error(reason) do
+    print_error(reason)
+    {:error, :no_pipeline}
+  end
+
+  defp parse_filter(nil), do: nil
+
+  defp parse_filter(filter_str) do
+    filter_str
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.map(fn
+      ":" <> name -> String.to_atom(name)
+      name -> String.to_atom(name)
+    end)
+  end
+
+  defp validate_filter(nil, _stages), do: :ok
+  defp validate_filter([], _stages), do: :ok
+
+  defp validate_filter(filter, stages) do
+    stage_names = MapSet.new(stages, & &1.name)
+    unknown = Enum.reject(filter, &MapSet.member?(stage_names, &1))
+
+    if unknown == [] do
+      :ok
+    else
+      available = Enum.map_join(stages, ", ", fn s -> ":#{s.name}" end)
+      unknown_str = Enum.map_join(unknown, ", ", &":#{&1}")
+
+      IO.puts(:stderr, [
+        IO.ANSI.red(),
+        "Unknown stage filter: #{unknown_str}.",
+        IO.ANSI.reset(),
+        " Available stages: #{available}"
+      ])
+
+      {:error, :no_pipeline}
+    end
+  end
+
+  # The context is built for the project root (not the cwd) so `--root` and a
+  # server-side workspace both see the right branch, commit, and changed files.
+  # Declared secret names ride along for the dry-run header; resolved values are
+  # attached so hooks see them.
+  defp build_context(
+         %TinyCI.PipelineSpec{root: root, env: pipeline_env, secrets: names},
+         run_opts
+       ) do
+    TinyCI.Context.build(
+      root: root,
+      pipeline_env: pipeline_env,
+      base: run_opts[:base],
+      secret_names: names
+    )
+    |> Secrets.attach(Keyword.get(run_opts, :secrets, %{}))
+  end
+
+  defp dry_run_pipeline(%TinyCI.PipelineSpec{stages: stages} = spec, filter, run_opts) do
+    context = build_context(spec, run_opts)
+    filtered = filter_stages(stages, filter)
+    DryRun.print_plan(filtered, context)
+    :ok
+  end
+
+  defp execute_pipeline(
+         %TinyCI.PipelineSpec{name: name, stages: stages, hooks: hooks} = spec,
+         filter,
+         format,
+         run_opts
+       )
+       when format in [:json, :events] do
+    context = build_context(spec, run_opts)
+
+    {duration_us, pipeline_result} =
+      :timer.tc(fn ->
+        Executor.run_pipeline(
+          stages,
+          context,
+          Keyword.merge(run_opts,
+            filter: filter,
+            output: :buffered,
+            listener: Listener.Silent,
+            pipeline_name: name
+          )
+        )
+      end)
+
+    stage_results = extract_stage_results(pipeline_result)
+
+    if format == :json do
+      IO.puts(
+        Results.to_json(simplify_result(pipeline_result), stage_results, div(duration_us, 1000))
+      )
+    end
+
+    Hooks.run_hooks(hooks, hook_event(pipeline_result), hook_context(context, stage_results))
+
+    case pipeline_result do
+      {:ok, _} -> :ok
+      {:error, _, _} -> {:error, :pipeline_failed}
+    end
+  end
+
+  defp execute_pipeline(
+         %TinyCI.PipelineSpec{name: name, stages: stages, hooks: hooks} = spec,
+         filter,
+         :human,
+         run_opts
+       ) do
+    context = build_context(spec, run_opts)
+
+    run_opts = Keyword.merge(run_opts, filter: filter, pipeline_name: name)
+
+    case Executor.run_pipeline(stages, context, run_opts) do
+      {:ok, stage_results} ->
+        Reporter.print_summary(stage_results)
+        Hooks.run_hooks(hooks, :on_success, hook_context(context, stage_results))
+        IO.puts([IO.ANSI.green(), "Pipeline completed successfully.", IO.ANSI.reset()])
+        :ok
+
+      {:error, reason, stage_results} ->
+        Reporter.print_summary(stage_results)
+        Hooks.run_hooks(hooks, :on_failure, hook_context(context, stage_results))
+        IO.puts(:stderr, [IO.ANSI.red(), failure_message(reason), IO.ANSI.reset()])
+        {:error, :pipeline_failed}
+    end
+  end
+
+  # The same context goes to the executor and to the hooks, so resolved secrets
+  # are attached here rather than only inside `Executor.run_pipeline/3`.
+  defp failure_message({:aborted, stage}),
+    do: "Pipeline aborted by execution control at stage :#{stage}."
+
+  defp failure_message(_reason), do: "Pipeline failed."
+
+  defp hook_context(context, results) do
+    store =
+      Enum.reduce(results, context.store, fn result, store ->
+        Map.merge(store, result.store_delta)
+      end)
+
+    Map.put(context, :store, store)
+  end
+
+  defp list_artifacts(root, artifacts_dir_override) do
+    base_root = artifacts_dir_override || root
+
+    case Artifacts.list_runs(base_root) do
+      [] -> IO.puts("No artifacts found.")
+      runs -> print_last_run_artifacts(base_root, List.last(runs))
+    end
+
+    :ok
+  end
+
+  defp print_last_run_artifacts(base_root, {last_run_id, artifact_names}) do
+    IO.puts("Artifacts from last run (#{last_run_id}):")
+    print_artifact_names(base_root, last_run_id, artifact_names)
+  end
+
+  defp print_artifact_names(_base_root, _run_id, []) do
+    IO.puts("  (none)")
+  end
+
+  defp print_artifact_names(base_root, run_id, names) do
+    run_dir = Artifacts.run_artifacts_dir(base_root, run_id)
+    Enum.each(names, fn name -> IO.puts("  #{name}: #{Path.join(run_dir, name)}") end)
+  end
+
+  defp extract_stage_results({:ok, results}), do: results
+  defp extract_stage_results({:error, _, results}), do: results
+
+  defp simplify_result({:ok, _}), do: :ok
+  defp simplify_result({:error, reason, _}), do: {:error, reason}
+
+  defp hook_event({:ok, _}), do: :on_success
+  defp hook_event({:error, _, _}), do: :on_failure
+
+  defp filter_stages(stages, nil), do: stages
+  defp filter_stages(stages, []), do: stages
+
+  defp filter_stages(stages, filter) do
+    filter_set = MapSet.new(filter)
+    Enum.filter(stages, &MapSet.member?(filter_set, &1.name))
+  end
+
+  defp print_error(:not_found) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "No pipeline file found. ",
+      IO.ANSI.reset(),
+      "Expected tiny_ci.exs or .tiny_ci/pipeline.exs"
+    ])
+  end
+
+  defp print_error(:file_not_found) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Pipeline file not found.",
+      IO.ANSI.reset()
+    ])
+  end
+
+  defp print_error({:parse_error, message}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Failed to parse pipeline: ",
+      IO.ANSI.reset(),
+      message
+    ])
+  end
+
+  defp print_error({:validation_error, violations}) do
+    IO.puts(:stderr, [IO.ANSI.red(), "Invalid pipeline file:", IO.ANSI.reset()])
+
+    Enum.each(violations, fn v ->
+      IO.puts(:stderr, "  • #{v}")
+    end)
+  end
+
+  defp print_error({:named_not_found, name}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Pipeline not found: ",
+      IO.ANSI.reset(),
+      "#{name} (looked for .tiny_ci/#{name}.exs)"
+    ])
+  end
+
+  defp print_error({:circular_dependency, cycle}) do
+    IO.puts(:stderr, [IO.ANSI.red(), "Circular dependency detected:", IO.ANSI.reset()])
+
+    IO.puts(:stderr, "  Stages involved: #{Enum.map_join(cycle, ", ", &":#{&1}")}")
+  end
+
+  defp print_error({:unknown_stages, errors}) do
+    IO.puts(:stderr, [IO.ANSI.red(), "Unknown stage references:", IO.ANSI.reset()])
+    Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
+  end
+
+  defp print_error({:invalid_action, errors}) do
+    IO.puts(:stderr, [IO.ANSI.red(), "Invalid module step or hook:", IO.ANSI.reset()])
+    Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
+  end
+
+  defp print_error({:action_lock, errors}) do
+    IO.puts(:stderr, [IO.ANSI.red(), "Action supply-chain check failed:", IO.ANSI.reset()])
+    Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
+    IO.puts(:stderr, "Run `actions audit` to inspect the resolved action tree.")
+  end
+
+  defp print_error({:missing_secrets, names}) do
+    IO.puts(:stderr, [IO.ANSI.red(), missing_secrets_message(names), IO.ANSI.reset()])
+  end
+
+  defp print_error({:secrets_file, path, {:line, line, reason}}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Cannot parse #{path}:#{line}: #{reason}",
+      IO.ANSI.reset()
+    ])
+  end
+
+  defp print_error({:breakpoints, errors}) do
+    IO.puts(:stderr, [IO.ANSI.red(), "Invalid --break:", IO.ANSI.reset()])
+    Enum.each(errors, fn e -> IO.puts(:stderr, "  • #{e}") end)
+  end
+
+  defp print_error({:break_timeout_action, value}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Unknown --break-timeout-action: #{inspect(value)}.",
+      IO.ANSI.reset(),
+      " Supported actions: abort, continue"
+    ])
+  end
+
+  defp print_error({:break_timeout, value}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Invalid --break-timeout: #{inspect(value)}.",
+      IO.ANSI.reset(),
+      " Expected a positive number of milliseconds."
+    ])
+  end
+
+  defp print_error(:break_timeout_required) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Refusing to arm --break with nothing to release it.",
+      IO.ANSI.reset(),
+      "\n  No interactive terminal is attached (non-TTY, or --output json), so the\n",
+      "  breakpoint prompt cannot be answered. Pass --break-timeout MS so the run\n",
+      "  cannot hang, or attach a control driver via TinyCI.Control.subscribe/1."
+    ])
+  end
+
+  defp print_error({:attestation, :divergent_run}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Refusing to attest a divergent run.",
+      IO.ANSI.reset(),
+      "\n  Execution control altered this run (set_store, or a forced skip/retry), so\n",
+      "  it records what an operator made happen rather than what the pipeline does.\n",
+      "  Re-run without --break to produce an attestable result."
+    ])
+  end
+
+  defp print_error({:attestation, :no_signing_key}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Cannot write attestation: no signing key.",
+      IO.ANSI.reset(),
+      " Pass --signing-key PATH or set TINY_CI_SIGNING_KEY. ",
+      "Generate one with `attest gen-key`."
+    ])
+  end
+
+  defp print_error({:attestation, reason}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Failed to write attestation: ",
+      IO.ANSI.reset(),
+      inspect(reason)
+    ])
+  end
+
+  defp print_error(reason) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Error: #{inspect(reason)}",
+      IO.ANSI.reset()
+    ])
+  end
+end

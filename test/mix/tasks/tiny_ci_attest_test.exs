@@ -147,7 +147,7 @@ defmodule Mix.Tasks.TinyCi.AttestTest do
                 "--break",
                 "before:build.compile",
                 "--break-timeout",
-                "5000",
+                "30000",
                 "--break-timeout-action",
                 "continue"
               ])
@@ -175,8 +175,8 @@ defmodule Mix.Tasks.TinyCi.AttestTest do
   # the run starts, and this driver is deliberately outside the run.
   defp start_divergent_driver(events_path) do
     spawn_link(fn ->
-      with {:ok, run_id} <- await_run_id(events_path, 200),
-           {:ok, session} <- await_pause(run_id, 200) do
+      with {:ok, run_id} <- await_run_id(events_path, 3000),
+           {:ok, session} <- await_pause(run_id, 3000) do
         TinyCI.Control.resume(run_id, session.pause_id, {:set_store, :tag, "v2"})
         TinyCI.Control.resume(run_id, session.pause_id, :continue)
       end

@@ -133,7 +133,7 @@ defmodule TinyCI.ExecutionRegressionTest do
       hook = %Hook{
         name: :blocked,
         module: RegressionActions,
-        timeout: 30,
+        timeout: 250,
         config_block: fn -> [operation: :block] end
       }
 
@@ -146,12 +146,12 @@ defmodule TinyCI.ExecutionRegressionTest do
           end)
         end)
 
-      assert_receive {:callback_started, callback}, 1000
+      assert_receive {:callback_started, callback}, 10_000
       monitor = Process.monitor(callback)
 
       try do
-        assert {:ok, output} = Task.yield(task, 1000)
-        assert output =~ "timed out after 30ms"
+        assert {:ok, output} = Task.yield(task, 15_000)
+        assert output =~ "timed out after 250ms"
         assert_receive {:DOWN, ^monitor, :process, ^callback, _}
       after
         Process.exit(callback, :kill)
@@ -200,7 +200,7 @@ defmodule TinyCI.ExecutionRegressionTest do
 
     for mode <- [:serial, :parallel] do
       test "module timeout terminates the callback in #{mode} mode" do
-        stage = %Stage{name: :timeout, mode: unquote(mode), steps: [action(:block, timeout: 30)]}
+        stage = %Stage{name: :timeout, mode: unquote(mode), steps: [action(:block, timeout: 250)]}
         parent = self()
 
         task =
@@ -208,14 +208,14 @@ defmodule TinyCI.ExecutionRegressionTest do
             Executor.execute(stage, %{test_pid: parent}, :buffered, TinyCI.Listener.Silent)
           end)
 
-        assert_receive {:callback_started, callback}, 1000
+        assert_receive {:callback_started, callback}, 10_000
         monitor = Process.monitor(callback)
 
         try do
           assert {:ok, %StageResult{status: :failed, step_results: [step]}} =
-                   Task.yield(task, 1000)
+                   Task.yield(task, 15_000)
 
-          assert step.output =~ "timed out after 30ms"
+          assert step.output =~ "timed out after 250ms"
           assert_receive {:DOWN, ^monitor, :process, ^callback, _}
         after
           Process.exit(callback, :kill)

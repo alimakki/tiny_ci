@@ -25,81 +25,23 @@ defmodule Mix.Tasks.TinyCi.Actions.Audit do
     * `0` — every action is locked, first-party, or otherwise sound
     * `1` — a supply-chain problem (an unpinned third-party action, or a build
       that has drifted from the lockfile), or no pipeline file found
+
+  ## Standalone
+
+  The same command is available without Mix as `tiny_ci actions audit`
+  (see `TinyCI.CLI`).
   """
 
   use Mix.Task
 
-  alias TinyCI.Action.Audit
-  alias TinyCI.Discovery
+  alias TinyCI.MixDelegate
 
   @impl Mix.Task
   def run(args) do
     Application.ensure_all_started(:tiny_ci)
 
-    {opts, positional, _invalid} =
-      OptionParser.parse(args,
-        switches: [file: :string, root: :string],
-        aliases: [f: :file, r: :root]
-      )
-
-    root = opts[:root] || File.cwd!()
-
-    result =
-      with {:ok, spec} <- resolve_pipeline(opts, root, List.first(positional)),
-           {:ok, entries} <- Audit.analyze(spec, root, root_app: root_app()) do
-        IO.puts(Audit.format(entries))
-        if Enum.any?(entries, &(&1.status == :error)), do: {:error, :unsound}, else: :ok
-      end
-
-    finish(result)
-  end
-
-  defp resolve_pipeline(opts, root, name) do
-    cond do
-      opts[:file] -> Discovery.load_pipeline(opts[:file])
-      name -> load_named(root, name)
-      true -> discover(root)
-    end
-  end
-
-  defp load_named(root, name) do
-    case Discovery.find_pipeline_by_name(root, name) do
-      {:ok, path} -> Discovery.load_pipeline(path)
-      {:error, :not_found} -> {:error, {:named_not_found, name}}
-    end
-  end
-
-  defp discover(root) do
-    with {:ok, path} <- Discovery.find_pipeline(root), do: Discovery.load_pipeline(path)
-  end
-
-  defp root_app, do: Mix.Project.config()[:app]
-
-  defp finish(:ok), do: halt(0)
-
-  defp finish({:error, reason}) do
-    print_error(reason)
-    halt(1)
-  end
-
-  defp halt(code) do
-    if Mix.env() != :test, do: System.halt(code)
-    if code == 0, do: :ok, else: {:error, :audit_failed}
-  end
-
-  defp print_error(:unsound), do: :ok
-
-  defp print_error(:not_found) do
-    error("No pipeline file found. Expected tiny_ci.exs or .tiny_ci/pipeline.exs")
-  end
-
-  defp print_error({:named_not_found, name}) do
-    error("Pipeline not found: #{name} (looked for .tiny_ci/#{name}.exs)")
-  end
-
-  defp print_error(reason), do: error("Error: #{inspect(reason)}")
-
-  defp error(message) do
-    IO.puts(:stderr, [IO.ANSI.red(), message, IO.ANSI.reset()])
+    ["audit" | args]
+    |> TinyCI.CLI.Actions.run()
+    |> MixDelegate.halt_unless_test(:audit_failed)
   end
 end

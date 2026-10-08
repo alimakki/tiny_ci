@@ -1,0 +1,334 @@
+defmodule TinyCI.CLI.Runs do
+  @moduledoc false
+  # The body of `tiny_ci runs` / `mix tiny_ci.runs`. User-facing documentation is
+  # `help/1`, which the Mix task reuses as its @moduledoc.
+
+  @behaviour TinyCI.CLI.Subcommand
+
+  alias TinyCI.{Matrix, Reporter, Runs}
+  alias TinyCI.Runs.Projection
+
+  # How many trailing lines of a failed step's output `show` prints.
+  @failure_lines 50
+
+  @doc """
+  The `tiny_ci runs` help text, with commands written as `cmd` (`"tiny_ci runs"`, or
+  `"mix tiny_ci.runs"` for the Mix task's documentation).
+  """
+  @spec help(String.t()) :: String.t()
+  def help(cmd) do
+    run_cmd = if String.starts_with?(cmd, "mix"), do: "mix tiny_ci.run", else: "tiny_ci run"
+
+    """
+    Reads the run history that `#{run_cmd}` records.
+
+    Every run (except `--dry-run` and `--no-record`) leaves its event stream and a
+    summary under the data dir. See `docs/runs.md`.
+
+    ## Usage
+
+        #{cmd} [options]
+        #{cmd} show RUN_ID [options]
+        #{cmd} prune [options]
+
+    ## Commands
+
+      * *(none)* — lists the project's runs, newest first, as a table of run id,
+        status, pipeline, branch, commit, duration, and start time
+      * `show RUN_ID` — prints one run: its identity, the same stage and step tree the
+        console prints after a live run, and the last lines of each failed step's output
+      * `prune` — deletes the oldest runs, keeping the newest `--keep`
+
+    ## Options
+
+      * `--root DIR` / `-r` — the project whose runs to read (default: current directory)
+      * `--limit N` — list at most `N` runs (default 20)
+      * `--output json` — machine-readable output: a list of run summaries for the
+        listing, one run summary for `show`
+      * `--events` — with `show`, print the raw NDJSON recording instead
+      * `--keep N` — with `prune`, how many runs to keep (default 200; `0` removes all)
+
+    A run killed before it finished has no summary and is listed as `interrupted`;
+    so is a run that is still in progress.
+
+    ## Examples
+
+        #{cmd}
+        #{cmd} --limit 5 --output json
+        #{cmd} show 20260102_030405_abc1234_0f3c...
+        #{cmd} show 20260102_030405_abc1234_0f3c... --events
+        #{cmd} prune --keep 50
+    """
+  end
+
+  @impl TinyCI.CLI.Subcommand
+  def help, do: help("tiny_ci runs")
+
+  @impl TinyCI.CLI.Subcommand
+  def run(["show" | args]), do: show(args)
+  def run(["prune" | args]), do: prune(args)
+  def run(["list" | args]), do: list(args)
+  def run(args), do: list(args)
+
+  # ---------------------------------------------------------------------------
+  # list
+  # ---------------------------------------------------------------------------
+
+  defp list(args) do
+    with {:ok, opts, root} <- parse(args, limit: :integer, output: :string),
+         {:ok, format} <- output_format(opts[:output]),
+         {:ok, limit} <- limit(opts) do
+      root |> Runs.list(limit) |> print_listing(format, root)
+    end
+  end
+
+  defp print_listing(runs, :json, _root) do
+    runs |> Enum.map(&Projection.to_json/1) |> Jason.encode!() |> IO.puts()
+  end
+
+  defp print_listing(runs, :human, root), do: print_runs(runs, root)
+
+  defp print_runs([], root), do: IO.puts("No runs recorded for #{root}.")
+
+  defp print_runs(runs, _root) do
+    header = ["RUN ID", "STATUS", "PIPELINE", "BRANCH", "COMMIT", "DURATION", "STARTED"]
+    widths = column_widths([header | Enum.map(runs, &row/1)])
+
+    IO.puts(format_row(header, widths, nil))
+    Enum.each(runs, &IO.puts(format_row(row(&1), widths, &1.status)))
+  end
+
+  defp limit(opts) do
+    case Keyword.fetch(opts, :limit) do
+      :error -> {:ok, []}
+      {:ok, limit} when limit >= 1 -> {:ok, [limit: limit]}
+      {:ok, _non_positive} -> usage("--limit must be a positive integer")
+    end
+  end
+
+  defp row(%Projection{} = run) do
+    [
+      run.run_id,
+      Atom.to_string(run.status),
+      run.pipeline || "-",
+      run.branch || "-",
+      short_commit(run.commit),
+      duration(run.duration_ms),
+      started(run.started_at)
+    ]
+  end
+
+  defp column_widths(rows) do
+    rows
+    |> Enum.zip_with(& &1)
+    |> Enum.map(fn column -> column |> Enum.map(&String.length/1) |> Enum.max() end)
+  end
+
+  # Pad first, then colour, so escape codes never skew the columns.
+  defp format_row(cells, widths, status) do
+    cells
+    |> Enum.zip(widths)
+    |> Enum.with_index()
+    |> Enum.map_join("  ", fn
+      {{cell, width}, 1} -> colorize(status, String.pad_trailing(cell, width))
+      {{cell, width}, _} -> String.pad_trailing(cell, width)
+    end)
+    |> String.trim_trailing()
+  end
+
+  # ---------------------------------------------------------------------------
+  # show
+  # ---------------------------------------------------------------------------
+
+  defp show(args) do
+    with {:ok, opts, positional, root} <-
+           parse_with_positional(args, output: :string, events: :boolean),
+         {:ok, run_id} <- run_id(positional) do
+      show_run(root, run_id, opts)
+    end
+  end
+
+  defp run_id([run_id]), do: {:ok, run_id}
+
+  defp run_id(_positional),
+    do: usage("Usage: runs show RUN_ID [--output json] [--events]")
+
+  defp show_run(root, run_id, opts) do
+    with {:ok, format} <- output_format(opts[:output]) do
+      cond do
+        opts[:events] -> print_events(root, run_id)
+        format == :json -> print_json(root, run_id)
+        true -> print_run(root, run_id)
+      end
+    end
+  end
+
+  defp print_events(root, run_id) do
+    case Runs.events_path(root, run_id) do
+      {:ok, path} -> path |> File.stream!() |> Enum.each(&IO.write/1)
+      {:error, :not_found} -> not_found(root, run_id)
+    end
+  end
+
+  defp print_json(root, run_id) do
+    with {:ok, run} <- fetch(root, run_id) do
+      run |> Projection.to_json() |> Jason.encode!() |> IO.puts()
+    end
+  end
+
+  defp print_run(root, run_id) do
+    with {:ok, run} <- fetch(root, run_id) do
+      print_header(run)
+      run |> Projection.to_stage_results() |> Reporter.print_summary()
+      print_failures(run)
+      print_footer(run)
+    end
+  end
+
+  # The tree says which step failed; this says why. Only steps that actually failed
+  # the run count, not tolerated `allow_failure:` ones, and only their last lines,
+  # since `--output json` and `--events` have the rest.
+  defp print_failures(%Projection{} = run) do
+    for {label, step} <- failed_steps(run), step.output != "" do
+      print_failed_step(label, step.output)
+    end
+
+    :ok
+  end
+
+  defp failed_steps(%Projection{stages: stages}) do
+    Enum.flat_map(stages, fn stage ->
+      own = for step <- stage.steps, do: {"#{stage.name}/#{step.name}", step}
+
+      matrix =
+        for run <- stage.matrix_runs, step <- run.steps do
+          {"#{stage.name}[#{Matrix.label(Enum.sort(run.combination))}]/#{step.name}", step}
+        end
+
+      Enum.filter(own ++ matrix, fn {_label, step} ->
+        step.status == :failed and not step.allowed_failure
+      end)
+    end)
+  end
+
+  defp print_failed_step(label, output) do
+    lines = String.split(output, "\n", trim: true)
+    omitted = max(length(lines) - @failure_lines, 0)
+
+    IO.puts([IO.ANSI.red(), "Output of failed step ", label, ":", IO.ANSI.reset()])
+
+    if omitted > 0 do
+      IO.puts("  ... #{omitted} earlier lines omitted (see --output json or --events)")
+    end
+
+    lines |> Enum.take(-@failure_lines) |> Enum.each(&IO.puts("  " <> &1))
+    IO.puts("")
+  end
+
+  defp fetch(root, run_id) do
+    case Runs.projection(root, run_id) do
+      {:ok, run} -> {:ok, run}
+      {:error, :not_found} -> not_found(root, run_id)
+    end
+  end
+
+  defp not_found(root, run_id),
+    do: {:error, {:failed, "Run #{inspect(run_id)} not found for #{root}"}}
+
+  defp print_header(%Projection{} = run) do
+    IO.puts([IO.ANSI.bright(), "Run ", run.run_id || "-", IO.ANSI.reset()])
+    IO.puts("  pipeline  #{run.pipeline || "-"}")
+    IO.puts(["  status    ", colorize(run.status, Atom.to_string(run.status))])
+    IO.puts("  git       #{run.branch || "-"}@#{short_commit(run.commit)}")
+    IO.puts("  started   #{started(run.started_at)}")
+    IO.puts("  duration  #{duration(run.duration_ms)}")
+  end
+
+  defp print_footer(%Projection{} = run) do
+    if run.status == :interrupted do
+      warn(
+        "This run is interrupted: no run_finished was recorded (it died, or is still running)."
+      )
+    end
+
+    if run.divergent? do
+      warn("This run is divergent: manual execution control altered it. It is not a CI result.")
+    end
+
+    :ok
+  end
+
+  # ---------------------------------------------------------------------------
+  # prune
+  # ---------------------------------------------------------------------------
+
+  defp prune(args) do
+    with {:ok, opts, root} <- parse(args, keep: :integer),
+         {:ok, keep} <- keep(opts) do
+      %{removed: removed} = Runs.prune(root, keep)
+
+      IO.puts([IO.ANSI.green(), "✓ ", IO.ANSI.reset(), "Removed #{plural(removed)} for #{root}"])
+    end
+  end
+
+  defp keep(opts) do
+    case Keyword.fetch(opts, :keep) do
+      :error -> {:ok, []}
+      {:ok, keep} when keep >= 0 -> {:ok, [keep: keep]}
+      {:ok, _negative} -> usage("--keep must be a non-negative integer")
+    end
+  end
+
+  defp plural(1), do: "1 run"
+  defp plural(n), do: "#{n} runs"
+
+  # ---------------------------------------------------------------------------
+  # shared
+  # ---------------------------------------------------------------------------
+
+  defp usage(message), do: {:error, {:usage, message}}
+
+  defp parse(args, switches) do
+    with {:ok, opts, positional, root} <- parse_with_positional(args, switches) do
+      if positional == [] do
+        {:ok, opts, root}
+      else
+        usage("Unknown command: #{Enum.join(positional, " ")}. Use show, prune, or no command.")
+      end
+    end
+  end
+
+  defp parse_with_positional(args, switches) do
+    case OptionParser.parse(args, strict: [root: :string] ++ switches, aliases: [r: :root]) do
+      {opts, positional, []} ->
+        {:ok, opts, positional, Path.expand(opts[:root] || File.cwd!())}
+
+      {_opts, _positional, invalid} ->
+        flags = Enum.map_join(invalid, ", ", fn {flag, _value} -> flag end)
+        usage("Invalid option: #{flags}")
+    end
+  end
+
+  defp output_format(nil), do: {:ok, :human}
+  defp output_format("json"), do: {:ok, :json}
+
+  defp output_format(other),
+    do: usage("Unknown --output format: #{inspect(other)}. Supported formats: json")
+
+  defp short_commit(nil), do: "-"
+  defp short_commit(commit), do: String.slice(commit, 0, 7)
+
+  defp duration(nil), do: "-"
+  defp duration(ms), do: Reporter.format_duration(ms)
+
+  defp started(nil), do: "-"
+  defp started(iso), do: String.slice(iso, 0, 19) |> String.replace("T", " ") |> Kernel.<>("Z")
+
+  defp warn(message), do: IO.puts([IO.ANSI.yellow(), message, IO.ANSI.reset()])
+
+  defp colorize(:passed, text), do: IO.ANSI.green() <> text <> IO.ANSI.reset()
+  defp colorize(:failed, text), do: IO.ANSI.red() <> text <> IO.ANSI.reset()
+  defp colorize(:aborted, text), do: IO.ANSI.red() <> text <> IO.ANSI.reset()
+  defp colorize(:interrupted, text), do: IO.ANSI.yellow() <> text <> IO.ANSI.reset()
+  defp colorize(_other, text), do: text
+end

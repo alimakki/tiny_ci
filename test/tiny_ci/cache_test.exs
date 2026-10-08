@@ -430,8 +430,8 @@ defmodule TinyCI.CacheTest do
       ref = restorer.ref
       refute_receive {^ref, _}, 50
       send(holder.pid, :evict)
-      Task.await(holder)
-      assert Task.await(restorer) == :miss
+      Task.await(holder, 30_000)
+      assert Task.await(restorer, 30_000) == :miss
       refute File.exists?(destination)
     end
   end

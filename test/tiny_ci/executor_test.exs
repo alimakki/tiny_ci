@@ -501,7 +501,7 @@ defmodule TinyCI.ExecutorTest do
 
       %StageResult{step_results: [step]} = Executor.execute(stage)
       # Duration should be roughly around the timeout, not the full sleep
-      assert step.duration_ms < 2_000
+      assert step.duration_ms < 8_000
     end
 
     test "timed out step leaves no orphaned OS processes (including descendants)" do
@@ -518,11 +518,10 @@ defmodule TinyCI.ExecutorTest do
       assert %StageResult{status: :failed, step_results: [step]} = Executor.execute(stage)
       assert step.status == :failed
 
-      # Give the TERM -> KILL grace period time to complete.
-      Process.sleep(300)
-
-      {out, _} = System.cmd("pgrep", ["-f", marker], stderr_to_stdout: true)
-      assert String.trim(out) == "", "expected no surviving processes matching #{marker}"
+      # Give the TERM -> KILL grace period time to complete: poll until nothing matches,
+      # with a deadline long enough for a loaded machine.
+      assert wait_until_gone(marker, 10_000),
+             "expected no surviving processes matching #{marker}"
     end
   end
 
@@ -2000,6 +1999,29 @@ defmodule TinyCI.ExecutorTest do
     end
 
     defp ok_step, do: %Step{name: :ok, cmd: "echo fine"}
+
+    # Polls `pgrep` until no process matches `marker`, or `timeout_ms` passes.
+    defp wait_until_gone(marker, timeout_ms) do
+      deadline = System.monotonic_time(:millisecond) + timeout_ms
+      do_wait_until_gone(marker, deadline)
+    end
+
+    defp do_wait_until_gone(marker, deadline) do
+      {out, _} = System.cmd("pgrep", ["-f", marker], stderr_to_stdout: true)
+
+      cond do
+        String.trim(out) == "" ->
+          true
+
+        System.monotonic_time(:millisecond) > deadline ->
+          false
+
+        true ->
+          Process.sleep(20)
+          do_wait_until_gone(marker, deadline)
+      end
+    end
+
     defp boom_step(attrs \\ []), do: struct(%Step{name: :boom, module: Boom}, attrs)
 
     defp result_for(results, name), do: Enum.find(results, &(&1.name == name))

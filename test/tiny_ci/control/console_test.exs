@@ -2,6 +2,7 @@ defmodule TinyCI.Control.ConsoleTest do
   use ExUnit.Case, async: true
 
   alias TinyCI.Control.{Breakpoint, Console, Server, Session}
+  alias TinyCI.ControllableIO
 
   setup do
     run_id = "run_#{System.unique_integer([:positive])}"
@@ -53,13 +54,16 @@ defmodule TinyCI.Control.ConsoleTest do
             send(test, :released)
             {command, overrides}
         after
-          2_000 -> :never_released
+          10_000 -> :never_released
         end
       end)
 
-    result = Task.await(task, 3_000)
-    # Let the driver drain its own :resumed notification before we read the buffer.
-    Process.sleep(20)
+    result = Task.await(task, 15_000)
+    # Everything the driver prints is written (a synchronous IO call) before the command
+    # that releases the pause. Syncing with the server, then the driver, makes sure the
+    # driver has also finished handling its own :resumed notification.
+    _ = :sys.get_state(ctx.server)
+    _ = :sys.get_state(driver)
     {_in, output} = StringIO.contents(io)
     {result, output}
   end
@@ -220,8 +224,12 @@ defmodule TinyCI.Control.ConsoleTest do
   end
 
   describe "several boundaries paused at once" do
+    # The interleaving is the point of this test, so nothing is left to chance. The
+    # device does not answer the driver's read until told to, and the driver is a
+    # single process: while it is blocked reading A's command, B's `breakpoint_hit`
+    # waits in its mailbox, and is handled (as "also paused") before A's `:resumed`.
     test "prompts for one and reports the other as queued", ctx do
-      {:ok, io} = StringIO.open("continue\ncontinue\n")
+      {:ok, io} = ControllableIO.start_link(self())
       {:ok, driver} = Console.start_link(io: io)
       :ok = Server.subscribe(ctx.server, driver)
 
@@ -230,17 +238,32 @@ defmodule TinyCI.Control.ConsoleTest do
 
       task_a = pause_task(ctx.server, first)
       assert_receive {:paused, _}
+      # The driver is now provably blocked in IO.gets, waiting for A's command.
+      assert_receive {:reading, _}, 5_000
+
       task_b = pause_task(ctx.server, second)
+      # Server.pause/2 returned, so B's notification is already in the driver's mailbox.
       assert_receive {:paused, _}
 
-      assert {:continue, _} = Task.await(task_a, 3_000)
-      assert {:continue, _} = Task.await(task_b, 3_000)
+      ControllableIO.send_line(io, "continue\n")
+      # A was released; the driver printed B's boundary and now prompts for B.
+      assert_receive {:reading, _}, 5_000
+      ControllableIO.send_line(io, "continue\n")
 
-      Process.sleep(20)
-      {_in, output} = StringIO.contents(io)
+      assert {:continue, _} = Task.await(task_a, 15_000)
+      assert {:continue, _} = Task.await(task_b, 15_000)
+
+      output = ControllableIO.output(io)
       assert output =~ "also paused"
       assert output =~ "breakpoint before test.other"
+      assert before?(output, "also paused", "breakpoint before test.other")
     end
+  end
+
+  defp before?(text, first, second) do
+    {a, _} = :binary.match(text, first)
+    {b, _} = :binary.match(text, second)
+    a < b
   end
 
   defp pause_task(server, session) do
@@ -253,7 +276,7 @@ defmodule TinyCI.Control.ConsoleTest do
       receive do
         {:tiny_ci_control_resume, _id, command, overrides} -> {command, overrides}
       after
-        3_000 -> :never_released
+        10_000 -> :never_released
       end
     end)
   end

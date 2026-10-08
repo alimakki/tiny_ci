@@ -14,30 +14,24 @@ defmodule Mix.Tasks.TinyCi.Attest.GenKey do
     * `PATH`      — the **private** key (keep secret; used with `--signing-key`)
     * `PATH.pub`  — the **public** key (distribute; used with `--key` to verify)
 
-  `PATH` defaults to `tiny_ci`.
+  `PATH` defaults to `tiny_ci.key`. The private key is created with mode `0600` and
+  must be kept out of version control (or stored as a CI secret). If `PATH` or `PATH.pub`
+  already exists (a symlink counts), nothing is written and the task fails; if a write fails
+  part-way, the files it created are removed.
+
+  ## Standalone
+
+  The same command is available without Mix as `tiny_ci attest gen-key`
+  (see `TinyCI.CLI`).
   """
 
   use Mix.Task
 
-  alias TinyCI.Provenance.Signer.LocalKey
+  alias TinyCI.MixDelegate
 
   @impl Mix.Task
   def run(args) do
-    {opts, _positional, _invalid} =
-      OptionParser.parse(args, switches: [out: :string], aliases: [o: :out])
-
-    out = opts[:out] || "tiny_ci"
-    pub_path = out <> ".pub"
-
-    %{private: private, public: public} = LocalKey.generate()
-
-    File.write!(out, private)
-    File.write!(pub_path, public)
-
-    IO.puts("Wrote private key: #{out}")
-    IO.puts("Wrote public key:  #{pub_path}")
-    IO.puts(:stderr, "Keep #{out} secret; distribute #{pub_path} for verification.")
-
-    :ok
+    Application.ensure_all_started(:tiny_ci)
+    ["gen-key" | args] |> TinyCI.CLI.Attest.run() |> MixDelegate.raise_on_error()
   end
 end

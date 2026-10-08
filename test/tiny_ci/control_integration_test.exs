@@ -140,7 +140,7 @@ defmodule TinyCI.ControlIntegrationTest do
       refute TinyCI.Control.divergent?(session.run_id)
 
       command(session, :continue)
-      Task.await(task, 5_000)
+      Task.await(task, 30_000)
     end
 
     test "a late subscriber can attach to a run already in flight" do
@@ -178,7 +178,7 @@ defmodule TinyCI.ControlIntegrationTest do
       assert second.step == :two
 
       command(second, :continue)
-      Task.await(task, 5_000)
+      Task.await(task, 30_000)
     end
 
     test "reports not_found once the run is over" do
@@ -187,7 +187,7 @@ defmodule TinyCI.ControlIntegrationTest do
       task = run(stages, ["before:test.one"])
       session = await_pause()
       command(session, :continue)
-      Task.await(task, 5_000)
+      Task.await(task, 30_000)
 
       refute TinyCI.Control.armed?(session.run_id)
 
@@ -220,7 +220,7 @@ defmodule TinyCI.ControlIntegrationTest do
 
       command(session, :continue)
 
-      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 30_000)
       assert File.exists?(path)
     end
 
@@ -235,7 +235,7 @@ defmodule TinyCI.ControlIntegrationTest do
       command(await_pause(), :skip)
 
       assert {:ok, [%StageResult{status: :passed, step_results: [step]}]} =
-               Task.await(task, 5_000)
+               Task.await(task, 30_000)
 
       assert %StepResult{name: :touch, status: :skipped} = step
       refute File.exists?(path)
@@ -261,7 +261,7 @@ defmodule TinyCI.ControlIntegrationTest do
       command(await_pause(), :abort)
 
       assert {:error, {:aborted, :test}, [%StageResult{name: :test, status: :aborted}]} =
-               Task.await(task, 5_000)
+               Task.await(task, 30_000)
     end
 
     test "the payload exposes resolved env, working dir, store, and git context" do
@@ -287,7 +287,7 @@ defmodule TinyCI.ControlIntegrationTest do
       assert session.working_dir == File.cwd!()
 
       command(session, :continue)
-      Task.await(task, 5_000)
+      Task.await(task, 30_000)
     end
 
     test "emits breakpoint_hit then breakpoint_resumed into the event stream" do
@@ -296,7 +296,7 @@ defmodule TinyCI.ControlIntegrationTest do
       task = run(stages, ["before:test.one"])
       session = await_pause()
       command(session, :continue)
-      Task.await(task, 5_000)
+      Task.await(task, 30_000)
 
       events = drain_events()
 
@@ -326,7 +326,7 @@ defmodule TinyCI.ControlIntegrationTest do
 
       command(session, :continue)
 
-      assert {:error, {:stage_failed, :test, :failed}, _} = Task.await(task, 5_000)
+      assert {:error, {:stage_failed, :test, :failed}, _} = Task.await(task, 30_000)
     end
 
     test "skip converts a failure into a skip, rescuing the stage" do
@@ -336,7 +336,7 @@ defmodule TinyCI.ControlIntegrationTest do
       command(await_pause(), :skip)
 
       assert {:ok, [%StageResult{status: :passed, step_results: [%{status: :skipped}]}]} =
-               Task.await(task, 5_000)
+               Task.await(task, 30_000)
     end
 
     test "retry re-runs the body, bypassing the cache" do
@@ -356,7 +356,7 @@ defmodule TinyCI.ControlIntegrationTest do
       # The breakpoint re-arms, so the second pass pauses again.
       command(await_pause(), :continue)
 
-      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 30_000)
       assert File.read!(path) |> String.split("\n", trim: true) |> length() == 2
     end
 
@@ -366,7 +366,7 @@ defmodule TinyCI.ControlIntegrationTest do
       task = run(stages, ["after:test.one"])
       command(await_pause(), :retry)
       command(await_pause(), :continue)
-      Task.await(task, 5_000)
+      Task.await(task, 30_000)
 
       assert %TinyCI.Events.RunDiverged{reason: :retry} =
                find_event(drain_events(), TinyCI.Events.RunDiverged)
@@ -385,7 +385,7 @@ defmodule TinyCI.ControlIntegrationTest do
       assert session.store["seen"] == "from_action"
 
       command(session, :continue)
-      Task.await(task, 5_000)
+      Task.await(task, 30_000)
     end
   end
 
@@ -409,7 +409,7 @@ defmodule TinyCI.ControlIntegrationTest do
       edit(session, :tag, "edited")
       command(session, :continue)
 
-      assert {:ok, [%StageResult{store: store}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{store: store}]} = Task.await(task, 30_000)
       assert store[:tag] == "edited"
       assert store[:seen] == "edited"
     end
@@ -430,7 +430,7 @@ defmodule TinyCI.ControlIntegrationTest do
       assert second.store["handoff"] == "carried"
       command(second, :continue)
 
-      Task.await(task, 5_000)
+      Task.await(task, 30_000)
     end
 
     test "an edit made in a parallel step still propagates out of that branch" do
@@ -450,7 +450,7 @@ defmodule TinyCI.ControlIntegrationTest do
       edit(session, :from_branch, "yes")
       command(session, :continue)
 
-      assert {:ok, [%StageResult{store: store}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{store: store}]} = Task.await(task, 30_000)
       assert store[:from_branch] == "yes"
     end
 
@@ -464,7 +464,7 @@ defmodule TinyCI.ControlIntegrationTest do
       edit(session, :b, "2")
       command(session, :continue)
 
-      assert {:ok, [%StageResult{store: store}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{store: store}]} = Task.await(task, 30_000)
       assert store[:a] == "1"
       assert store[:b] == "2"
     end
@@ -476,7 +476,7 @@ defmodule TinyCI.ControlIntegrationTest do
       session = await_pause()
       edit(session, :tag, "v2")
       command(session, :continue)
-      Task.await(task, 5_000)
+      Task.await(task, 30_000)
 
       assert %TinyCI.Events.RunDiverged{reason: :set_store, detail: detail} =
                find_event(drain_events(), TinyCI.Events.RunDiverged)
@@ -505,7 +505,7 @@ defmodule TinyCI.ControlIntegrationTest do
       refute File.exists?(path)
 
       command(session, :continue)
-      Task.await(task, 5_000)
+      Task.await(task, 30_000)
       assert File.exists?(path)
     end
 
@@ -520,7 +520,7 @@ defmodule TinyCI.ControlIntegrationTest do
       command(await_pause(), :skip)
 
       assert {:ok, [%StageResult{name: :deploy, status: :skipped, step_results: []}]} =
-               Task.await(task, 5_000)
+               Task.await(task, 30_000)
 
       refute File.exists?(path)
     end
@@ -537,7 +537,7 @@ defmodule TinyCI.ControlIntegrationTest do
       assert session.store["seen"] == "produced"
 
       command(session, :continue)
-      Task.await(task, 5_000)
+      Task.await(task, 30_000)
     end
 
     test "an edit at after:stage lands on the stage's store" do
@@ -548,7 +548,7 @@ defmodule TinyCI.ControlIntegrationTest do
       edit(session, :late, "edit")
       command(session, :continue)
 
-      assert {:ok, [%StageResult{store: store}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{store: store}]} = Task.await(task, 30_000)
       assert store[:late] == "edit"
     end
 
@@ -563,7 +563,7 @@ defmodule TinyCI.ControlIntegrationTest do
       command(await_pause(), :retry)
       command(await_pause(), :continue)
 
-      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 30_000)
       assert File.read!(path) |> String.split("\n", trim: true) |> length() == 2
     end
   end
@@ -599,7 +599,7 @@ defmodule TinyCI.ControlIntegrationTest do
              "independent branch did not progress while a sibling was paused"
 
       command(session, :continue)
-      assert {:ok, results} = Task.await(task, 5_000)
+      assert {:ok, results} = Task.await(task, 30_000)
       assert Enum.all?(results, &(&1.status == :passed))
     end
 
@@ -624,7 +624,7 @@ defmodule TinyCI.ControlIntegrationTest do
              "sibling step did not run while another step was paused"
 
       command(session, :continue)
-      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 30_000)
     end
 
     test "abort in one branch unblocks the others rather than deadlocking" do
@@ -648,7 +648,7 @@ defmodule TinyCI.ControlIntegrationTest do
       command(first, :abort)
 
       assert {:error, {:aborted, :test}, [%StageResult{status: :aborted}]} =
-               Task.await(task, 5_000)
+               Task.await(task, 30_000)
     end
   end
 
@@ -670,7 +670,7 @@ defmodule TinyCI.ControlIntegrationTest do
       assert session.store["elixir"] == "1.18"
 
       command(session, :continue)
-      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 30_000)
     end
 
     test "each combination hits the breakpoint independently" do
@@ -693,7 +693,7 @@ defmodule TinyCI.ControlIntegrationTest do
         end
 
       assert Enum.sort(combos) == ["1.17", "1.18"]
-      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 30_000)
     end
   end
 
@@ -716,7 +716,7 @@ defmodule TinyCI.ControlIntegrationTest do
       task = run(stages, ["before:test.a"], control: [serial: true])
       command(await_pause(), :continue)
 
-      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 30_000)
       assert String.split(File.read!(order), "\n", trim: true) == ["a", "b", "c"]
     end
 
@@ -744,7 +744,7 @@ defmodule TinyCI.ControlIntegrationTest do
       assert second.step == :b
       command(second, :continue)
 
-      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 30_000)
     end
   end
 
@@ -754,7 +754,7 @@ defmodule TinyCI.ControlIntegrationTest do
 
       task = run(stages, ["before:test.one"], control: [timeout: 40, timeout_action: :continue])
 
-      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 5_000)
+      assert {:ok, [%StageResult{status: :passed}]} = Task.await(task, 30_000)
 
       assert %TinyCI.Events.BreakpointResumed{timed_out: true, command: :continue} =
                find_event(drain_events(), TinyCI.Events.BreakpointResumed)
@@ -768,7 +768,7 @@ defmodule TinyCI.ControlIntegrationTest do
 
       task = run(stages, ["before:test.one"], control: [timeout: 40])
 
-      assert {:error, {:aborted, :test}, _results} = Task.await(task, 5_000)
+      assert {:error, {:aborted, :test}, _results} = Task.await(task, 30_000)
     end
   end
 

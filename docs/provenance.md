@@ -16,6 +16,12 @@ mix tiny_ci.attest.gen_key --out ci_key        # → ci_key (private), ci_key.pu
 mix tiny_ci.run --attest run.att.json --signing-key ci_key
 ```
 
+`--out` defaults to `tiny_ci.key` (and `tiny_ci.key.pub`). The private key is created with mode
+`0600`; keep it out of version control, or store it as a CI secret. `gen_key` never overwrites:
+if either file already exists (a symlink counts) it writes nothing and exits 1, and if a write
+fails part-way the files it created are removed. The standalone form is
+`tiny_ci attest gen-key`.
+
 The private key can also come from the `TINY_CI_SIGNING_KEY` environment variable
 (base64), so `--signing-key` isn't needed in CI where the key is a secret:
 

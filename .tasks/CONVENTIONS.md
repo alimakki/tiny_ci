@@ -11,7 +11,7 @@ task files can stay focused on *what* and *why*.
    start typing until you can explain the current behaviour of each of those files.
 3. Check the task's **Depends on** line. If a dependency is not ✅ in `INDEX.md`, stop and say so.
 4. Run `mix test` once before changing anything so you know the baseline is green
-   (1011 tests as of 2026-09-07; 7 are excluded on hosts without a given sandbox backend).
+   (1452 tests including doctests as of 2026-10-07; 8 are excluded on hosts without a given sandbox backend).
 
 ## Test-first workflow
 
@@ -28,9 +28,12 @@ change that makes it pass.
 - Prefer real processes and real files over mocks. Use `@tag :tmp_dir` for filesystem tests;
   the `tmp_dir` is passed in the test context. Use fixture modules under `test/support/`
   (compiled into the test build via `elixirc_paths`) when a test needs an action module.
+- The suite pins ANSI off in `test/test_helper.exs` (the runner keeps its own colours), so
+  results do not depend on whether a terminal is attached. A test that needs colours must
+  enable them itself (`TinyCI.AnsiFixtures.set_ansi/1`), be `async: false`, and restore.
 - Never `Process.sleep/1` to wait for something. Use `assert_receive`, monitors, or a
-  polling helper with a deadline. The suite currently finishes in about six seconds; keep it
-  that way.
+  polling helper with a deadline. The suite currently finishes in about 25 seconds on a developer laptop; do not
+  make it noticeably slower.
 - Tests that start OS processes must leave none behind. Follow the pattern in
   `test/tiny_ci/executor_test.exs` ("leaves no orphaned OS processes"): tag the command with
   a unique marker and `pgrep` for it after the run.

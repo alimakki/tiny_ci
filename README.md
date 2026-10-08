@@ -34,10 +34,44 @@ end
 mix tiny_ci.run
 ```
 
+## Installation
+
+`tiny_ci` is also a standalone command, so it can run without a Mix task in the way. Build
+the escript from a checkout (it needs Erlang/OTP installed to run, nothing else; the repo is developed on OTP 29, see `.mise.toml`):
+
+```bash
+mix escript.build     # writes ./tiny_ci (built with MIX_ENV=prod; gitignored)
+./tiny_ci version
+```
+
+A self-contained binary that needs no Erlang or Elixir at all is planned (M1-03).
+
+Every `mix tiny_ci.*` command has a `tiny_ci` equivalent:
+
+| Mix task | Standalone |
+|----------|------------|
+| `mix tiny_ci.run [pipeline] [options]` | `tiny_ci run [pipeline] [options]` |
+| `mix tiny_ci.runs [show ID \| prune]` | `tiny_ci runs [show ID \| prune]` |
+| `mix tiny_ci.cache clean \| prune \| stats` | `tiny_ci cache clean \| prune \| stats` |
+| `mix tiny_ci.attest.gen_key` / `.verify` | `tiny_ci attest gen-key` / `verify` |
+| `mix tiny_ci.actions.audit` / `.index` / `.search` | `tiny_ci actions audit` / `index` / `search` |
+| | `tiny_ci version`, `tiny_ci help [command]` |
+
+`mix tiny_ci.gen.action` writes into your project's `lib/`, so it stays a Mix task.
+
+The standalone command accepts `--no-color` anywhere before a `--`, and `--help` after any command
+(also only before a `--`; everything after a `--` is an argument). It exits `0` on success, `1`
+when a pipeline or command fails, and `2` on a usage error (an unknown command or flag).
+
+`--no-color` treats the terminal as non-interactive (it sets Elixir's `ansi_enabled` to `false`):
+output is buffered rather than streamed live, and the interactive breakpoint prompt is not
+started. It does **not** yet remove colour escape codes from the console output; strip them with
+`sed 's/\x1b\[[0-9;]*m//g'` if you need plain text.
+
 ## Usage
 
 ```
-mix tiny_ci.run [pipeline] [options]
+mix tiny_ci.run [pipeline] [options]     # or: tiny_ci run [pipeline] [options]
 ```
 
 | Flag | Short | Description |
@@ -50,6 +84,7 @@ mix tiny_ci.run [pipeline] [options]
 | `--filter STAGES` | | Run only the named stage(s) — see below |
 | `--output FORMAT` | | Output format: `json` for machine-readable output |
 | `--no-cache` | | Bypass all cache lookups for this run |
+| `--no-color` | | Treat the terminal as non-interactive: no live output streaming, no breakpoint prompt. Colour escape codes are not yet removed (see [Installation](#installation)) |
 | `--artifacts-dir DIR` | | Override the base directory for artifact storage |
 | `--list-artifacts` | | Show artifacts from the most recent run and exit |
 | `--events FILE` | | Write NDJSON to `FILE`; `-` reserves stdout for events and cannot be combined with `--output json` |
@@ -60,6 +95,12 @@ mix tiny_ci.run [pipeline] [options]
 | `--break-timeout MS` | | Auto-resolve a breakpoint after `MS`; required when no terminal can answer |
 | `--break-timeout-action ACT` | | `abort` (default) or `continue` on timeout |
 | `--debug-serial` | | Force serial scheduling while breakpoints are armed |
+
+An unknown flag is a usage error (exit code `2` from `tiny_ci run`; a `Mix.Error` from
+`mix tiny_ci.run`) rather than being silently ignored. Both `tiny_ci run` and `mix tiny_ci.run`
+accept `--no-color`. The standalone `tiny_ci` command also accepts it before the subcommand or
+anywhere else before a `--` (everything after a `--` is an argument), plus `--version` and
+`--help` / `-h`.
 
 The optional `pipeline` argument selects a named pipeline from `.tiny_ci/`:
 
@@ -181,6 +222,8 @@ mix tiny_ci.runs --output json        # machine-readable
 mix tiny_ci.runs prune --keep 50      # delete all but the newest 50
 mix tiny_ci.run --no-record           # skip recording one run
 ```
+
+The same commands work standalone: `tiny_ci runs`, `tiny_ci runs show RUN_ID`, and so on.
 
 A run killed before it finished is listed as `interrupted`. Runs are never deleted
 automatically. See [docs/runs.md](docs/runs.md) for the layout and the projection contract.
@@ -757,6 +800,11 @@ mix tiny_ci.run --attest run.att.json --signing-key ci_key    # run + attest
 mix tiny_ci.attest.verify run.att.json --key ci_key.pub       # verify (fails if modified)
 ```
 
+`gen_key` defaults to `--out tiny_ci.key` and creates the private key with mode `0600`. Keep the
+private key out of version control, or store it as a CI secret. If either file already exists
+(a symlink counts) it exits 1 and writes nothing; if a write fails part-way, the files it created
+are removed again.
+
 "What ran" is sourced from the [event stream](docs/events.md) and action
 versions/checksums from the lockfile, so the attestation ties *what was pinned*
 to *what actually ran*. Signing is pluggable (Ed25519 local keypair by default).
@@ -1101,7 +1149,7 @@ Jason.encode!(event)
 ```
 tiny_ci/
   lib/
-    mix/tasks/                       # The CLI: one Mix task per command
+    mix/tasks/                       # Mix wrappers: each delegates to a TinyCI.CLI subcommand
       tiny_ci.run.ex                 #   run a pipeline
       tiny_ci.runs.ex                #   run history: list / show / prune
       tiny_ci.cache.ex               #   dependency cache: clean / prune / stats
@@ -1111,7 +1159,12 @@ tiny_ci/
       tiny_ci.actions.search.ex      #   search the action registry
       tiny_ci.attest.gen_key.ex      #   generate an Ed25519 signing key
       tiny_ci.attest.verify.ex       #   verify a run attestation
+    mix/tiny_ci/mix_delegate.ex      # Keeps each Mix task's raise/halt contract over the CLI
     tiny_ci/
+      cli.ex                         # `tiny_ci` entrypoint: dispatch, help, version, exit codes
+      cli/                           # Subcommands: run, runs, cache, attest, actions (no Mix)
+        subcommand.ex                #   behaviour; extras register under :cli_subcommands
+      project.ex                     # Mix-free root app and version
       application.ex                 # OTP application: task and control-registry supervisors
       tiny_ci.ex                     # Step and Stage structs
       pipeline_spec.ex               # PipelineSpec: the interpreter's resolved output
@@ -1234,6 +1287,7 @@ mix test                           # run full suite
 mix format                         # format code
 mix compile --warnings-as-errors   # check for warnings
 mix credo                          # static analysis
+mix escript.build                  # build ./tiny_ci (MIX_ENV=prod)
 ```
 
 ## Roadmap

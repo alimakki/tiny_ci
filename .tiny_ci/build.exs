@@ -25,3 +25,12 @@ end
 stage :escript, needs: [:compile], mode: :serial do
   step :lsp, cmd: "mix escript.build", working_dir: "tiny_ci_lsp"
 end
+
+# Build the standalone `tiny_ci` escript for the core app (./tiny_ci, gitignored) and
+# smoke-test it: it must start, report a version, and plan this repo's own pipeline.
+# Like the LSP escript, mix.exs forces MIX_ENV=prod so tidewave/bandit stay out.
+stage :cli, needs: [:compile], mode: :serial do
+  step :build, cmd: "mix escript.build"
+  step :version, cmd: "./tiny_ci version"
+  step :dry_run, cmd: "./tiny_ci run --dry-run --no-color"
+end

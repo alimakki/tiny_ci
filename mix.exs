@@ -8,9 +8,23 @@ defmodule TinyCi.MixProject do
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      escript: escript(),
       deps: deps(),
       aliases: aliases()
     ]
+  end
+
+  # Always build the escript in :prod so dev-only deps (tidewave, bandit) stay out
+  # of the binary. Those apps emit startup output that would pollute the output
+  # of `tiny_ci run`, and `--output json` / `--events -` own stdout.
+  def cli do
+    [preferred_envs: ["escript.build": :prod]]
+  end
+
+  # The standalone `tiny_ci` command. M1-03 wraps the same entrypoint in a
+  # self-contained binary.
+  defp escript do
+    [main_module: TinyCI.CLI, name: "tiny_ci"]
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]

@@ -23,6 +23,9 @@ defmodule TinyCI.Cache.LockTest do
     test "a second process blocks until the first releases", ctx do
       lock = lock_dir(ctx)
       parent = self()
+      # Set by the holder at the end of its critical section, read by the waiter at the
+      # start of its own: if the lock did not exclude, the waiter would read 0.
+      released = :atomics.new(1, [])
 
       holder =
         spawn_link(fn ->
@@ -30,17 +33,20 @@ defmodule TinyCI.Cache.LockTest do
             send(parent, :held)
 
             receive do
-              :release -> :ok
+              :release -> :atomics.put(released, 1, 1)
             end
           end)
         end)
 
       assert_receive :held
-      waiter = Task.async(fn -> Lock.with_lock(lock, [poll: 5], fn -> :got_it end) end)
-      refute_receive {_ref, :got_it}, 50
+
+      waiter =
+        Task.async(fn -> Lock.with_lock(lock, [poll: 5], fn -> :atomics.get(released, 1) end) end)
+
+      refute_receive {_ref, _result}, 50
 
       send(holder, :release)
-      assert Task.await(waiter) == :got_it
+      assert Task.await(waiter, 30_000) == 1, "the waiter entered before the holder released"
       refute File.exists?(lock)
     end
 

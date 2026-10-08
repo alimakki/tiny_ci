@@ -22,6 +22,13 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 tiny_ci-*.tar
 
+# The escript built by "mix escript.build".
+/tiny_ci
+
+# The default private key written by "tiny_ci attest gen-key". (Not the .pub: that
+# one is meant to be distributed.)
+/tiny_ci.key
+
 
 # .tasks/ is committed: it is the per-task implementation plan agents work from.
 
