@@ -146,7 +146,7 @@ defmodule TinyCI.DSL.Spec do
       kind: :option,
       contexts: [:stage],
       type: "positive integer",
-      summary: "Caps how many matrix/parallel jobs run at once.",
+      summary: "Caps how many matrix/parallel jobs run at once (default: online schedulers).",
       example: "max_parallel: 2"
     },
     %Entry{

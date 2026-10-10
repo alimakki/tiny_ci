@@ -732,9 +732,15 @@ defmodule TinyCI.Executor do
   end
 
   # `--debug-serial` also caps matrix fan-out at one combination, so stepping
-  # through a matrix stage does not queue up N simultaneous prompts.
+  # through a matrix stage does not queue up N simultaneous prompts. Without an
+  # explicit `max_parallel:`, fan-out is bounded by the scheduler count so a wide
+  # matrix does not start every combination's processes at once.
   defp matrix_concurrency(stage, combinations, context) do
-    if serial_control?(context), do: 1, else: stage.max_parallel || length(combinations)
+    cond do
+      serial_control?(context) -> 1
+      stage.max_parallel -> stage.max_parallel
+      true -> min(length(combinations), System.schedulers_online())
+    end
   end
 
   defp matrix_stage_status(run_results, allow_failure) do

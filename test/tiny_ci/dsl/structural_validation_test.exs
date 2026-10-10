@@ -3,6 +3,8 @@ defmodule TinyCI.DSL.StructuralValidationTest do
 
   alias TinyCI.DSL.Interpreter
 
+  defp strings(n), do: inspect(Enum.map(1..n, &Integer.to_string/1))
+
   defp assert_validation_error(source, fragment) do
     assert {:error, {:validation_error, messages}} =
              Interpreter.interpret_string(source, "structure.exs")
@@ -55,6 +57,21 @@ defmodule TinyCI.DSL.StructuralValidationTest do
         "stage :test, matrix: [otp: []] do\nstep :test, cmd: \"ok\"\nend",
         "Matrix values for :otp must be nonempty"
       )
+    end
+
+    test "rejects a matrix that expands past the combination limit" do
+      assert_validation_error(
+        "stage :test, matrix: [a: #{strings(16)}, b: #{strings(17)}] do\nstep :t, cmd: \"ok\"\nend",
+        "Stage :matrix expands to 272 combinations (limit 256)"
+      )
+    end
+
+    test "accepts a matrix at the combination limit" do
+      source =
+        "stage :test, matrix: [a: #{strings(16)}, b: #{strings(16)}] do\nstep :t, cmd: \"ok\"\nend"
+
+      assert {:ok, %{stages: [stage]}} = Interpreter.interpret_string(source, "limit.exs")
+      assert length(stage.matrix[:a]) == 16
     end
 
     test "keeps empty stages, an absent matrix, and an explicit empty matrix valid" do

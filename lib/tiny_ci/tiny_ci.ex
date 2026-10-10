@@ -58,7 +58,8 @@ defmodule TinyCI.Stage do
 
   When `matrix:` is set, the stage is replicated once per combination of
   matrix variable values (cartesian product). All combinations run in
-  parallel subject to `max_parallel:`.
+  parallel subject to `max_parallel:` (default: the number of online
+  schedulers).
 
   Steps within a stage run according to the stage's `:mode` — either
   `:serial` or `:parallel`.

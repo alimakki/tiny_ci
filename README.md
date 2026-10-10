@@ -349,7 +349,7 @@ end
 | `:when` | (always run) | Condition expression; stage is skipped when it evaluates to falsy |
 | `:working_dir` | (pipeline root) | Default working directory for all steps in this stage |
 | `:matrix` | `[]` | Keyword list of variable names to value lists; stage runs once per combination |
-| `:max_parallel` | (unlimited) | Maximum number of matrix runs executing at the same time |
+| `:max_parallel` | online schedulers | Maximum number of matrix runs executing at the same time |
 | `:allow_failure` | `false` | When `true`, a failing matrix combination does not fail the parent stage |
 
 ### Stage Dependencies (DAG)
@@ -417,7 +417,10 @@ Matrix values do not install toolchains or select operating systems. Combination
 share the working tree; use commands that do not race on mutable build outputs.
 Published artifacts have a separate destination per combination.
 
-**Limiting concurrency** — use `max_parallel:` to cap how many runs execute simultaneously:
+A matrix may expand to at most 256 combinations; the validator rejects larger ones.
+
+**Limiting concurrency** — by default at most `System.schedulers_online()` combinations run at
+once. Use `max_parallel:` to set a different cap (higher or lower):
 
 ```elixir
 stage :test,

@@ -39,6 +39,8 @@ defmodule TinyCI.DSL.Validator do
 
   alias TinyCI.DSL.{Diagnostic, Spec, Value}
 
+  @max_matrix_combinations 256
+
   @doc """
   Validates a quoted AST and returns `:ok` or `{:error, messages}`.
 
@@ -213,6 +215,31 @@ defmodule TinyCI.DSL.Validator do
   end
 
   defp validate_matrix_spec(pairs, meta) do
+    validate_matrix_entries(pairs, meta) ++ validate_matrix_size(pairs, meta)
+  end
+
+  # Sized from the value-list lengths, so an oversized matrix is rejected
+  # without ever building its cartesian product.
+  defp validate_matrix_size(pairs, meta) do
+    size =
+      Enum.reduce(pairs, 1, fn
+        {_k, vals}, acc when is_list(vals) -> acc * length(vals)
+        _, acc -> acc
+      end)
+
+    if size > @max_matrix_combinations do
+      [
+        diag(
+          "Stage :matrix expands to #{size} combinations (limit #{@max_matrix_combinations})",
+          meta
+        )
+      ]
+    else
+      []
+    end
+  end
+
+  defp validate_matrix_entries(pairs, meta) do
     Enum.flat_map(pairs, fn
       {k, vals} when is_atom(k) and is_list(vals) ->
         validate_matrix_values(k, vals, meta)

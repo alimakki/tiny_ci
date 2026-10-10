@@ -1550,6 +1550,52 @@ defmodule TinyCI.ExecutorTest do
       assert length(runs) == 4
     end
 
+    defmodule GatedStep do
+      @moduledoc false
+      # Reports to the test process and blocks until released, so the test can
+      # count how many combinations are in flight at once.
+      def execute(_config, ctx) do
+        send(ctx.gate, {:started, self()})
+
+        receive do
+          :go -> :ok
+        end
+      end
+    end
+
+    test "without max_parallel, fan-out is capped at the scheduler count" do
+      cap = System.schedulers_online()
+      total = cap + 2
+
+      stage = %Stage{
+        name: :test,
+        mode: :serial,
+        matrix: [n: Enum.map(1..total, &Integer.to_string/1)],
+        steps: [%Step{name: :gated, module: GatedStep}]
+      }
+
+      test_pid = self()
+      task = Task.async(fn -> Executor.execute(stage, %{gate: test_pid}) end)
+
+      first =
+        for _ <- 1..cap do
+          assert_receive {:started, pid}, 2000
+          pid
+        end
+
+      refute_receive {:started, _}, 100
+
+      Enum.each(first, &send(&1, :go))
+
+      for _ <- 1..(total - cap) do
+        assert_receive {:started, pid}, 2000
+        send(pid, :go)
+      end
+
+      assert %StageResult{status: :passed, matrix_runs: runs} = Task.await(task)
+      assert length(runs) == total
+    end
+
     test "matrix stage skips when when_condition is false" do
       stage = %Stage{
         name: :test,
