@@ -101,6 +101,31 @@ sharing a cache key leave a valid entry; a past run can be listed and read back.
 **Gate:** a downloaded binary runs a shell-only pipeline green in a Go repository on a machine
 with no Erlang or Elixir installed, and `tiny_ci run --dry-run` matches `mix tiny_ci.run --dry-run`.
 
+### M1.5 — Execution fundamentals ⬜
+
+The execution-model fundamentals that must land before the server. Two invariants drive the whole
+milestone: **(I1)** one execution core runs identically whether local or hosted — mode changes
+defaults and policy, never the code path; **(I2)** a run is one supervised process tree with hard
+cancellation and one complete event stream. Overview, decisions, and the full gate:
+[`.tasks/M1.5-00`](.tasks/M1.5-00-execution-fundamentals.md).
+
+| Task | Item |
+|---|---|
+| [M1.5-01](.tasks/M1.5-01-execution-seam.md) | Execution seam: a backend for *where a step runs*; local and hosted share it |
+| [M1.5-02](.tasks/M1.5-02-shell-isolation.md) | Untrusted runs: trust set by the invoker, steps in per-stage containers, no repo code on the host |
+| [M1.5-03](.tasks/M1.5-03-reproducible-environments.md) | `image:` / reproducible environments, honoured in both modes |
+| [M1.5-04](.tasks/M1.5-04-run-process-tree.md) | Run process tree + hard cancellation (moves M2-01's core into the runner) |
+| [M1.5-05](.tasks/M1.5-05-readiness-scheduler.md) | Readiness-based DAG scheduling + a global concurrency cap |
+| [M1.5-06](.tasks/M1.5-06-run-store-port.md) | A `RunStore` port so local and hosted share the run model |
+| [M1.5-07](.tasks/M1.5-07-unify-output-pipeline.md) | One rendering path (retire the legacy listener) |
+| [M1.5-08](.tasks/M1.5-08-housekeeping.md) | Dead fields, stale types and docs |
+
+**Gate:** a pipeline with `image:` runs the same toolchain locally and via the server entrypoint
+through the same `TinyCI.Runner`; an untrusted run executes no repository-controlled code on the
+host, while a trusted local run is unchanged; cancelling a run leaves no OS process alive; a stage starts the moment its `needs:` are
+satisfied; and a run can be reconstructed entirely from its event stream. **M2 does not start until
+this gate is met.**
+
 ### M2 — The server ⬜
 
 `tiny_ci serve`: one node, runs as supervised processes, triggered by webhooks, reporting back.

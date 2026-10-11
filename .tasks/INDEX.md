@@ -9,7 +9,9 @@ Legend: ⬜ not started · 🟡 in progress · ✅ done · ⏸️ blocked
 Detail level: M0–M2 tasks are fully specified (design, TDD plan, acceptance). M3–M5 tasks are
 specified to the design level and should be re-read against the code when their milestone
 opens. M6–M7 tasks are carried over from the earlier plan and must be re-specified before
-starting.
+starting. **M1.5 tasks are drafts**: the intent, scope, and acceptance bar are set, but the Design
+and TDD sections must be finalized (and the [M1.5-00](M1.5-00-execution-fundamentals.md) decisions
+agreed) before any of them is picked up.
 
 ## M0 — Finish the fundamentals
 
@@ -30,11 +32,33 @@ starting.
 | [M1-02](M1-02-run-outside-mix.md) | Run in a directory with no Mix project | S–M | M1-01 | ✅ |
 | [M1-03](M1-03-release-binary.md) | Burrito release, release workflow, install docs | M | M1-02 | ⬜ |
 
-## M2 — The server
+## M1.5 — Execution fundamentals (gates M2)
+
+Draft milestone: the execution-model fundamentals that must land before the server, and the shape
+that keeps one runner working both locally and hosted. Overview and decisions:
+[M1.5-00](M1.5-00-execution-fundamentals.md). Each task file is marked **Draft** until its design is
+agreed.
 
 | ID | Task | Size | Depends on | Status |
 |----|------|------|------------|--------|
-| [M2-01](M2-01-run-process-model.md) | Run GenServer + DynamicSupervisor; cancel kills subtree; event bus | M–L | M0-01, M0-06 | ⬜ |
+| [M1.5-01](M1.5-01-execution-seam.md) | Execution seam: one core, local and hosted | M | M1-02, M1.5-07 | ⬜ |
+| [M1.5-02](M1.5-02-shell-isolation.md) | Untrusted-run isolation: trust policy + container sessions | L–XL | M1.5-01 | ⬜ |
+| [M1.5-03](M1.5-03-reproducible-environments.md) | `image:` / reproducible environments | M | M1.5-01, M1.5-02 | ⬜ |
+| [M1.5-04](M1.5-04-run-process-tree.md) | Run process tree + hard cancellation | M–L | M0-06, M1.5-01 | ⬜ |
+| [M1.5-05](M1.5-05-readiness-scheduler.md) | Readiness-based DAG + global concurrency cap | M | M1.5-04 | ⬜ |
+| [M1.5-06](M1.5-06-run-store-port.md) | `RunStore` port shared by local and hosted | M | M0-06 | ⬜ |
+| [M1.5-07](M1.5-07-unify-output-pipeline.md) | One rendering path (retire the legacy listener) | M | — | ⬜ |
+| [M1.5-08](M1.5-08-housekeeping.md) | Dead fields, stale types and docs | S | — | ⬜ |
+
+## M2 — The server
+
+> **Gated by M1.5.** Do not start M2 until the M1.5 gate in
+> [`M1.5-00`](M1.5-00-execution-fundamentals.md) is met. M2-01 is re-specified by M1.5-04: the run
+> process model moves into core, and M2-01 becomes server wiring around it.
+
+| ID | Task | Size | Depends on | Status |
+|----|------|------|------------|--------|
+| [M2-01](M2-01-run-process-model.md) | Run GenServer + DynamicSupervisor; cancel kills subtree; event bus | M–L | M0-01, M0-06, M1.5-04 | ⬜ |
 | [M2-02](M2-02-workspace-checkout.md) | Bare-mirror cache + worktree per run | M | — | ⬜ |
 | [M2-03](M2-03-queue-and-scheduler.md) | Queue, concurrency cap, auto-cancel superseded runs | M | M2-01, M2-02 | ⬜ |
 | [M2-04](M2-04-http-webhooks-and-polling.md) | HTTP layer, webhooks (GitHub/GitLab/Gitea), poller | M–L | M2-03 | ⬜ |
