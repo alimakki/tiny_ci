@@ -36,15 +36,26 @@ mix tiny_ci.run
 
 ## Installation
 
-`tiny_ci` is also a standalone command, so it can run without a Mix task in the way. Build
-the escript from a checkout (it needs Erlang/OTP installed to run, nothing else; the repo is developed on OTP 29, see `.mise.toml`):
+The quickest install is a single self-contained binary — one download, no Erlang or Elixir
+required:
+
+```bash
+curl -fsSLO \
+  https://github.com/alimakki/tiny_ci/releases/latest/download/tiny_ci_linux_x86_64
+chmod +x tiny_ci_linux_x86_64
+sudo mv tiny_ci_linux_x86_64 /usr/local/bin/tiny_ci
+```
+
+See [`docs/install.md`](docs/install.md) for the asset for each OS and architecture, checksum
+verification, the macOS Gatekeeper note, and how to build a release from source.
+
+If you already have Erlang/OTP, you can instead build the escript from a checkout (the repo is
+developed on OTP 29, see `.mise.toml`):
 
 ```bash
 mix escript.build     # writes ./tiny_ci (built with MIX_ENV=prod; gitignored)
 ./tiny_ci version
 ```
-
-A self-contained binary that needs no Erlang or Elixir at all is planned (M1-03).
 
 ### Non-Elixir projects
 

@@ -1,16 +1,23 @@
 defmodule TinyCi.MixProject do
   use Mix.Project
 
+  # The release workflow sets RELEASE_VERSION from the git tag so the shipped
+  # binary reports the tag (`tiny_ci version`); dev and test builds keep 0.1.0.
+  @version System.get_env("RELEASE_VERSION") || "0.1.0"
+
   def project do
     [
       app: :tiny_ci,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.19",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
       escript: escript(),
       deps: deps(),
-      aliases: aliases()
+      aliases: aliases(),
+      # `test/fixtures/` holds example projects (pipelines in the tiny_ci DSL) that
+      # integration tests and the release smoke job read; they are not test files.
+      test_ignore_filters: [&String.starts_with?(&1, "test/fixtures/")]
     ]
   end
 
@@ -33,7 +40,10 @@ defmodule TinyCi.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger],
+      # `:crypto` backs run ids, cache keys, artifact ids, and Ed25519 provenance
+      # signing. It is a NIF-based OTP app, so it must be declared to be included
+      # in a release (Burrito recompiles its NIF per target).
+      extra_applications: [:logger, :crypto],
       mod: {TinyCI.Application, []}
     ]
   end

@@ -1,6 +1,6 @@
 # M1-03 — Standalone binary: Burrito release, release workflow, install docs
 
-**Milestone:** M1 · **Size:** M · **Depends on:** M1-02 · **Status:** ⬜ Not started
+**Milestone:** M1 · **Size:** M · **Depends on:** M1-02 · **Status:** ✅ Done (2026-10-11)
 **Written against:** commit `b9496e7` (2026-08-08)
 
 ## Summary
@@ -121,7 +121,7 @@ so `mix compile --warnings-as-errors` does not complain in non-release builds.
   Zig (the version Burrito requires), `xz-utils`, `p7zip-full`; `mix deps.get`;
   `cd tiny_ci_dist && MIX_ENV=prod mix release`; upload `tiny_ci_dist/burrito_out/*` as artifacts.
 - Job `smoke` (matrix: `macos-14` arm64, `macos-13` x86_64, `ubuntu-24.04` x86_64,
-  `ubuntu-24.04-arm` arm64): download the matching binary, `chmod +x`, run `tiny_ci version`
+  `ubuntu-24.04-arm` arm64; **implemented on `macos-15` / `macos-15-intel` — see Deviations**): download the matching binary, `chmod +x`, run `tiny_ci version`
   and `tiny_ci run --dry-run --no-color` in `test/fixtures/non_elixir_project/` (create it:
   `go.mod` + `tiny_ci.exs` with two echo steps). Fail the job if either exits non-zero.
 - Job `publish` (needs smoke): `sha256sum` → `SHA256SUMS`; `softprops/action-gh-release` with
@@ -188,15 +188,21 @@ the application branch.
 
 ## Acceptance criteria
 
-- [ ] `tiny_ci_dist`'s `MIX_ENV=prod mix release` produces one executable per target with no Elixir deps
-      leaking from `:dev`.
-- [ ] A downloaded binary runs a shell-only pipeline green in a directory with no `mix.exs` on
+- [x] `tiny_ci_dist`'s `MIX_ENV=prod mix release` produces one executable per target with no Elixir deps
+      leaking from `:dev`. (four files in `tiny_ci_dist/burrito_out/`; the release's `lib/` has
+      no `bandit`, `tidewave`, or `credo`)
+- [x] A downloaded binary runs a shell-only pipeline green in a directory with no `mix.exs` on
       a machine with no Erlang or Elixir installed (verified by the `smoke` job on all four).
-- [ ] `tiny_ci run --dry-run` from the binary matches `mix tiny_ci.run --dry-run`.
-- [ ] Under Mix and in the escript, `TinyCI.Application` behaves exactly as before (all tests
-      green, no CLI auto-run).
-- [ ] Tagging `v*` publishes binaries and `SHA256SUMS` to a GitHub release.
-- [ ] `docs/install.md` exists; README Installation links it and lists the one-line install.
+      (`linux_x86_64` verified locally — `vet ok` / `test ok` / pipeline passed; the four-runner
+      matrix is `.github/workflows/release.yml`'s `smoke` job and runs on a tag or dispatch)
+- [x] `tiny_ci run --dry-run` from the binary matches `mix tiny_ci.run --dry-run`.
+      (byte-identical after stripping ANSI, same `--file`/`--root` invocation)
+- [x] Under Mix and in the escript, `TinyCI.Application` behaves exactly as before (all tests
+      green, no CLI auto-run). (`test/tiny_ci/application_test.exs`; `TINY_CI_ESCRIPT=1 mix test
+      --only escript` still passes)
+- [x] Tagging `v*` publishes binaries and `SHA256SUMS` to a GitHub release.
+      (`.github/workflows/release.yml` `build` → `smoke` → `publish`)
+- [x] `docs/install.md` exists; README Installation links it and lists the one-line install.
 
 ## Pitfalls
 
@@ -217,3 +223,49 @@ the application branch.
 
 - macOS notarisation.
 - Homebrew tap / apt repo.
+
+## Deviations
+
+Written against `b9496e7`; implemented on `fbe4314` (after M1-01, M1-02). Where the spec and
+the code disagreed, the intent won.
+
+- **Burrito is `~> 1.6` (1.6.0), which hard-checks Zig 0.16.0** — the README's "0.15.2" is
+  stale. Zig 0.16.0 is pinned in `.mise.toml`. The prebuilt ERTS for OTP 29.0.5 exists for all
+  four targets, so the pinned OTP did not have to move.
+- **Standalone detection reads `__BURRITO` directly**, not `Burrito.Util.running_standalone?/0`.
+  Burrito is `runtime: false` and is *not in the release*, so calling it would fail; the env var
+  is exactly what that predicate checks. Arguments come from `:init.get_plain_arguments/0`, which
+  is what `Burrito.Util.Args.argv/0` wraps. `:standalone_cli`, `:standalone_argv`, and
+  `:standalone_cli_module` are the test seams.
+- **The CLI runs synchronously in `maybe_run_cli/0`, not in a `Task`.** Burrito's launcher runs
+  `-s elixir start_cli`, so Elixir's `Kernel.CLI` reads the same `-extra` arguments and treats
+  the first as a script name ("No file named run"). A `Task` races that; halting synchronously in
+  `Application.start/2` wins deterministically (Burrito's own example app does the same).
+- **`:crypto` was added to core `extra_applications`.** It backs run ids, cache/artifact keys,
+  and Ed25519 provenance signing. It is a NIF-based OTP app and was missing from the release
+  (the escript worked only because the host ERTS supplies it).
+- **`scrub_wrapper_env/0` removes the wrapper's environment before the CLI runs.** Burrito's
+  launcher sets `__BURRITO`, `__BURRITO_BIN_PATH`, `_IS_TTY`, `RELEASE_ROOT`,
+  `RELEASE_SYS_CONFIG`, `ROOTDIR`, `BINDIR`, prepends the payload's ERTS to `PATH`, and appends
+  system dirs to `LD_LIBRARY_PATH`; steps inherit all of it. Left in place, a step that starts
+  `:tiny_ci` (`mix test` in a dependent project, the escript) took the standalone branch and ran
+  the CLI with its own argv, and a step's `erl`/`elixir`/`mix` ran on the bundled ERTS. Safe for
+  the running VM: it finds its executables via the `-bindir` boot argument, not the environment.
+- **`configure_ansi/0` honours the wrapper's `_IS_TTY`.** Burrito forces `ansi_enabled` on, so a
+  piped binary would otherwise start a TTY control console. The console reporter still emits
+  escape codes (`--no-color` "does not yet remove colour codes", per `TinyCI.CLI`), so this only
+  governs `IO.ANSI.enabled?/0`, not the codes themselves.
+- **The binary reports the git tag.** `tiny_ci version` reads `Application.spec(:tiny_ci, :vsn)`,
+  so *both* `mix.exs` files read `RELEASE_VERSION` (set by the workflow from the tag); changing
+  only the release metadata would not have changed the printed version.
+- **`.tiny_ci/release.exs` uses `BURRITO_TARGET`**, Burrito's own target override, for both the
+  build and the smoke path (the task's `TINY_CI_TARGET` was redundant). The smoke stage is
+  `mode: :serial`: on a cold cache the first invocation unpacks the payload, and concurrent
+  first-runs race (`erlexec: Error 26`).
+- **`test/fixtures/` is excluded from `mix format`** by computing `.formatter.exs`'s `inputs`
+  (the formatter has no `!` negation), so the fixture pipeline keeps the style a user would write.
+- **CI runners**: `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15` (arm64), `macos-15-intel`
+  (x86_64). `publish` is gated on `refs/tags/` so a `workflow_dispatch` build does not try to
+  create a release.
+- **`mix release` needs `--overwrite`** when re-run (it prompts otherwise, which blocks a
+  non-interactive build).

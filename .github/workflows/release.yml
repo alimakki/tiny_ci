@@ -1,0 +1,123 @@
+# Build the standalone `tiny_ci` binaries on a tag and publish them.
+#
+# GitHub Actions builds a CI system here only until M2's server exists; the same
+# steps live in `.tiny_ci/release.exs` in tiny_ci's own language, so switching is
+# a change of where they run, not what they do.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Least privilege: nothing here needs write except `publish`, which overrides this.
+permissions:
+  contents: read
+
+jobs:
+  # One Linux host cross-builds all four targets: tiny_ci has no NIFs of its own,
+  # and Burrito downloads a prebuilt ERTS per target.
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same versions as .mise.toml.
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29.0.5"
+          elixir-version: "1.20.3"
+
+      # Burrito 1.6.0 hard-checks for exactly this Zig version.
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      # `xz` is required; `7z` only matters for Windows targets, which we do not
+      # build, but install it so Burrito's pre-check stays quiet.
+      - name: Install Burrito build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xz-utils p7zip-full
+
+      - name: Build the release
+        run: |
+          # Tag the binary with the git tag (`v0.2.0-rc1` -> `0.2.0-rc1`); on a
+          # manual run keep the dev version. Export it here, in the same shell:
+          # a value written to $GITHUB_ENV is not visible until a later step.
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            export RELEASE_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+
+          cd tiny_ci_dist
+          mix deps.get
+          MIX_ENV=prod mix release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: tiny_ci_dist/burrito_out/*
+
+  # Run each binary on a machine with no Erlang or Elixir installed. Native
+  # runners only (the repo is public, so the arm64 runners are free).
+  smoke:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux_x86_64
+          - runner: ubuntu-24.04-arm
+            target: linux_arm64
+          - runner: macos-15
+            target: macos_arm64
+          - runner: macos-15-intel
+            target: macos_x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: binaries
+
+      - name: Smoke test the binary
+        env:
+          BIN: ${{ github.workspace }}/binaries/tiny_ci_${{ matrix.target }}
+        run: |
+          set -eux
+          chmod +x "$BIN"
+          "$BIN" version
+
+          # A directory with no mix.exs: plan, then run for real. `--no-record`
+          # keeps the run out of the (throwaway) run history.
+          cd test/fixtures/non_elixir_project
+          export XDG_DATA_HOME="${RUNNER_TEMP}/tiny_ci-xdg"
+          "$BIN" run --dry-run --no-color
+          "$BIN" run --no-color --no-record
+
+  publish:
+    needs: smoke
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: binaries
+
+      - name: Checksums
+        run: |
+          cd binaries
+          sha256sum tiny_ci_* > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            binaries/tiny_ci_*
+            binaries/SHA256SUMS
