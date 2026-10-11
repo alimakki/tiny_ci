@@ -71,4 +71,55 @@ defmodule TinyCI.Action.AuditTest do
       assert Audit.format([]) =~ "No module actions"
     end
   end
+
+  describe "no lockfile (not an Elixir project)" do
+    @tag :tmp_dir
+    test "lockfile_status/2 is :missing when there is no mix.lock", %{tmp_dir: dir} do
+      assert Audit.lockfile_status(dir) == :missing
+    end
+
+    @tag :tmp_dir
+    test "a present lockfile is :present", %{tmp_dir: dir} do
+      File.write!(Path.join(dir, "mix.lock"), "%{}")
+      assert Audit.lockfile_status(dir) == :present
+    end
+
+    @tag :tmp_dir
+    test "format/2 notes the missing lockfile when nothing errored", %{tmp_dir: dir} do
+      {:ok, entries} = Audit.analyze(spec([AuditLocalAction]), dir, root_app: nil)
+
+      output = Audit.format(entries, lockfile: :missing)
+      assert output =~ "Resolved actions (1)"
+      assert output =~ "no lockfile (not an Elixir project)"
+    end
+
+    @tag :tmp_dir
+    test "the note also appears when the pipeline has no module actions", %{tmp_dir: dir} do
+      {:ok, entries} = Audit.analyze(spec([]), dir, root_app: nil)
+
+      assert Audit.format(entries, lockfile: :missing) =~
+               "no lockfile (not an Elixir project)"
+    end
+
+    @tag :tmp_dir
+    test "an erroring action is not hidden behind the note", %{tmp_dir: dir} do
+      {:ok, entries} = Audit.analyze(spec([Jason]), dir, root_app: :tiny_ci)
+
+      refute Audit.format(entries, lockfile: :missing) =~ "no lockfile"
+    end
+
+    @tag :tmp_dir
+    test "verify/3 fails closed for a third-party action with no lockfile at all", %{tmp_dir: dir} do
+      assert {:error, {:action_lock, [message]}} =
+               Audit.verify(spec([Jason]), dir, root_app: :tiny_ci)
+
+      assert message =~ ":jason"
+      assert message =~ "lockfile" or message =~ "pinned"
+    end
+
+    @tag :tmp_dir
+    test "verify/3 passes for local actions with no lockfile", %{tmp_dir: dir} do
+      assert Audit.verify(spec([AuditLocalAction]), dir, root_app: nil) == :ok
+    end
+  end
 end

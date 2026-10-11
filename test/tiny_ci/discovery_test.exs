@@ -49,6 +49,16 @@ defmodule TinyCI.DiscoveryTest do
     test "returns error when no pipeline file exists", %{project_root: root} do
       assert {:error, :not_found} = Discovery.find_pipeline(root)
     end
+
+    test "finds a pipeline in a directory with no mix.exs (non-Elixir project)",
+         %{project_root: root} do
+      File.write!(Path.join(root, "go.mod"), "module example.com/go_ci\n")
+      path = Path.join(root, "tiny_ci.exs")
+      File.write!(path, "stage :build do\n  step :vet, cmd: \"echo vet ok\"\nend")
+
+      assert {:ok, ^path} = Discovery.find_pipeline(root)
+      refute File.exists?(Path.join(root, "mix.exs"))
+    end
   end
 
   describe "find_pipeline_by_name/2" do

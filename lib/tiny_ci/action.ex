@@ -155,8 +155,9 @@ defmodule TinyCI.Action do
   defp step_error(stage_name, %Step{name: name, module: module}) do
     cond do
       not Code.ensure_loaded?(module) ->
-        "Step :#{name} in stage :#{stage_name} refers to module " <>
-          "#{inspect(module)}, which could not be loaded"
+        "Step :#{name} refers to module #{inspect(module)}, which could not be loaded.\n" <>
+          "  Module steps run inside your Elixir project: use `mix tiny_ci.run` there, " <>
+          "or replace the step with `cmd:`."
 
       not function_exported?(module, :execute, 2) ->
         "Step :#{name} in stage :#{stage_name} module #{inspect(module)} does not " <>

@@ -118,6 +118,20 @@ Invalid module step or hook:
   • Step :push in stage :deploy module MyApp.Deploy does not implement TinyCI.Action (missing execute/2)
 ```
 
+A `module:` step needs its module on the code path. When tiny_ci runs **outside** an Elixir
+project — the standalone `tiny_ci` escript in a Go/Rust/Python/JavaScript directory — the
+module cannot be loaded, so the loader fails at load time (before anything runs) with:
+
+```
+Invalid module step or hook:
+  • Step :push refers to module MyApp.Deploy, which could not be loaded.
+    Module steps run inside your Elixir project: use `mix tiny_ci.run` there, or replace the step with `cmd:`.
+```
+
+Module steps are an Elixir-project feature: use `mix tiny_ci.run` inside the project, or
+replace the step with `cmd:`. Everything that shells out (`cmd:`) is language-agnostic and
+works in any directory.
+
 ## Generator
 
 Scaffold a new action with a compiling module and a passing test stub:

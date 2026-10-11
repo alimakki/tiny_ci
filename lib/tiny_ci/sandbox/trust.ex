@@ -15,6 +15,7 @@ defmodule TinyCI.Sandbox.Trust do
   """
 
   alias TinyCI.Action.Resolver
+  alias TinyCI.Project
 
   @type class :: :first_party | :builtin | :local | :third_party
 
@@ -24,11 +25,12 @@ defmodule TinyCI.Sandbox.Trust do
   ## Options
 
     * `:root_app` — the root project's application (treated as first-party).
-      Defaults to the current Mix project's app when Mix is available.
+      Defaults to `TinyCI.Project.root_app/0` (the current Mix project's app when
+      Mix is running, `nil` otherwise).
   """
   @spec classify(module(), keyword()) :: class()
   def classify(module, opts \\ []) when is_atom(module) do
-    root_app = Keyword.get(opts, :root_app) || root_app()
+    root_app = Keyword.get(opts, :root_app) || Project.root_app()
 
     case owning_app(module) do
       nil -> :local
@@ -50,9 +52,5 @@ defmodule TinyCI.Sandbox.Trust do
       {:ok, app} -> app
       :undefined -> nil
     end
-  end
-
-  defp root_app do
-    if function_exported?(Mix.Project, :config, 0), do: Mix.Project.config()[:app]
   end
 end

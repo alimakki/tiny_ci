@@ -1,6 +1,6 @@
 # M1-02 — Run in a directory with no Mix project
 
-**Milestone:** M1 · **Size:** S–M · **Depends on:** M1-01 · **Status:** ⬜ Not started
+**Milestone:** M1 · **Size:** S–M · **Depends on:** M1-01 · **Status:** ✅ Done (2026-10-10)
 **Written against:** commit `b9496e7` (2026-08-08)
 
 ## Summary
@@ -123,13 +123,19 @@ end
 
 ## Acceptance criteria
 
-- [ ] The escript runs a shell-only pipeline to completion in a directory without `mix.exs`.
-- [ ] `tiny_ci run --dry-run` output there matches the Mix task's for the same file.
-- [ ] A `module:` step outside a project fails at load time with the documented message.
-- [ ] `lib/tiny_ci/**` has no unguarded `Mix.` reference, enforced by a test.
-- [ ] Lockfile/audit/registry code paths degrade gracefully with no `mix.lock`.
-- [ ] The `:escript` integration test exists, is excluded by default, and is run by the dogfood
-      build pipeline.
+- [x] The escript runs a shell-only pipeline to completion in a directory without `mix.exs`.
+      (`test/integration/escript_test.exs`, "runs a shell-only pipeline …")
+- [x] `tiny_ci run --dry-run` output there matches the Mix task's for the same file.
+      (same file, "a --dry-run prints the same plan …")
+- [x] A `module:` step outside a project fails at load time with the documented message.
+      (same file, "a module: step fails with the module-steps message";
+      `test/tiny_ci/action_validation_test.exs`)
+- [x] `lib/tiny_ci/**` has no unguarded `Mix.` reference, enforced by a test.
+      (`test/tiny_ci/architecture_test.exs`; only `TinyCI.Project` may reference `Mix.`)
+- [x] Lockfile/audit/registry code paths degrade gracefully with no `mix.lock`.
+      (`test/tiny_ci/action/audit_test.exs`, "no lockfile …"; `test/tiny_ci/registry_test.exs`)
+- [x] The `:escript` integration test exists, is excluded by default, and is run by the dogfood
+      build pipeline. (`test/test_helper.exs`; `.tiny_ci/build.exs` stage `:smoke`)
 
 ## Pitfalls
 
@@ -148,3 +154,38 @@ end
 ## Follow-ups
 
 _(none yet)_
+
+## Deviations
+
+Written against `b9496e7`; implemented on `e9f5b8c` (after M1-01, `a81c59a`). Where the spec
+and the code disagreed, the intent won.
+
+- **The `Mix.` baseline is no longer "one hit in `trust.ex`".** M1-01 added `TinyCI.Project`,
+  which holds the (six) guarded `Mix.` references and left `Sandbox.Trust.root_app/0` as a
+  second guarded copy. The architecture test allows `Mix.` only in `lib/tiny_ci/project.ex`;
+  `Trust` now delegates to `Project.root_app/0` — the dedupe M1-01 assigned to this task —
+  which also fixes the `{:noproc}` edge case when `Mix.Project` is loadable but no project is
+  running (`test/tiny_ci/sandbox/trust_test.exs`).
+- **The architecture-test allowlist is per file, not per line.** It ignores
+  `@moduledoc`/`@doc`/comment lines (so prose edits do not churn it), and asserts that only
+  `project.ex` contains a runtime `Mix.`, that its matches are exactly the three guarded
+  lines, and that the guard primitives are present.
+- **"No lockfile" surfaces through `Audit.format/2`.** `Audit` gains `lockfile_status/2`
+  (`:present | :missing`) and `format/2` appends "no lockfile (not an Elixir project)" when
+  the lock is missing and nothing errored; an erroring third-party action keeps its existing
+  message. `Lockfile.read/1` already returned `{:ok, %{}}` for a missing file.
+  `TinyCI.CLI.Actions` passes the status.
+- **The module-step message dropped the stage name**, per the design text: "Step :NAME refers
+  to module M, which could not be loaded." plus the "use `mix tiny_ci.run`" line. The stage is
+  still named for the *missing `execute/2`* case. The second line is indented two spaces so it
+  aligns under the console bullet.
+- **The escript parity test runs the Mix front end in-process.** `System.cmd("mix",
+  ["tiny_ci.run", …])` would nest a Mix compile inside the test VM and pollute stdout; the test
+  captures `Mix.Tasks.TinyCi.Run.run/1` instead, which is the same body the CLI subcommand
+  uses. Both sides are ANSI-stripped. The running (non-dry-run) test uses `--no-record`
+  and a fixture-scoped `XDG_DATA_HOME`; the dry-run parity test records nothing.
+- **`:escript` tests are excluded by default** (`test/test_helper.exs`) and run by the new
+  `:smoke` stage in `.tiny_ci/build.exs` (`needs: [:cli]`), matching the stage names M1-01 added.
+- **Registry and Discovery needed no production change.** Neither touches `mix.lock`; tests now
+  pin that a full-VM `Registry.scan/1` needs no project and that discovery works in a
+  `go.mod`-only directory.

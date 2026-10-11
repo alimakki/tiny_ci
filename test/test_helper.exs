@@ -7,6 +7,15 @@ backends = [
 
 exclude = for {tag, backend} <- backends, not backend.available?(), do: tag
 
+# The escript integration suite builds ./tiny_ci and runs it in a fixture
+# directory with no mix.exs. It is opt-in (it is slow, and only the dogfood build
+# and M1-03 exercise it): set TINY_CI_ESCRIPT=1 to run it.
+exclude =
+  case System.get_env("TINY_CI_ESCRIPT") do
+    "1" -> exclude
+    _ -> [:escript | exclude]
+  end
+
 # Whether the runner itself may use colours is decided from the terminal the developer
 # is in, so read it before the flag is pinned below.
 runner_colors = IO.ANSI.enabled?()

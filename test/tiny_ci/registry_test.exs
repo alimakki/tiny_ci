@@ -23,7 +23,7 @@ defmodule TinyCI.RegistryTest do
     end
   end
 
-  describe "scan/1" do
+  describe "scan/0 and scan/1" do
     test "builds one entry per declared action, sourced from metadata" do
       index = Registry.scan(apps: [@app])
       entries = Index.search(index, nil)
@@ -53,6 +53,14 @@ defmodule TinyCI.RegistryTest do
       caps = Registry.scan(apps: [@app]) |> Index.search(nil) |> Enum.flat_map(& &1.capabilities)
       assert :network in caps
       assert :filesystem_write in caps
+    end
+
+    test "scanning every loaded app needs no project or lockfile (standalone/escript)" do
+      # The default scan lists `Application.loaded_applications/0`; in a non-Elixir
+      # directory that is just tiny_ci, its deps, and the OTP/Elixir builtins. The
+      # point is that it does not reach for `mix.lock` or a compiled host project.
+      assert %Index{} = index = Registry.scan()
+      assert is_list(Index.search(index, nil))
     end
   end
 

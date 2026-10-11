@@ -35,4 +35,33 @@ defmodule TinyCI.Sandbox.TrustTest do
       refute Trust.trusted?(Echo, root_app: :some_other_app)
     end
   end
+
+  describe "classify/1 with Mix loadable but not running" do
+    # `TinyCI.Project.root_app/0` loads `Mix.Project` on first call; if `classify/2`
+    # then asked `Mix.Project` directly, `Mix.Project.config/0` would exit with
+    # `{:noproc, …}` because no project stack is alive (as in the escript). A bare
+    # `erl` is the only way to get a VM in that state, hence the subprocess.
+    @erl System.find_executable("erl")
+
+    @tag skip: if(@erl, do: false, else: "the `erl` executable is not on the PATH")
+    test "does not crash when Mix is loadable but no project is running" do
+      ebin = Path.join(Mix.Project.app_path(), "ebin")
+      elixir_libs = :elixir |> :code.lib_dir() |> Path.dirname()
+
+      code =
+        "R = 'Elixir.TinyCI.Project':root_app(), " <>
+          "C = 'Elixir.TinyCI.Sandbox.Trust':classify('Elixir.Kernel'), " <>
+          "io:format(\"~p ~p~n\", [R, C]), halt(0)."
+
+      {output, status} =
+        System.cmd(@erl, ["-noshell", "-pa", ebin, "-eval", code],
+          env: [{"ERL_LIBS", elixir_libs}, {"ERL_CRASH_DUMP", "/dev/null"}],
+          stderr_to_stdout: true
+        )
+
+      assert status == 0
+      # `root_app` is nil (no Mix project); the class is a valid atom, not a crash.
+      assert String.starts_with?(String.trim(output), "nil ")
+    end
+  end
 end

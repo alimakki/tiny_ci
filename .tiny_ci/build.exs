@@ -34,3 +34,9 @@ stage :cli, needs: [:compile], mode: :serial do
   step :version, cmd: "./tiny_ci version"
   step :dry_run, cmd: "./tiny_ci run --dry-run --no-color"
 end
+
+# Prove the freshly built escript runs a shell-only pipeline in a directory with
+# no mix.exs (M1-02). Rebuilds the escript in :prod inside the test's setup_all.
+stage :smoke, needs: [:cli], mode: :serial do
+  step :non_elixir_dir, cmd: "TINY_CI_ESCRIPT=1 mix test --only escript"
+end

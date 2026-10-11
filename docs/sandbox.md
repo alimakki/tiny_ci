@@ -85,6 +85,13 @@ The OS mechanism is pluggable behind `TinyCI.Sandbox.Backend`, and
   mount/PID/network namespaces, launched with `--clearenv`. It needs no root
   (unprivileged user namespaces), so it runs the same in a dev shell and in CI.
 
+Both backends start a fresh BEAM from the host's `elixir` executable, so a backend
+counts as available only when the OS mechanism **and** `elixir` are on the `PATH`. In
+a toolchain-free environment (including a non-Elixir directory), `Backend.default/0`
+returns `nil` and `Driver.Sandbox` fails closed with
+`{:error, {:sandbox_unavailable, :no_backend}}` — a third-party action is never run
+unsandboxed. `cmd:` steps and first-party module steps are unaffected.
+
 Either way the child inherits **no** environment except a minimal runtime base
 and the granted vars: an ungranted secret is simply *absent*, not merely hidden.
 The kernel enforces the generated `TinyCI.Sandbox.Profile`, so network,

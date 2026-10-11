@@ -77,14 +77,45 @@ defmodule TinyCI.Action.Audit do
   end
 
   @doc """
-  Renders resolved entries as a human-readable tree.
-  """
-  @spec format([Resolver.entry()]) :: String.t()
-  def format([]), do: "No module actions referenced by this pipeline.\n"
+  Whether a lockfile exists, at `:lock_path` or the default `<root>/mix.lock`.
 
-  def format(entries) do
-    header = "Resolved actions (#{length(entries)}):\n\n"
-    header <> Enum.map_join(entries, "\n", &format_entry/1) <> "\n"
+  A missing lockfile is not an error — it means the directory is not an Elixir
+  project — but `actions audit` says so explicitly (see `format/2`).
+  """
+  @spec lockfile_status(String.t(), keyword()) :: :present | :missing
+  def lockfile_status(root, opts \\ []) do
+    lock_path = Keyword.get(opts, :lock_path, Path.join(root, "mix.lock"))
+    if File.exists?(lock_path), do: :present, else: :missing
+  end
+
+  @doc """
+  Renders resolved entries as a human-readable tree.
+
+  ## Options
+
+    * `:lockfile` — `:present` or `:missing` (see `lockfile_status/2`). When
+      `:missing` and no entry is in error, a "no lockfile (not an Elixir
+      project)" note is appended; if any action errored, the error stands.
+  """
+  @spec format([Resolver.entry()], keyword()) :: String.t()
+  def format(entries, opts \\ []) do
+    body =
+      case entries do
+        [] -> "No module actions referenced by this pipeline.\n"
+        _ -> "Resolved actions (#{length(entries)}):\n\n" <> render(entries) <> "\n"
+      end
+
+    body <> lockfile_note(entries, opts)
+  end
+
+  defp render(entries), do: Enum.map_join(entries, "\n", &format_entry/1)
+
+  defp lockfile_note(entries, opts) do
+    if opts[:lockfile] == :missing and not Enum.any?(entries, &(&1.status == :error)) do
+      "\n  no lockfile (not an Elixir project)\n"
+    else
+      ""
+    end
   end
 
   defp format_entry(entry) do

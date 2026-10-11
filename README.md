@@ -46,6 +46,22 @@ mix escript.build     # writes ./tiny_ci (built with MIX_ENV=prod; gitignored)
 
 A self-contained binary that needs no Erlang or Elixir at all is planned (M1-03).
 
+### Non-Elixir projects
+
+The escript is language-agnostic: in a Go, Rust, Python, or JavaScript directory (there is
+no `mix.exs`) it discovers `tiny_ci.exs` / `.tiny_ci/pipeline.exs` and runs any step written
+with `cmd:` — caches, artifacts, matrices, conditions, secrets, and the DAG all work. The
+project root is the directory you run it from (`--root` and `-r` override it).
+
+Two things still need an Elixir project:
+
+  * **`module:` steps and module hooks.** They load Elixir modules from the code path, which
+    a `tiny_ci` run outside the project cannot see. The loader fails fast and points at
+    `mix tiny_ci.run`; replace the step with `cmd:`, or run the pipeline inside the project.
+  * **Sandboxed third-party actions.** They run the action in a fresh BEAM, so the host needs
+    an `elixir` executable (plus `sandbox-exec` on macOS or `bwrap` on Linux). With no
+    backend available the driver **fails closed** rather than run the action unsandboxed.
+
 Every `mix tiny_ci.*` command has a `tiny_ci` equivalent:
 
 | Mix task | Standalone |

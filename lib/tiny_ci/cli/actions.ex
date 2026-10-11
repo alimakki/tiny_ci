@@ -63,7 +63,7 @@ defmodule TinyCI.CLI.Actions do
 
     with {:ok, spec} <- resolve_pipeline(opts, root, List.first(positional)),
          {:ok, entries} <- Audit.analyze(spec, root, root_app: TinyCI.Project.root_app()) do
-      IO.puts(Audit.format(entries))
+      IO.puts(Audit.format(entries, lockfile: Audit.lockfile_status(root)))
       if Enum.any?(entries, &(&1.status == :error)), do: {:error, :unsound}, else: :ok
     else
       {:error, reason} -> audit_failed(reason)

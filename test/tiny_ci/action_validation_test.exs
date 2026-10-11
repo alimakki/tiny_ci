@@ -101,5 +101,9 @@ defmodule TinyCI.ActionValidationTest do
 
     assert {:error, {:invalid_action, [msg]}} = Interpreter.interpret_file(path)
     assert msg =~ "Definitely.Not.A.Real.Module"
+    assert msg =~ "could not be loaded"
+    assert msg =~ "Module steps run inside your Elixir project"
+    assert msg =~ "mix tiny_ci.run"
+    assert msg =~ "cmd:"
   end
 end

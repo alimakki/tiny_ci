@@ -27,7 +27,7 @@ starting.
 | ID | Task | Size | Depends on | Status |
 |----|------|------|------------|--------|
 | [M1-01](M1-01-cli-entrypoint.md) | `TinyCI.CLI` entrypoint; Mix task becomes a wrapper | M | M0-06 | ✅ |
-| [M1-02](M1-02-run-outside-mix.md) | Run in a directory with no Mix project | S–M | M1-01 | ⬜ |
+| [M1-02](M1-02-run-outside-mix.md) | Run in a directory with no Mix project | S–M | M1-01 | ✅ |
 | [M1-03](M1-03-release-binary.md) | Burrito release, release workflow, install docs | M | M1-02 | ⬜ |
 
 ## M2 — The server
