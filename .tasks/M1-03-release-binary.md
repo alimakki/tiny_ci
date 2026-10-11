@@ -193,8 +193,7 @@ the application branch.
       no `bandit`, `tidewave`, or `credo`)
 - [x] A downloaded binary runs a shell-only pipeline green in a directory with no `mix.exs` on
       a machine with no Erlang or Elixir installed (verified by the `smoke` job on all four).
-      (`linux_x86_64` verified locally — `vet ok` / `test ok` / pipeline passed; the four-runner
-      matrix is `.github/workflows/release.yml`'s `smoke` job and runs on a tag or dispatch)
+      (`smoke` passed on all four native runners for tag `v0.2.0-rc1`, commit `fe680ba`)
 - [x] `tiny_ci run --dry-run` from the binary matches `mix tiny_ci.run --dry-run`.
       (byte-identical after stripping ANSI, same `--file`/`--root` invocation)
 - [x] Under Mix and in the escript, `TinyCI.Application` behaves exactly as before (all tests
