@@ -1,8 +1,10 @@
 defmodule TinyCI.Hooks do
   @moduledoc """
-  Executes pipeline-level notification hooks after a pipeline completes.
+  Executes pipeline-level notification hooks as part of a run.
 
-  Hooks are run sequentially after `Executor.run_pipeline/3` returns.
+  `Executor.run_pipeline/3` runs the hooks (`on_success` or `on_failure`) after the
+  stages finish and before it emits `run_finished`, so each hook's
+  `hook_started`/`hook_finished` events are part of the run's stream.
   Shell command hooks (`:cmd`) are executed via the system shell with
   automatically injected environment variables. Module hooks (`:module`)
   call `module.run/2` with the hook config and an enriched context.
@@ -28,9 +30,13 @@ defmodule TinyCI.Hooks do
 
   alias TinyCI.Executor.{Callback, Driver, Env}
   alias TinyCI.DSL.Value
+  alias TinyCI.Events
+  alias TinyCI.Events.{HookCompleted, HookStarted}
   alias TinyCI.Redaction
   alias TinyCI.Hook
   alias TinyCI.Output
+
+  require Logger
 
   @default_timeout 30_000
 
@@ -43,6 +49,11 @@ defmodule TinyCI.Hooks do
 
   Hook failures are caught and logged; they do not interrupt subsequent hooks
   or affect the return value.
+
+  Each hook is bracketed by `HookStarted` / `HookCompleted` events on the run's
+  stream (when the context carries a dispatcher under `:events`), so a run's
+  history records that its hooks ran. `HookCompleted.status` is `:passed` or
+  `:failed`.
 
   ## Parameters
 
@@ -60,7 +71,48 @@ defmodule TinyCI.Hooks do
   def run_hooks(hooks, event, context) when is_map(hooks) do
     hooks_list = Map.get(hooks, event, [])
     ctx = Map.put(context, :pipeline_result, event)
-    Enum.each(hooks_list, &run_hook(&1, ctx))
+    Enum.each(hooks_list, &run_hook_emitting(&1, ctx))
+  end
+
+  defp run_hook_emitting(%Hook{name: name} = hook, ctx) do
+    emit(ctx, %HookStarted{run_id: run_id(ctx), timestamp: now(), hook: name})
+
+    {duration_ms, status} = measure(fn -> safe_run_hook(hook, ctx) end)
+
+    emit(ctx, %HookCompleted{
+      run_id: run_id(ctx),
+      timestamp: now(),
+      hook: name,
+      status: status,
+      duration_ms: duration_ms
+    })
+  end
+
+  # Hook failures are logged, never raised: one hook must not stop the rest, and
+  # every hook that started must also finish on the stream.
+  defp safe_run_hook(hook, ctx) do
+    run_hook(hook, ctx)
+  rescue
+    e ->
+      Logger.error("Hook crashed: " <> Exception.format(:error, e, __STACKTRACE__))
+      :failed
+  catch
+    kind, reason ->
+      Logger.error("Hook crashed: " <> Exception.format(kind, reason, __STACKTRACE__))
+      :failed
+  end
+
+  defp emit(ctx, event) do
+    if Map.get(ctx, :events), do: Events.emit(ctx, event)
+  end
+
+  defp run_id(ctx), do: Map.get(ctx, :run_id)
+  defp now, do: DateTime.utc_now()
+
+  defp measure(fun) do
+    start = System.monotonic_time(:millisecond)
+    status = fun.()
+    {System.monotonic_time(:millisecond) - start, status}
   end
 
   defp run_hook(%Hook{name: name, cmd: cmd, env: env, timeout: timeout}, context)
@@ -85,15 +137,15 @@ defmodule TinyCI.Hooks do
            redact: redact
          ) do
       {:passed, _output} ->
-        :ok
+        :passed
 
       {:failed, output} ->
         IO.puts(:stderr, "Hook #{name} failed: #{String.trim(output)}")
-        :ok
+        :failed
 
       {:timeout, _output} ->
         IO.puts(:stderr, "Hook #{name} timed out after #{actual_timeout}ms")
-        :ok
+        :failed
     end
   end
 
@@ -110,19 +162,19 @@ defmodule TinyCI.Hooks do
 
     case outcome do
       :ok ->
-        :ok
+        :passed
 
       {:error, :timeout} ->
         IO.puts(:stderr, "Hook #{name} timed out after #{hook.timeout}ms")
-        :ok
+        :failed
 
       {:error, {:crashed, text}} ->
         IO.puts(:stderr, Redaction.redact("Hook #{name} failed: #{text}", redact))
-        :ok
+        :failed
 
       {:error, reason} ->
         IO.puts(:stderr, Redaction.redact("Hook #{name} failed: #{inspect(reason)}", redact))
-        :ok
+        :failed
     end
   end
 

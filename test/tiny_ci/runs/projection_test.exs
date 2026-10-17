@@ -83,7 +83,7 @@ defmodule TinyCI.Runs.ProjectionTest do
                run_id: "r1",
                pipeline: "app",
                status: :passed,
-               schema_version: 3,
+               schema_version: 4,
                branch: "main",
                commit: "abc1234def",
                base_ref: "origin/main",
@@ -529,7 +529,7 @@ defmodule TinyCI.Runs.ProjectionTest do
   end
 
   describe "parity with Results.to_json/3 for a real run" do
-    @silent [listener: TinyCI.Listener.Silent, output: :buffered, record: false]
+    @silent [console: false, output: :buffered, record: false]
 
     defp key_paths(map, prefix \\ [])
 

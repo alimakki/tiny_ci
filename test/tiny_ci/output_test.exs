@@ -5,6 +5,22 @@ defmodule TinyCI.OutputTest do
 
   alias TinyCI.Output
 
+  # Collects the lines `Output` reports to `:on_line`. `Output` never prints, so
+  # the callback is the only output channel.
+  defp lines(fun) do
+    parent = self()
+    fun.(fn line -> send(parent, {:line, line}) end)
+    drain([])
+  end
+
+  defp drain(acc) do
+    receive do
+      {:line, line} -> drain([line | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   describe "run_executable/3" do
     test "passes argv literally and preserves the exit status" do
       assert {"value; $HOME", 0} =
@@ -57,6 +73,19 @@ defmodule TinyCI.OutputTest do
       refute io_output =~ "should_not_print"
     end
 
+    test "reports complete lines to :on_line in order" do
+      reported =
+        lines(fn on_line ->
+          assert {:passed, _} =
+                   Output.run_cmd("echo one && echo two && echo three",
+                     mode: :buffered,
+                     on_line: on_line
+                   )
+        end)
+
+      assert reported == ["one", "two", "three"]
+    end
+
     test "passes environment variables" do
       assert {:passed, output} =
                Output.run_cmd("echo $TINY_CI_TEST_VAR",
@@ -70,91 +99,77 @@ defmodule TinyCI.OutputTest do
 
   describe "run_cmd/2 in streaming mode" do
     test "returns :passed for successful command" do
-      {result, _io} =
-        with_io(fn ->
-          Output.run_cmd("echo streaming_ok", mode: :streaming)
-        end)
-
-      assert {:passed, _output} = result
+      assert {:passed, _output} = Output.run_cmd("echo streaming_ok", mode: :streaming)
     end
 
     test "returns :failed for failing command" do
-      {result, _io} =
-        with_io(fn ->
-          Output.run_cmd("false", mode: :streaming)
-        end)
-
-      assert {:failed, _output} = result
+      assert {:failed, _output} = Output.run_cmd("false", mode: :streaming)
     end
 
-    test "prints output to stdout as it arrives" do
-      {_result, io_output} =
-        with_io(fn ->
-          Output.run_cmd("echo streamed_line", mode: :streaming)
+    test "reports output as it arrives" do
+      reported =
+        lines(fn on_line ->
+          Output.run_cmd("echo streamed_line", mode: :streaming, on_line: on_line)
         end)
 
-      assert io_output =~ "streamed_line"
+      assert reported == ["streamed_line"]
     end
 
-    test "also captures output in the return value" do
-      {result, _io} =
-        with_io(fn ->
-          Output.run_cmd("echo captured_too", mode: :streaming)
-        end)
-
-      assert {:passed, output} = result
-      assert output =~ "captured_too"
-    end
-
-    test "prints multiple lines" do
-      {_result, io_output} =
-        with_io(fn ->
-          Output.run_cmd("echo line_one && echo line_two && echo line_three", mode: :streaming)
-        end)
-
-      assert io_output =~ "line_one"
-      assert io_output =~ "line_two"
-      assert io_output =~ "line_three"
-    end
-
-    test "captures stderr merged with stdout" do
-      {result, io_output} =
-        with_io(fn ->
-          Output.run_cmd("echo on_stdout; echo on_stderr >&2", mode: :streaming)
-        end)
-
-      assert {:passed, output} = result
-      assert output =~ "on_stdout"
-      assert output =~ "on_stderr"
-      assert io_output =~ "on_stdout"
-      assert io_output =~ "on_stderr"
-    end
-
-    test "passes environment variables" do
-      {result, io_output} =
-        with_io(fn ->
-          Output.run_cmd("echo $TINY_CI_STREAM_VAR",
+    test "reports multiple lines independently" do
+      reported =
+        lines(fn on_line ->
+          Output.run_cmd("echo line_one && echo line_two && echo line_three",
             mode: :streaming,
-            env: %{"TINY_CI_STREAM_VAR" => "stream_env"}
+            on_line: on_line
           )
         end)
 
-      assert {:passed, output} = result
-      assert output =~ "stream_env"
-      assert io_output =~ "stream_env"
+      assert reported == ["line_one", "line_two", "line_three"]
+    end
+
+    test "also captures output in the return value" do
+      assert {:passed, output} = Output.run_cmd("echo captured_too", mode: :streaming)
+      assert output =~ "captured_too"
+    end
+
+    test "captures stderr merged with stdout" do
+      reported =
+        lines(fn on_line ->
+          Output.run_cmd("echo on_stdout; echo on_stderr >&2", mode: :streaming, on_line: on_line)
+        end)
+
+      assert reported == ["on_stdout", "on_stderr"]
+    end
+
+    test "passes environment variables" do
+      reported =
+        lines(fn on_line ->
+          Output.run_cmd("echo $TINY_CI_STREAM_VAR",
+            mode: :streaming,
+            env: %{"TINY_CI_STREAM_VAR" => "stream_env"},
+            on_line: on_line
+          )
+        end)
+
+      assert reported == ["stream_env"]
     end
   end
 
   describe "run_cmd/2 with redact:" do
-    test "masks each printed line and the returned output in streaming mode" do
-      {result, printed} =
-        with_io(fn ->
-          Output.run_cmd("echo token=abcd1234", mode: :streaming, redact: ["abcd1234"])
+    test "masks each reported line and the returned output" do
+      reported =
+        lines(fn on_line ->
+          assert {:passed, output} =
+                   Output.run_cmd("echo token=abcd1234",
+                     mode: :streaming,
+                     redact: ["abcd1234"],
+                     on_line: on_line
+                   )
+
+          assert output == "token=***\n"
         end)
 
-      assert printed =~ "token=***"
-      refute printed =~ "abcd1234"
-      assert result == {:passed, "token=***\n"}
+      assert reported == ["token=***"]
     end
 
     test "masks the returned output in buffered mode" do
@@ -168,77 +183,17 @@ defmodule TinyCI.OutputTest do
       assert {:passed, "***\n"} =
                Output.run_cmd(cmd, mode: :buffered, redact: ["abcd1234"])
     end
-
-    test "masks a prefixed streaming line" do
-      {_result, printed} =
-        with_io(fn ->
-          Output.run_cmd("echo abcd1234", mode: :streaming, prefix: :s, redact: ["abcd1234"])
-        end)
-
-      assert printed =~ "[s] ***"
-    end
-  end
-
-  describe "run_cmd/2 in streaming mode with prefix" do
-    test "prefixes each output line with the step name" do
-      {_result, io_output} =
-        with_io(fn ->
-          Output.run_cmd("echo prefixed_line", mode: :streaming, prefix: "unit")
-        end)
-
-      assert io_output =~ "[unit]"
-      assert io_output =~ "prefixed_line"
-    end
-
-    test "prefixes multiple lines independently" do
-      {_result, io_output} =
-        with_io(fn ->
-          Output.run_cmd("echo first && echo second",
-            mode: :streaming,
-            prefix: "lint"
-          )
-        end)
-
-      lines = String.split(io_output, "\n", trim: true)
-      prefixed_lines = Enum.filter(lines, &(&1 =~ "[lint]"))
-      assert length(prefixed_lines) >= 2
-    end
-
-    test "no prefix when prefix option is nil" do
-      {_result, io_output} =
-        with_io(fn ->
-          Output.run_cmd("echo no_prefix_here", mode: :streaming, prefix: nil)
-        end)
-
-      assert io_output =~ "no_prefix_here"
-      refute io_output =~ "["
-    end
-
-    test "captured output does not include the prefix" do
-      {result, _io} =
-        with_io(fn ->
-          Output.run_cmd("echo raw_output", mode: :streaming, prefix: "test")
-        end)
-
-      assert {:passed, output} = result
-      assert output =~ "raw_output"
-      refute output =~ "[test]"
-    end
   end
 
   describe "run_cmd/2 exit status" do
     test "exit code 0 returns :passed" do
       assert {:passed, _} = Output.run_cmd("true", mode: :buffered)
-
-      {result, _io} = with_io(fn -> Output.run_cmd("true", mode: :streaming) end)
-      assert {:passed, _} = result
+      assert {:passed, _} = Output.run_cmd("true", mode: :streaming)
     end
 
     test "non-zero exit code returns :failed" do
       assert {:failed, _} = Output.run_cmd("false", mode: :buffered)
-
-      {result, _io} = with_io(fn -> Output.run_cmd("false", mode: :streaming) end)
-      assert {:failed, _} = result
+      assert {:failed, _} = Output.run_cmd("false", mode: :streaming)
     end
 
     test "exit code 1 returns :failed with output" do

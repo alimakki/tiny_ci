@@ -14,7 +14,7 @@ defmodule TinyCI.Events do
   ISO 8601 strings.
   """
 
-  @schema_version 3
+  @schema_version 4
 
   @doc """
   The current event-stream schema version, emitted on the `run_started` line.
@@ -34,6 +34,14 @@ defmodule TinyCI.Events do
   def put_combination(map, combination),
     do:
       Map.put(map, "matrix_combination", Map.new(combination, fn {k, v} -> {to_string(k), v} end))
+
+  @doc false
+  # Schema-4 optional keys (`prefix`, `attempts`, `index`, `total`) are written
+  # only when set, so an event built without them is unchanged from before.
+  @spec put_when_set(map(), String.t(), term() | nil) :: map()
+  def put_when_set(map, _key, nil), do: map
+
+  def put_when_set(map, key, value), do: Map.put(map, key, value)
 
   @doc """
   Emits an event to the run's dispatcher, if one is present on the context.
@@ -263,14 +271,17 @@ defmodule TinyCI.Events.StepStarted do
   @moduledoc "Emitted when a step begins executing within a stage."
 
   @enforce_keys [:run_id, :timestamp, :stage, :step]
-  defstruct [:run_id, :timestamp, :stage, :step, :matrix_combination]
+  defstruct [:run_id, :timestamp, :stage, :step, :matrix_combination, :prefix, :attempts, :index]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
           timestamp: DateTime.t(),
           stage: atom(),
           step: atom(),
-          matrix_combination: keyword(String.t()) | nil
+          matrix_combination: keyword(String.t()) | nil,
+          prefix: String.t() | nil,
+          attempts: pos_integer() | nil,
+          index: non_neg_integer() | nil
         }
 
   defimpl Jason.Encoder do
@@ -282,7 +293,10 @@ defmodule TinyCI.Events.StepStarted do
           "stage" => to_string(event.stage),
           "step" => to_string(event.step)
         }
-        |> TinyCI.Events.put_combination(event.matrix_combination),
+        |> TinyCI.Events.put_combination(event.matrix_combination)
+        |> TinyCI.Events.put_when_set("prefix", event.prefix)
+        |> TinyCI.Events.put_when_set("attempts", event.attempts)
+        |> TinyCI.Events.put_when_set("index", event.index),
         opts
       )
     end
@@ -366,7 +380,7 @@ defmodule TinyCI.Events.StepRetrying do
   @moduledoc "Emitted when a step is about to be retried after a failure."
 
   @enforce_keys [:run_id, :timestamp, :stage, :step, :attempt]
-  defstruct [:run_id, :timestamp, :stage, :step, :attempt, :matrix_combination]
+  defstruct [:run_id, :timestamp, :stage, :step, :attempt, :total, :matrix_combination]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
@@ -374,6 +388,7 @@ defmodule TinyCI.Events.StepRetrying do
           stage: atom(),
           step: atom(),
           attempt: pos_integer(),
+          total: pos_integer() | nil,
           matrix_combination: keyword(String.t()) | nil
         }
 
@@ -387,6 +402,7 @@ defmodule TinyCI.Events.StepRetrying do
           "step" => to_string(event.step),
           "attempt" => event.attempt
         }
+        |> TinyCI.Events.put_when_set("total", event.total)
         |> TinyCI.Events.put_combination(event.matrix_combination),
         opts
       )
@@ -455,13 +471,14 @@ defmodule TinyCI.Events.MatrixRunStarted do
   @moduledoc "Emitted when one matrix combination begins executing."
 
   @enforce_keys [:run_id, :timestamp, :stage, :combination]
-  defstruct [:run_id, :timestamp, :stage, :combination]
+  defstruct [:run_id, :timestamp, :stage, :combination, :index]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
           timestamp: DateTime.t(),
           stage: atom(),
-          combination: keyword(String.t())
+          combination: keyword(String.t()),
+          index: non_neg_integer() | nil
         }
 
   defimpl Jason.Encoder do
@@ -472,7 +489,8 @@ defmodule TinyCI.Events.MatrixRunStarted do
           "timestamp" => DateTime.to_iso8601(event.timestamp),
           "stage" => to_string(event.stage),
           "combination" => Map.new(event.combination, fn {k, v} -> {to_string(k), v} end)
-        },
+        }
+        |> TinyCI.Events.put_when_set("index", event.index),
         opts
       )
     end
@@ -512,7 +530,13 @@ defmodule TinyCI.Events.MatrixRunCompleted do
 end
 
 defmodule TinyCI.Events.HookStarted do
-  @moduledoc "Emitted when a pipeline hook (on_success, on_failure) begins."
+  @moduledoc """
+  Emitted when a pipeline hook begins.
+
+  `hook` is the hook's **name** (e.g. `:notify`), not the hook event
+  (`on_success`/`on_failure`); one pair of `hook_started`/`hook_finished` events
+  is emitted per hook, each carrying that hook's own duration and status.
+  """
 
   @enforce_keys [:run_id, :timestamp, :hook]
   defstruct [:run_id, :timestamp, :hook]

@@ -63,7 +63,7 @@ defmodule TinyCI.Runs.RecorderTest do
       assert length(lines) == length(events)
       assert Enum.map(lines, & &1["seq"]) == Enum.to_list(1..length(events))
       assert hd(lines)["type"] == "run_started"
-      assert hd(lines)["schema_version"] == 3
+      assert hd(lines)["schema_version"] == 4
     end
 
     test "meta.json equals the projection of events.ndjson" do

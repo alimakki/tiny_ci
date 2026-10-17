@@ -2,23 +2,18 @@ defmodule TinyCI.Output do
   @moduledoc """
   Manages output strategy for pipeline step execution.
 
-  Supports two modes:
+  This module never writes to stdout. Instead it reports each complete line of
+  output to an `:on_line` callback as it arrives, and returns the captured output.
+  Rendering — streaming vs buffered, step prefixes, and grouping — is the job of
+  the event sinks (see `TinyCI.Events.Sink.Console`), so a backend can run output
+  through the same path whether it is on a laptop or a server.
 
-    * `:streaming` — prints output line-by-line as it arrives using a
-      `Port` directly backed by the OS process. Ideal for TTY environments
-      where real-time feedback is expected.
-
-    * `:buffered` — captures the full output and returns it after the command
-      finishes using `System.cmd/3`. Used in non-TTY environments or when
-      output interleaving must be prevented.
-
-  In streaming mode an optional prefix can be provided. When set, each printed
-  line is prefixed with `  [prefix] ` to disambiguate output from concurrent
-  steps in parallel execution.
+  The `:mode` option is resolved by callers (`mode/0`, `resolve_mode/1`) and
+  selects the console's presentation, but `run_cmd/2` itself behaves the same in
+  either mode: it reports lines and captures output.
 
   Both modes return `{status, output}` where `status` is `:passed`, `:failed`,
   or `:timeout` and `output` is the captured output string (partial on timeout).
-  Streaming mode prints output to stdout as a side-effect *and* returns it.
 
   ## Timeouts and process cleanup
 
@@ -61,22 +56,24 @@ defmodule TinyCI.Output do
   @doc """
   Runs a shell command and returns `{status, output}`.
 
-  In streaming mode, output is printed line-by-line to stdout as it arrives.
-  In buffered mode, output is captured silently. Both modes return the full
-  output string.
+  Each complete output line is reported to the `:on_line` callback (if given) as
+  it arrives; nothing is printed. Both modes return the full output string.
 
   ## Options
 
-    * `:mode` — `:streaming`, `:buffered`, or `:auto` (default `:auto`)
-    * `:prefix` — string to prepend to each output line (streaming only)
+    * `:mode` — `:streaming`, `:buffered`, or `:auto` (default `:auto`); selects
+      the console presentation via `resolve_mode/1`, not the capture behaviour
+    * `:on_line` — a one-argument function called with each complete output line
+      (redacted) as it arrives; omit to capture silently
     * `:env` — map of environment variables for the command
     * `:working_dir` — directory to run the command in
     * `:timeout` — milliseconds after which the command's process subtree is
       killed (default: no timeout)
-    * `:redact` — list of secret values; every printed line and the returned
-      output have them replaced with `***` (see `TinyCI.Redaction`). Lines are
-      masked once complete, so a secret split across two port chunks is still
-      caught; a secret containing a newline is only masked in the returned output.
+    * `:redact` — list of secret values; lines reported to `:on_line` and the
+      returned output have them replaced with `***` (see `TinyCI.Redaction`).
+      Lines are masked once complete, so a secret split across two port chunks is
+      still caught; a secret containing a newline is only masked in the returned
+      output.
 
   ## Returns
 
@@ -106,20 +103,19 @@ defmodule TinyCI.Output do
   @spec run_executable(String.t(), [String.t()], keyword()) ::
           {String.t(), non_neg_integer() | :timeout}
   def run_executable(executable, args, opts \\ []) do
-    output_mode = resolve_mode(opts[:mode] || :auto)
     env = opts[:env] || %{}
-    prefix = if output_mode == :streaming, do: opts[:prefix], else: :buffered
+    on_line = opts[:on_line]
     working_dir = opts[:working_dir]
     timeout = opts[:timeout]
     redact = opts[:redact] || []
 
     executable = System.find_executable(executable) || executable
-    {status, output} = run_port(executable, args, env, working_dir, {prefix, redact}, timeout)
+    {status, output} = run_port(executable, args, env, working_dir, {on_line, redact}, timeout)
     {output, status}
   end
 
-  # `prefix` is a string/nil for streaming, or the `:buffered` atom to suppress printing.
-  defp run_port(executable, args, env, working_dir, {_prefix, redact} = printer, timeout) do
+  # `printer` is `{on_line, redact}`; `on_line` is nil or a one-argument function.
+  defp run_port(executable, args, env, working_dir, {_on_line, redact} = printer, timeout) do
     port_opts = [:stderr_to_stdout, :binary, :exit_status, {:env, charlist_env(env)}]
 
     port_opts =
@@ -136,7 +132,7 @@ defmodule TinyCI.Output do
     receive do
       {^port, {:data, data}} ->
         {lines, remaining} = split_lines(line_buf <> data)
-        print_lines(lines, printer)
+        report_lines(lines, printer)
         collect_port(port, os_pid, deadline, printer, [chunks, data], remaining)
 
       {^port, {:exit_status, exit_code}} ->
@@ -213,7 +209,7 @@ defmodule TinyCI.Output do
   end
 
   defp flush_line("", _printer), do: :ok
-  defp flush_line(line, printer), do: print_lines([line], printer)
+  defp flush_line(line, printer), do: report_lines([line], printer)
 
   defp split_lines(text) do
     parts = String.split(text, "\n", parts: :infinity)
@@ -221,19 +217,12 @@ defmodule TinyCI.Output do
     {complete, remaining}
   end
 
-  defp print_lines([], _printer), do: :ok
-
-  defp print_lines(_lines, {:buffered, _redact}), do: :ok
+  defp report_lines([], _printer), do: :ok
+  defp report_lines(_lines, {nil, _redact}), do: :ok
 
   # Masking happens here, on complete lines, so it is per line by construction.
-  defp print_lines(lines, {nil, redact}) do
-    Enum.each(lines, &IO.puts(Redaction.redact(&1, redact)))
-  end
-
-  defp print_lines(lines, {prefix, redact}) do
-    Enum.each(lines, fn line ->
-      IO.puts("  [#{prefix}] #{Redaction.redact(line, redact)}")
-    end)
+  defp report_lines(lines, {on_line, redact}) when is_function(on_line, 1) do
+    Enum.each(lines, &on_line.(Redaction.redact(&1, redact)))
   end
 
   defp charlist_env(env) do

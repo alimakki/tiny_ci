@@ -36,11 +36,12 @@ These are follow-ups, not guarantees provided by this hardening pass:
 - **Secret scope:** secrets resolve at run start and are broadly injected. Stage
   scoping, approval-gated access, and comprehensive Logger/device interception
   remain separate work.
-- **History and events:** runs are now persisted as event streams (M0-06), but a
-  run cannot yet be reconstructed from the stream alone: output events arrive after
-  step completion, retry logs are not complete, ordinary step events lack matrix
-  identity, and hooks are outside the executor event stream. M1.5-07 closes these
-  gaps.
+- **History and events:** runs are persisted as event streams (M0-06) and a run is
+  now reconstructable from the stream alone (M1.5-07): output lines are emitted as
+  they are produced, every retry attempt's lines and its total are in the stream,
+  ordinary step events carry matrix identity, and hooks emit `hook_started` /
+  `hook_finished`. The human console is a single fold over that stream
+  (`TinyCI.Events.Sink.Console`); nothing else renders step or stage progress.
 - **Workspace and scheduling:** stages still switch to DAG mode when `needs:` is
   used, DAG execution has level barriers, and matrix combinations share mutable
   workspaces. No global resource cap or hard run cancellation exists yet.

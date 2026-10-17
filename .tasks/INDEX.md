@@ -47,7 +47,7 @@ agreed.
 | [M1.5-04](M1.5-04-run-process-tree.md) | Run process tree + hard cancellation | M–L | M0-06, M1.5-01 | ⬜ |
 | [M1.5-05](M1.5-05-readiness-scheduler.md) | Readiness-based DAG + global concurrency cap | M | M1.5-04 | ⬜ |
 | [M1.5-06](M1.5-06-run-store-port.md) | `RunStore` port shared by local and hosted | M | M0-06 | ⬜ |
-| [M1.5-07](M1.5-07-unify-output-pipeline.md) | One rendering path (retire the legacy listener) | M | — | ⬜ |
+| [M1.5-07](M1.5-07-unify-output-pipeline.md) | One rendering path (retire the legacy listener) | M | — | ✅ |
 | [M1.5-08](M1.5-08-housekeeping.md) | Dead fields, stale types and docs | S | — | ✅ |
 
 ## M2 — The server

@@ -11,7 +11,7 @@ defmodule TinyCI.ControlIntegrationTest do
   use ExUnit.Case, async: true
 
   alias TinyCI.Control.Session
-  alias TinyCI.{Context, Executor, Listener, Stage, StageResult, Step, StepResult}
+  alias TinyCI.{Context, Executor, Stage, StageResult, Step, StepResult}
 
   # Collects the run's events so we can assert on the stream, not on return values.
   defmodule Collector do
@@ -51,7 +51,7 @@ defmodule TinyCI.ControlIntegrationTest do
     run_opts =
       [
         output: :buffered,
-        listener: Listener.Silent,
+        console: false,
         control: control,
         extra_sinks: [{Collector, test: self()}]
       ]
@@ -98,7 +98,7 @@ defmodule TinyCI.ControlIntegrationTest do
       {:ok, [result]} =
         Executor.run_pipeline(stages, context(),
           output: :buffered,
-          listener: Listener.Silent,
+          console: false,
           extra_sinks: [{Collector, test: self()}]
         )
 
@@ -116,7 +116,7 @@ defmodule TinyCI.ControlIntegrationTest do
 
       Executor.run_pipeline(stages, context(),
         output: :buffered,
-        listener: Listener.Silent,
+        console: false,
         extra_sinks: [{Collector, test: self()}]
       )
 
@@ -779,7 +779,7 @@ defmodule TinyCI.ControlIntegrationTest do
       assert_raise ArgumentError, ~r/invalid control breakpoints/, fn ->
         Executor.run_pipeline(stages, context(),
           output: :buffered,
-          listener: Listener.Silent,
+          console: false,
           control: [breakpoints: ["during:test"]]
         )
       end

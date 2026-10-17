@@ -67,7 +67,22 @@ Correlation IDs (`run_id`, `stage`, `step`, matrix `combination`) tie related
 events together. **Order is only guaranteed within a single correlation** — across
 correlations, rely on `seq`, not arrival order.
 
-The current `schema_version` is `3`.
+The current `schema_version` is `4`.
+
+**Changed in 4:** all additive, so a consumer that ignores unknown keys needs no change.
+
+- `step_started` now carries `prefix` — the `[prefix]` the console renders on that step's
+  streaming lines — and only inside a streaming, parallel stage (absent otherwise).
+- `step_started` now carries `attempts` (the total number of attempts, only when the step can
+  retry) and `index` (the step's declaration position in its stage/combination, so a consumer can
+  order concurrent steps deterministically).
+- `matrix_run_started` now carries `index` (the combination's declaration position) for the same
+  reason.
+- `step_retrying` now carries `total`, the maximum number of attempts, so a consumer can render
+  `attempt N/total` without waiting for `step_finished`.
+- `step_output` lines are now emitted **as they are produced**, in both streaming and buffered
+  mode (previously they were emitted only when the step finished). A step that is retried now
+  carries every attempt's lines, so retry output is complete.
 
 **Changed in 3:** all additive, so a consumer that ignores unknown keys needs no change.
 
@@ -96,13 +111,13 @@ three `breakpoint_*` / `run_diverged` types below are additive.
 | `stage_started`       | a stage begins                         | `stage`                                        |
 | `stage_skipped`       | a stage is skipped                     | `stage`, `reason`                              |
 | `stage_finished`      | a stage finishes                       | `stage`, `status`, `duration_ms`               |
-| `step_started`        | a step begins                          | `stage`, `step`                                |
+| `step_started`        | a step begins                          | `stage`, `step`, `attempts`, `index`, `prefix` (streaming parallel only) |
 | `step_skipped`        | a step is skipped                      | `stage`, `step`, `reason`                      |
 | `step_output`         | a line of step output                  | `stage`, `step`, `line`, `stream`              |
-| `step_retrying`       | a step is retried after a failure      | `stage`, `step`, `attempt`                     |
+| `step_retrying`       | a step is retried after a failure      | `stage`, `step`, `attempt`, `total`            |
 | `step_finished`       | a step finishes                        | `stage`, `step`, `status`, `duration_ms`, `output`, `allowed_failure` |
 | `cache_lookup`        | a cached step resolves its key         | `stage`, `step`, `key`, `result` (`hit`/`miss`)|
-| `matrix_run_started`  | one matrix combination begins          | `stage`, `combination`                         |
+| `matrix_run_started`  | one matrix combination begins          | `stage`, `combination`, `index`                |
 | `matrix_run_finished` | one matrix combination finishes        | `stage`, `combination`, `status`, `duration_ms`|
 | `hook_started`        | a pipeline hook begins                 | `hook`                                         |
 | `hook_finished`       | a pipeline hook finishes               | `hook`, `status`, `duration_ms`                |
@@ -118,12 +133,21 @@ three `breakpoint_*` / `run_diverged` types below are additive.
   are separated.
 - `matrix_combination` (schema 3) is an object like `{"elixir":"1.18","otp":"27"}`, present
   on step-scoped events only inside a matrix stage.
+- `prefix` (schema 4) is a string, present on `step_started` only for a step
+  running in a streaming, parallel stage; the console prefixes that step's output
+  lines with `[prefix]`. It is absent everywhere else (including buffered and
+  matrix stages), so a fold that ignores it sees the raw line.
+- `total` (schema 4) is the maximum number of attempts for a retried step.
 - `step_finished.output` carries the step's captured output so buffered/offline
   consumers can render it without reaching into executor internals; it may be
-  empty when output was streamed live.
-- `hook_started` / `hook_finished` are part of the schema. Hooks currently run
-  after the run's dispatcher has closed, so they are not yet emitted live into the
-  stream — wiring them depends on the hook lifecycle and is tracked separately.
+  empty when output was streamed live. It is the authoritative form of a step's
+  output: some executor-generated messages (a missing working directory, a
+  timeout replacement, an artifact-path error) appear here but not as
+  `step_output` lines.
+- `hook_started` / `hook_finished` are emitted by `TinyCI.Hooks`, which now runs
+  inside `TinyCI.Executor.run_pipeline/3` before `run_finished`, so hooks are part
+  of the run's stream. Each hook has one `hook_finished` with `status`
+  (`passed`/`failed`) and its duration.
 - Secret masking happens at the event/output boundary; once a secrets directive
   lands, secret values will be masked in events exactly as in console output. The
   `breakpoint_hit` payload is already routed through
@@ -145,19 +169,19 @@ three `breakpoint_*` / `run_diverged` types below are additive.
 ## Example lines
 
 ```json
-{"seq":1,"type":"run_started","run_id":"abc123","ts":"2024-01-15T10:30:00.000000Z","pipeline_name":"app","schema_version":3,"branch":"main","commit":"4f1c8a2b9d0e","base_ref":"origin/main","root":"/repo"}
+{"seq":1,"type":"run_started","run_id":"abc123","ts":"2024-01-15T10:30:00.000000Z","pipeline_name":"app","schema_version":4,"branch":"main","commit":"4f1c8a2b9d0e","base_ref":"origin/main","root":"/repo"}
 {"seq":2,"type":"stage_started","run_id":"abc123","ts":"2024-01-15T10:30:00.010000Z","stage":"test"}
-{"seq":3,"type":"step_started","run_id":"abc123","ts":"2024-01-15T10:30:00.011000Z","stage":"test","step":"unit"}
+{"seq":3,"type":"step_started","run_id":"abc123","ts":"2024-01-15T10:30:00.011000Z","stage":"test","step":"unit","index":0}
 {"seq":4,"type":"cache_lookup","run_id":"abc123","ts":"2024-01-15T10:30:00.012000Z","stage":"test","step":"unit","key":"deps-9f1c","result":"miss"}
 {"seq":5,"type":"step_output","run_id":"abc123","ts":"2024-01-15T10:30:00.230000Z","stage":"test","step":"unit","line":"1 test, 0 failures","stream":"stdout"}
-{"seq":6,"type":"step_retrying","run_id":"abc123","ts":"2024-01-15T10:30:00.240000Z","stage":"test","step":"unit","attempt":2}
+{"seq":6,"type":"step_retrying","run_id":"abc123","ts":"2024-01-15T10:30:00.240000Z","stage":"test","step":"unit","attempt":2,"total":3}
 {"seq":7,"type":"step_finished","run_id":"abc123","ts":"2024-01-15T10:30:00.250000Z","stage":"test","step":"unit","status":"passed","duration_ms":239,"output":"1 test, 0 failures","allowed_failure":false}
-{"seq":8,"type":"matrix_run_started","run_id":"abc123","ts":"2024-01-15T10:30:00.260000Z","stage":"compat","combination":{"elixir":"1.18","otp":"27"}}
+{"seq":8,"type":"matrix_run_started","run_id":"abc123","ts":"2024-01-15T10:30:00.260000Z","stage":"compat","combination":{"elixir":"1.18","otp":"27"},"index":0}
 {"seq":9,"type":"matrix_run_finished","run_id":"abc123","ts":"2024-01-15T10:30:01.100000Z","stage":"compat","combination":{"elixir":"1.18","otp":"27"},"status":"passed","duration_ms":840}
 {"seq":10,"type":"stage_skipped","run_id":"abc123","ts":"2024-01-15T10:30:01.110000Z","stage":"deploy","reason":"condition not met"}
 {"seq":11,"type":"stage_finished","run_id":"abc123","ts":"2024-01-15T10:30:01.120000Z","stage":"test","status":"passed","duration_ms":1110}
-{"seq":12,"type":"hook_started","run_id":"abc123","ts":"2024-01-15T10:30:01.130000Z","hook":"on_success"}
-{"seq":13,"type":"hook_finished","run_id":"abc123","ts":"2024-01-15T10:30:01.140000Z","hook":"on_success","status":"passed","duration_ms":10}
+{"seq":12,"type":"hook_started","run_id":"abc123","ts":"2024-01-15T10:30:01.130000Z","hook":"notify"}
+{"seq":13,"type":"hook_finished","run_id":"abc123","ts":"2024-01-15T10:30:01.140000Z","hook":"notify","status":"passed","duration_ms":10}
 {"seq":14,"type":"run_finished","run_id":"abc123","ts":"2024-01-15T10:30:01.150000Z","status":"passed","duration_ms":1150}
 ```
 

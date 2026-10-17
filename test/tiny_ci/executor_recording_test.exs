@@ -11,7 +11,7 @@ defmodule TinyCI.ExecutorRecordingTest do
   alias TinyCI.RunsFixtures
 
   @moduletag :tmp_dir
-  @silent [listener: TinyCI.Listener.Silent, output: :buffered]
+  @silent [console: false, output: :buffered]
 
   setup %{tmp_dir: tmp_dir} do
     store = Path.join(tmp_dir, "store")
@@ -42,7 +42,7 @@ defmodule TinyCI.ExecutorRecordingTest do
                commit: "abc1234",
                base_ref: "main",
                root: ^root,
-               schema_version: 3
+               schema_version: 4
              } = run
 
       dir = Runs.dir(root, run.run_id)
@@ -110,7 +110,7 @@ defmodule TinyCI.ExecutorRecordingTest do
                  passing_stage(),
                  %{store: %{}, root: root},
                  :buffered,
-                 TinyCI.Listener.Silent
+                 console: false
                )
 
       refute File.exists?(store)

@@ -1206,18 +1206,14 @@ tiny_ci/
       secrets.ex                     # Resolves `secret` declarations before a run
       redaction.ex                   # Masks secret values in any term
       artifacts.ex                   # Per-run artifact persistence
-      output.ex                      # Command output capture and streaming
+      output.ex                      # Command output capture; reports lines to a callback
       hook.ex                        # Hook struct
-      hooks.ex                       # Runs hooks after a pipeline completes
+      hooks.ex                       # Runs hooks as part of the run's event stream
       reporter.ex                    # Console summary tree
       results.ex                     # Run results as JSON (--output json)
       stage_result.ex                # StageResult struct
       step_result.ex                 # StepResult struct
       matrix_run_result.ex           # MatrixRunResult struct
-      listener.ex                    # Console progress behaviour
-      listener/
-        human.ex                     #   human-readable progress
-        silent.ex                    #   no output
       dsl/                           # The pipeline DSL, as data: nothing here executes a file
         interpreter.ex               #   parses a pipeline file into a PipelineSpec
         validator.ex                 #   AST allowlist, derived from the spec

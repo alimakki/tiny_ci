@@ -6,7 +6,7 @@ defmodule TinyCI.ExecutionRegressionTest do
   alias TinyCI.{Executor, Hook, Hooks, RegressionActions, Stage, StageResult, Step}
   alias TinyCI.DSL.Interpreter
 
-  @silent [listener: TinyCI.Listener.Silent, output: :buffered]
+  @silent [console: false, output: :buffered]
 
   defp action(operation, extra \\ []) do
     struct!(
@@ -29,7 +29,7 @@ defmodule TinyCI.ExecutionRegressionTest do
     } do
       for mode <- [:serial, :parallel] do
         stage = %Stage{name: :cwd, mode: mode, steps: [%Step{name: :pwd, cmd: "pwd"}]}
-        result = Executor.execute(stage, %{root: root}, :buffered, TinyCI.Listener.Silent)
+        result = Executor.execute(stage, %{root: root}, :buffered, console: false)
         assert result.status == :passed
         assert String.trim(hd(result.step_results).output) == root
       end
@@ -70,7 +70,7 @@ defmodule TinyCI.ExecutionRegressionTest do
           stage,
           %{root: root, artifacts_dir: Path.join(root, "artifacts")},
           :buffered,
-          TinyCI.Listener.Silent
+          console: false
         )
 
       assert result.status == :passed
@@ -205,7 +205,7 @@ defmodule TinyCI.ExecutionRegressionTest do
 
         task =
           Task.async(fn ->
-            Executor.execute(stage, %{test_pid: parent}, :buffered, TinyCI.Listener.Silent)
+            Executor.execute(stage, %{test_pid: parent}, :buffered, console: false)
           end)
 
         assert_receive {:callback_started, callback}, 10_000

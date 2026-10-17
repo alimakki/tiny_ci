@@ -42,30 +42,6 @@ defmodule TinyCI.Reporter do
   end
 
   @doc """
-  Prints buffered step output for a stage, preserving step order.
-
-  Each step's captured output is printed under a labeled header
-  so parallel output appears grouped by step, not interleaved.
-
-  Matrix stage output is printed inline during execution, so this
-  function is a no-op for matrix stages.
-
-  ## Parameters
-
-    * `stage_result` — a `%TinyCI.StageResult{}` struct
-  """
-  @spec print_step_output(StageResult.t()) :: :ok
-  def print_step_output(%StageResult{matrix_runs: [_ | _]}), do: :ok
-
-  def print_step_output(%StageResult{step_results: step_results}) do
-    Enum.each(step_results, fn %StepResult{name: name, output: output} ->
-      if output != "" do
-        IO.puts("  [#{name}] #{String.trim(output)}")
-      end
-    end)
-  end
-
-  @doc """
   Formats a duration in milliseconds to a human-readable string.
 
   Durations under 1000ms are shown as "Nms". Durations at or above

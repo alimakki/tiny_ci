@@ -1132,11 +1132,88 @@ defmodule TinyCI.EventsTest do
     end
   end
 
-  describe "schema version 3" do
-    test "schema_version/0 is 3" do
-      assert Events.schema_version() == 3
+  describe "schema version 4" do
+    test "schema_version/0 is 4" do
+      assert Events.schema_version() == 4
     end
 
+    test "StepStarted encodes a prefix only when one is set" do
+      plain =
+        decode(%StepStarted{run_id: @run_id, timestamp: @timestamp, stage: :t, step: :u})
+
+      refute Map.has_key?(plain, "prefix")
+
+      prefixed =
+        decode(%StepStarted{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          stage: :t,
+          step: :u,
+          prefix: "unit"
+        })
+
+      assert prefixed["prefix"] == "unit"
+    end
+
+    test "StepStarted encodes attempts and index only when set" do
+      plain = decode(%StepStarted{run_id: @run_id, timestamp: @timestamp, stage: :t, step: :u})
+
+      refute Map.has_key?(plain, "attempts")
+      refute Map.has_key?(plain, "index")
+
+      decoded =
+        decode(%StepStarted{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          stage: :t,
+          step: :u,
+          attempts: 3,
+          index: 2
+        })
+
+      assert decoded["attempts"] == 3
+      assert decoded["index"] == 2
+    end
+
+    test "MatrixRunStarted encodes its declaration index only when set" do
+      base = %MatrixRunStarted{
+        run_id: @run_id,
+        timestamp: @timestamp,
+        stage: :t,
+        combination: [v: "a"]
+      }
+
+      refute Map.has_key?(decode(base), "index")
+      assert decode(%{base | index: 1})["index"] == 1
+    end
+
+    test "StepRetrying encodes the attempt total only when it is known" do
+      plain =
+        decode(%StepRetrying{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          stage: :t,
+          step: :u,
+          attempt: 2
+        })
+
+      refute Map.has_key?(plain, "total")
+
+      known =
+        decode(%StepRetrying{
+          run_id: @run_id,
+          timestamp: @timestamp,
+          stage: :t,
+          step: :u,
+          attempt: 2,
+          total: 3
+        })
+
+      assert known["total"] == 3
+    end
+  end
+
+  describe "schema 3 event fields" do
     test "PipelineStarted carries branch, commit, base_ref and root" do
       json =
         decode(%PipelineStarted{

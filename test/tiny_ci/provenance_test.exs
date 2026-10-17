@@ -231,7 +231,7 @@ defmodule TinyCI.ProvenanceTest do
 
       {:ok, _} =
         TinyCI.Executor.run_pipeline(stages, nil,
-          listener: TinyCI.Listener.Silent,
+          console: false,
           output: :buffered,
           secrets: %{"TOKEN" => "abcd1234wxyz"},
           extra_sinks: [{Provenance.Collector, agent: agent}]

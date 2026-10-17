@@ -2038,7 +2038,7 @@ defmodule TinyCI.ExecutorTest do
   end
 
   describe "crash isolation" do
-    @silent [listener: TinyCI.Listener.Silent, output: :buffered]
+    @silent [console: false, output: :buffered]
 
     defp crash_stage(mode, steps) do
       %Stage{name: :s, mode: mode, steps: steps}
@@ -2204,7 +2204,7 @@ defmodule TinyCI.ExecutorTest do
     end
 
     @secret_opts [
-      listener: TinyCI.Listener.Silent,
+      console: false,
       output: :buffered,
       secrets: %{"TOKEN" => "abcd1234"}
     ]
@@ -2222,6 +2222,36 @@ defmodule TinyCI.ExecutorTest do
       json = TinyCI.Results.to_json(:ok, [result])
       refute json =~ "abcd1234"
       assert json =~ "***"
+    end
+
+    test "a multi-line secret is masked in the event stream" do
+      secret = "line-one-SECRET\nline-two-SECRET"
+
+      stage = %Stage{
+        name: :s,
+        mode: :serial,
+        steps: [%Step{name: :echo, cmd: "printf 'line-one-SECRET\\nline-two-SECRET\\n'"}]
+      }
+
+      opts = [
+        console: false,
+        output: :buffered,
+        record: false,
+        secrets: %{"TOKEN" => secret},
+        extra_sinks: [{TinyCI.TestSink, pid: self()}]
+      ]
+
+      assert {:ok, [%StageResult{step_results: [%StepResult{output: output}]}]} =
+               Executor.run_pipeline([stage], nil, opts)
+
+      assert output == "***\n"
+
+      lines =
+        drain_events([])
+        |> Enum.filter(&match?(%TinyCI.Events.StepOutputLine{}, &1))
+        |> Enum.map(& &1.line)
+
+      refute Enum.any?(lines, &String.contains?(&1, "SECRET"))
     end
 
     test "secrets are the lowest env layer" do
@@ -2261,6 +2291,110 @@ defmodule TinyCI.ExecutorTest do
     end
   end
 
+  describe "console rendering" do
+    test "buffered output is grouped per step and printed once, at stage end" do
+      stages = [
+        %Stage{
+          name: :build,
+          mode: :serial,
+          steps: [
+            %Step{name: :one, cmd: "echo first"},
+            %Step{name: :two, cmd: "echo second"}
+          ]
+        }
+      ]
+
+      out =
+        ExUnit.CaptureIO.capture_io(fn ->
+          assert {:ok, _} = Executor.run_pipeline(stages, %{branch: "main"}, output: :buffered)
+        end)
+
+      assert out == "Stage: build\n  [one] first\n  [two] second\n"
+    end
+
+    test "a run with console: false prints nothing" do
+      stages = [%Stage{name: :build, mode: :serial, steps: [%Step{name: :one, cmd: "echo hi"}]}]
+
+      out =
+        ExUnit.CaptureIO.capture_io(fn ->
+          Executor.run_pipeline(stages, %{branch: "main"}, output: :buffered, console: false)
+        end)
+
+      assert out == ""
+    end
+  end
+
+  describe "hooks on the event stream" do
+    alias TinyCI.Events.{HookCompleted, HookStarted, PipelineCompleted}
+    alias TinyCI.Hook
+
+    defp ok_stage, do: %Stage{name: :s, mode: :serial, steps: [%Step{name: :a, cmd: "true"}]}
+
+    defp run_with_hooks(stage, hooks) do
+      parent = self()
+
+      opts = [
+        console: false,
+        output: :buffered,
+        record: false,
+        hooks: hooks,
+        extra_sinks: [{TinyCI.TestSink, pid: self()}]
+      ]
+
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        send(parent, {:pipeline_result, Executor.run_pipeline([stage], nil, opts)})
+      end)
+
+      receive do
+        {:pipeline_result, result} -> result
+      end
+    end
+
+    test "a passing hook is bracketed by hook_started / hook_finished" do
+      result = run_with_hooks(ok_stage(), %{on_success: [%Hook{name: :notify, cmd: "true"}]})
+      assert {:ok, _} = result
+
+      assert_receive {:event, %HookStarted{hook: :notify}}
+      assert_receive {:event, %HookCompleted{hook: :notify, status: :passed, duration_ms: ms}}
+      assert is_integer(ms)
+    end
+
+    test "a failing hook is reported as :failed without failing the run" do
+      result = run_with_hooks(ok_stage(), %{on_success: [%Hook{name: :bad, cmd: "false"}]})
+      assert {:ok, _} = result
+
+      assert_receive {:event, %HookCompleted{hook: :bad, status: :failed}}
+    end
+
+    test "on_failure hooks run for a failed run" do
+      stage = %Stage{name: :s, mode: :serial, steps: [%Step{name: :a, cmd: "false"}]}
+      result = run_with_hooks(stage, %{on_failure: [%Hook{name: :alert, cmd: "true"}]})
+
+      assert {:error, {:stage_failed, :s, :failed}, _} = result
+      assert_receive {:event, %HookStarted{hook: :alert}}
+      assert_receive {:event, %HookCompleted{hook: :alert, status: :passed}}
+    end
+
+    test "hook events are part of the stream before run_finished" do
+      run_with_hooks(ok_stage(), %{on_success: [%Hook{name: :notify, cmd: "true"}]})
+
+      events = drain_hook_events([])
+      hook_index = Enum.find_index(events, &match?(%HookCompleted{hook: :notify}, &1))
+      finish_index = Enum.find_index(events, &match?(%PipelineCompleted{}, &1))
+
+      assert is_integer(hook_index)
+      assert hook_index < finish_index
+    end
+
+    defp drain_hook_events(acc) do
+      receive do
+        {:event, event} -> drain_hook_events([event | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+  end
+
   describe "schema 3 event fields" do
     alias TinyCI.Events.{
       PipelineStarted,
@@ -2271,7 +2405,7 @@ defmodule TinyCI.ExecutorTest do
       StepStarted
     }
 
-    @events_opts [listener: TinyCI.Listener.Silent, output: :buffered, record: false]
+    @events_opts [console: false, output: :buffered, record: false]
 
     # `emit/2` is synchronous, so by the time `run_pipeline/3` returns every event
     # is already in the mailbox; draining with `after 0` is not a wait.

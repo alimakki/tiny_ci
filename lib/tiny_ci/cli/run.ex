@@ -5,11 +5,10 @@ defmodule TinyCI.CLI.Run do
 
   @behaviour TinyCI.CLI.Subcommand
 
-  alias TinyCI.{Artifacts, Discovery, DryRun, Executor, Hooks, Provenance, Reporter, Results}
+  alias TinyCI.{Artifacts, Discovery, DryRun, Executor, Provenance, Reporter, Results}
   alias TinyCI.Secrets
   alias TinyCI.Action.Audit
   alias TinyCI.Control
-  alias TinyCI.Listener
 
   @switches [
     file: :string,
@@ -631,7 +630,8 @@ defmodule TinyCI.CLI.Run do
           Keyword.merge(run_opts,
             filter: filter,
             output: :buffered,
-            listener: Listener.Silent,
+            console: false,
+            hooks: hooks,
             pipeline_name: name
           )
         )
@@ -644,8 +644,6 @@ defmodule TinyCI.CLI.Run do
         Results.to_json(simplify_result(pipeline_result), stage_results, div(duration_us, 1000))
       )
     end
-
-    Hooks.run_hooks(hooks, hook_event(pipeline_result), hook_context(context, stage_results))
 
     case pipeline_result do
       {:ok, _} -> :ok
@@ -661,38 +659,25 @@ defmodule TinyCI.CLI.Run do
        ) do
     context = build_context(spec, run_opts)
 
-    run_opts = Keyword.merge(run_opts, filter: filter, pipeline_name: name)
+    run_opts = Keyword.merge(run_opts, filter: filter, hooks: hooks, pipeline_name: name)
 
     case Executor.run_pipeline(stages, context, run_opts) do
       {:ok, stage_results} ->
         Reporter.print_summary(stage_results)
-        Hooks.run_hooks(hooks, :on_success, hook_context(context, stage_results))
         IO.puts([IO.ANSI.green(), "Pipeline completed successfully.", IO.ANSI.reset()])
         :ok
 
       {:error, reason, stage_results} ->
         Reporter.print_summary(stage_results)
-        Hooks.run_hooks(hooks, :on_failure, hook_context(context, stage_results))
         IO.puts(:stderr, [IO.ANSI.red(), failure_message(reason), IO.ANSI.reset()])
         {:error, :pipeline_failed}
     end
   end
 
-  # The same context goes to the executor and to the hooks, so resolved secrets
-  # are attached here rather than only inside `Executor.run_pipeline/3`.
   defp failure_message({:aborted, stage}),
     do: "Pipeline aborted by execution control at stage :#{stage}."
 
   defp failure_message(_reason), do: "Pipeline failed."
-
-  defp hook_context(context, results) do
-    store =
-      Enum.reduce(results, context.store, fn result, store ->
-        Map.merge(store, result.store_delta)
-      end)
-
-    Map.put(context, :store, store)
-  end
 
   defp list_artifacts(root, artifacts_dir_override) do
     base_root = artifacts_dir_override || root
@@ -724,9 +709,6 @@ defmodule TinyCI.CLI.Run do
 
   defp simplify_result({:ok, _}), do: :ok
   defp simplify_result({:error, reason, _}), do: {:error, reason}
-
-  defp hook_event({:ok, _}), do: :on_success
-  defp hook_event({:error, _, _}), do: :on_failure
 
   defp filter_stages(stages, nil), do: stages
   defp filter_stages(stages, []), do: stages

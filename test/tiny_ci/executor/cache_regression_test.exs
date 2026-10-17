@@ -28,7 +28,7 @@ defmodule TinyCI.Executor.CacheRegressionTest do
       %Stage{name: :cached, steps: [step]},
       %{root: root},
       :buffered,
-      TinyCI.Listener.Silent
+      console: false
     )
   end
 

@@ -119,7 +119,7 @@ defmodule TinyCI.Events.Sink.NDJSONTest do
 
       decoded = NDJSON.encode_line(1, event) |> Jason.decode!()
 
-      assert decoded["schema_version"] == 3
+      assert decoded["schema_version"] == 4
 
       assert Map.take(decoded, ~w(branch commit base_ref root)) ==
                %{"branch" => "main", "commit" => "abc", "base_ref" => nil, "root" => "/w"}
