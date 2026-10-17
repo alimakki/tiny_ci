@@ -155,4 +155,4 @@ An action qualifies for the `verified` tier when:
 - The registry is **purely additive metadata** — it never runs actions, never
   reaches into executor internals, and imposes no dependency on core. It reads
   the same [`Metadata`](../lib/tiny_ci/action/metadata.ex) that lockfile
-  resolution and (from T8) sandbox policy rely on.
+  resolution and sandbox policy rely on.

@@ -85,9 +85,9 @@ end
     `:filesystem_read`, `:filesystem_write`, `:env_read`, `:env_write`,
     `:process_spawn`.
 
-> **Capabilities are advisory today.** They are *declared* here and become the
-> basis for sandbox enforcement in a later milestone. Declaring them now keeps
-> the contract stable. Unknown capability atoms raise at declaration time.
+> **Capabilities are enforced.** They are *declared* here and are the basis for
+> sandbox enforcement: an action is granted only what it declares. Unknown
+> capability atoms raise at declaration time.
 
 ## The pipeline context
 

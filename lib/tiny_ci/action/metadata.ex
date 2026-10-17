@@ -4,8 +4,7 @@ defmodule TinyCI.Action.Metadata do
 
   An action may optionally implement `c:TinyCI.Action.metadata/0` to advertise
   its identity, inputs, and the capabilities it needs. This information powers
-  the action marketplace, lockfile resolution, and — from T8 onward — sandbox
-  policy enforcement.
+  the action marketplace, lockfile resolution, and sandbox policy enforcement.
 
   ## Fields
 
@@ -22,9 +21,9 @@ defmodule TinyCI.Action.Metadata do
 
   ## Capabilities
 
-  Capabilities are **declared** here and treated as advisory until T8, where
-  they become the basis for sandbox enforcement. Declaring them now keeps the
-  contract stable and avoids a breaking change later.
+  Capabilities are **declared** here and enforced by the sandbox: an action is
+  granted only what it declares, and an undeclared capability grants nothing
+  (see `TinyCI.Sandbox.Policy`).
 
   ## Examples
 

@@ -17,8 +17,6 @@ defmodule TinyCI.Step do
           name: atom(),
           cmd: String.t() | nil,
           module: module() | nil,
-          mode: :inherit | :serial | :parallel,
-          requires: [atom()],
           config_block: (-> keyword()) | nil,
           env: %{optional(String.t()) => String.t()},
           timeout: pos_integer() | nil,
@@ -34,8 +32,6 @@ defmodule TinyCI.Step do
   defstruct name: nil,
             cmd: nil,
             module: nil,
-            mode: :inherit,
-            requires: [],
             config_block: nil,
             env: %{},
             timeout: nil,
@@ -73,7 +69,7 @@ defmodule TinyCI.Stage do
           matrix: keyword([String.t()]),
           max_parallel: pos_integer() | nil,
           allow_failure: boolean(),
-          when_condition: (map() -> boolean()) | nil,
+          when_condition: Macro.t() | (map() -> boolean()) | nil,
           working_dir: String.t() | nil,
           env: %{optional(String.t()) => String.t()}
         }

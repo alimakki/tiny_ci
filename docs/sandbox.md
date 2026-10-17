@@ -71,7 +71,7 @@ The action runs in a **separate OS process**, so nothing is shared but bytes
 
 The protocol refuses to encode a request containing a PID, reference, port, or
 function, and decodes the untrusted response with the `:safe` flag. Any granted
-secret values are masked (`TinyCI.Sandbox.Redaction`) before the result reaches
+secret values are masked (`TinyCI.Redaction`) before the result reaches
 the event stream or the console.
 
 ## Backends

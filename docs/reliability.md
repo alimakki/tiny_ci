@@ -36,10 +36,11 @@ These are follow-ups, not guarantees provided by this hardening pass:
 - **Secret scope:** secrets resolve at run start and are broadly injected. Stage
   scoping, approval-gated access, and comprehensive Logger/device interception
   remain separate work.
-- **History and events:** M0-06 is still pending. Output events arrive after step
-  completion, retry logs are not complete, ordinary step events lack matrix
-  identity, and hooks are outside the executor event stream. Correct these before
-  relying on a persisted stream for full reconstruction.
+- **History and events:** runs are now persisted as event streams (M0-06), but a
+  run cannot yet be reconstructed from the stream alone: output events arrive after
+  step completion, retry logs are not complete, ordinary step events lack matrix
+  identity, and hooks are outside the executor event stream. M1.5-07 closes these
+  gaps.
 - **Workspace and scheduling:** stages still switch to DAG mode when `needs:` is
   used, DAG execution has level barriers, and matrix combinations share mutable
   workspaces. No global resource cap or hard run cancellation exists yet.
@@ -52,7 +53,7 @@ These are follow-ups, not guarantees provided by this hardening pass:
   Capture immutable inputs at run start before treating attestations as a complete
   account of exactly what ran.
 
-The existing roadmap covers durable history, standalone packaging, isolated
-checkouts, scheduling, and forge integration. Language redesign, readiness-based
-DAG scheduling, reusable pipeline fragments, and full sandbox hardening should
-have their own explicit contracts and regression suites.
+The existing roadmap covers isolated checkouts, scheduling, and forge
+integration. Language redesign, readiness-based DAG scheduling, reusable
+pipeline fragments, and full sandbox hardening should have their own explicit
+contracts and regression suites.

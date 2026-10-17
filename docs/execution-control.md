@@ -132,7 +132,7 @@ would be worse than reporting none.
 Store values can be arbitrary Elixir terms. JSON-native scalars are shown as they
 are; everything else is rendered with `inspect/1`, so a pid or a struct in the store
 can never break the NDJSON stream. The whole payload passes through
-`TinyCI.Sandbox.Redaction.redact/2` with the run's known secrets, so a secret cannot
+`TinyCI.Redaction.redact/2` with the run's known secrets, so a secret cannot
 leak into an event or the console through a breakpoint.
 
 ### Console commands

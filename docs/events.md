@@ -127,7 +127,7 @@ three `breakpoint_*` / `run_diverged` types below are additive.
 - Secret masking happens at the event/output boundary; once a secrets directive
   lands, secret values will be masked in events exactly as in console output. The
   `breakpoint_hit` payload is already routed through
-  `TinyCI.Sandbox.Redaction.redact/2`, so it will mask as soon as the run carries
+  `TinyCI.Redaction.redact/2`, so it will mask as soon as the run carries
   a secrets list.
 - `breakpoint_hit.store` and `.env` values are coerced to JSON-safe terms first:
   scalars pass through, anything else (a tuple, a pid, a struct) is rendered with
