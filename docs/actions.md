@@ -150,6 +150,11 @@ action lockfile** — every action and transitive dependency is pinned to an exa
 version and the checksum Hex verified at fetch time. There is no separate
 lockfile to drift out of sync.
 
+`mix.lock` is read as data, never evaluated: TinyCI parses it with a
+literal-only parser, so a lockfile that contains code is rejected with no side
+effect, and application names are handled as strings (no atoms are created from
+lockfile-controlled names).
+
 ```elixir
 # mix.exs — an action is just a dependency
 {:acme_deploy, "~> 1.2"}

@@ -859,6 +859,15 @@ defmodule TinyCI.CLI.Run do
     ])
   end
 
+  defp print_error(:not_a_lock_map) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "mix.lock is not a readable lock map — it must be a literal Elixir map ",
+      "(check for merge-conflict markers or code; it is never evaluated).",
+      IO.ANSI.reset()
+    ])
+  end
+
   defp print_error(reason) do
     IO.puts(:stderr, [
       IO.ANSI.red(),

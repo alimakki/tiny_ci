@@ -5,8 +5,8 @@ defmodule TinyCI.Action.ResolverTest do
   alias TinyCI.{Hook, PipelineSpec, Stage, Step}
 
   @locks %{
-    good_action: %{scm: :hex, version: "1.2.0", checksum: "sum1", repo: "hexpm"},
-    git_action: %{scm: :git, version: "abc", checksum: nil, repo: "https://x/y.git"}
+    "good_action" => %{scm: :hex, version: "1.2.0", checksum: "sum1", repo: "hexpm"},
+    "git_action" => %{scm: :git, version: "abc", checksum: nil, repo: "https://x/y.git"}
   }
 
   defp ref(module, app, version), do: %{module: module, app: app, version: version}

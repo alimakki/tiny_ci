@@ -100,7 +100,8 @@ defmodule TinyCI.Action.Resolver do
   end
 
   defp classify(%{app: app} = ref, locks, _root) do
-    case Map.get(locks, app) do
+    # Lockfile keys are app-name strings (see `TinyCI.Action.Lockfile`).
+    case Map.get(locks, Atom.to_string(app)) do
       nil -> unlocked(ref)
       %{scm: :hex} = lock -> hex(ref, lock)
       %{scm: scm} = lock -> ok(ref, scm, lock.version, lock.checksum)

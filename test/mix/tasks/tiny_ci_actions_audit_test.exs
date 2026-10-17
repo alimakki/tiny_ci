@@ -53,6 +53,28 @@ defmodule Mix.Tasks.TinyCi.Actions.AuditTest do
     assert output =~ "No module actions"
   end
 
+  test "reports an unparsable mix.lock without executing it" do
+    marker = Path.join(@tmp_dir, "pwned")
+    File.write!(Path.join(@tmp_dir, "mix.lock"), ~s|%{"a": File.write!(#{inspect(marker)}, "x")}|)
+
+    path = Path.join(@tmp_dir, "tiny_ci.exs")
+
+    File.write!(path, """
+    stage :build, mode: :serial do
+      step :run, cmd: "echo hi"
+    end
+    """)
+
+    stderr =
+      capture_io(:stderr, fn ->
+        result = Mix.Tasks.TinyCi.Actions.Audit.run(["--file", path, "--root", @tmp_dir])
+        assert result == {:error, :audit_failed}
+      end)
+
+    assert stderr =~ "literal Elixir map"
+    refute File.exists?(marker)
+  end
+
   test "errors when no pipeline file is found" do
     stderr =
       capture_io(:stderr, fn ->

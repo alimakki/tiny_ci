@@ -97,6 +97,13 @@ defmodule TinyCI.CLI.Actions do
     error("Pipeline not found: #{name} (looked for .tiny_ci/#{name}.exs)")
   end
 
+  defp audit_failed(:not_a_lock_map) do
+    error(
+      "mix.lock is not a readable lock map — expected a literal Elixir map " <>
+        "(check for merge-conflict markers or code; it is never evaluated)"
+    )
+  end
+
   defp audit_failed(reason), do: error("Error: #{inspect(reason)}")
 
   # ---------------------------------------------------------------------------

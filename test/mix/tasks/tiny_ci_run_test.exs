@@ -57,6 +57,32 @@ defmodule Mix.Tasks.TinyCi.RunTest do
       assert output =~ "Pipeline completed successfully"
     end
 
+    test "refuses an unparsable mix.lock without executing it", %{project_root: root} do
+      marker = Path.join(root, "pwned")
+      File.write!(Path.join(root, "mix.lock"), ~s|%{"a": File.write!(#{inspect(marker)}, "x")}|)
+
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :greet, mode: :serial do
+        step :hello, cmd: "echo hello"
+      end
+      """)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          _stdout =
+            capture_io(fn ->
+              assert_raise Mix.Error, fn ->
+                Mix.Tasks.TinyCi.Run.run(["--file", path, "--root", root])
+              end
+            end)
+        end)
+
+      assert stderr =~ "literal Elixir map"
+      refute File.exists?(marker)
+    end
+
     test "runs a failing pipeline and raises a Mix error", %{project_root: root} do
       path = Path.join(root, "tiny_ci.exs")
 

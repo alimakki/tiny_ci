@@ -54,6 +54,21 @@ defmodule TinyCI.Action.AuditTest do
       assert message =~ ":jason"
       assert message =~ "lockfile" or message =~ "pinned"
     end
+
+    @tag :tmp_dir
+    test "a lockfile containing code is refused without running it", %{tmp_dir: dir} do
+      marker = Path.join(dir, "pwned")
+      lock = Path.join(dir, "mix.lock")
+      File.write!(lock, ~s|%{"jason": File.write!(#{inspect(marker)}, "x")}|)
+
+      assert Audit.analyze(spec([Jason]), dir, root_app: :tiny_ci, lock_path: lock) ==
+               {:error, :not_a_lock_map}
+
+      assert Audit.verify(spec([Jason]), dir, root_app: :tiny_ci, lock_path: lock) ==
+               {:error, :not_a_lock_map}
+
+      refute File.exists?(marker)
+    end
   end
 
   describe "format/1" do
