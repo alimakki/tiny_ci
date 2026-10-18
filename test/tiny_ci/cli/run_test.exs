@@ -57,6 +57,9 @@ defmodule TinyCI.CLI.RunTest do
     {code, stdout, stderr}
   end
 
+  defp restore_app_env(key, nil), do: Application.delete_env(:tiny_ci, key)
+  defp restore_app_env(key, value), do: Application.put_env(:tiny_ci, key, value)
+
   describe "tiny_ci run, through TinyCI.CLI.run/1" do
     # Both sides run `TinyCI.CLI.Run`, so this can only catch wiring mistakes in the
     # dispatcher or the Mix delegate. The untouched `test/mix/tasks/*.exs` suite is the
@@ -89,6 +92,70 @@ defmodule TinyCI.CLI.RunTest do
                invoke(["run", "--file", ctx.pipeline, "--root", ctx.root, "--no-record"])
 
       assert stderr =~ "Pipeline failed"
+    end
+
+    test "a trusted run ignores the operator default image and stays on the host", ctx do
+      previous = Application.get_env(:tiny_ci, :default_image)
+      Application.put_env(:tiny_ci, :default_image, "does-not-exist")
+      on_exit(fn -> restore_app_env(:default_image, previous) end)
+
+      assert {0, stdout, ""} =
+               invoke(["run", "--file", ctx.pipeline, "--root", ctx.root, "--no-record"])
+
+      assert stdout =~ "Pipeline completed successfully"
+    end
+
+    test "--isolate refuses repository module steps before loading or running them", ctx do
+      previous = Application.get_env(:tiny_ci, :default_image)
+      Application.delete_env(:tiny_ci, :default_image)
+      on_exit(fn -> restore_app_env(:default_image, previous) end)
+
+      File.write!(ctx.pipeline, """
+      stage :build, mode: :serial do
+        step :deploy, module: MyApp.Deploy
+      end
+      """)
+
+      assert {1, _stdout, stderr} =
+               invoke([
+                 "run",
+                 "--file",
+                 ctx.pipeline,
+                 "--root",
+                 ctx.root,
+                 "--no-record",
+                 "--isolate"
+               ])
+
+      assert stderr =~ "refusing to run repository module code in an untrusted run"
+      assert stderr =~ "MyApp.Deploy"
+    end
+
+    test "--isolate without a default image fails with remediation", ctx do
+      previous = Application.get_env(:tiny_ci, :default_image)
+      Application.delete_env(:tiny_ci, :default_image)
+      on_exit(fn -> restore_app_env(:default_image, previous) end)
+
+      assert {1, _stdout, stderr} =
+               invoke([
+                 "run",
+                 "--file",
+                 ctx.pipeline,
+                 "--root",
+                 ctx.root,
+                 "--no-record",
+                 "--isolate"
+               ])
+
+      assert stderr =~ "untrusted run needs a container image"
+      assert stderr =~ "default_image"
+    end
+
+    test "--isolate is rejected as an unknown flag when misspelled", ctx do
+      assert {2, "", stderr} =
+               invoke(["run", "--file", ctx.pipeline, "--root", ctx.root, "--isolat"])
+
+      assert stderr =~ "--isolat"
     end
 
     test "a missing pipeline file exits 1", ctx do
@@ -363,7 +430,7 @@ defmodule TinyCI.CLI.RunTest do
       for flag <- ~w(--file --root --base --dry-run --list --filter --output --events
                      --no-record --break --break-timeout --break-timeout-action
                      --debug-serial --no-cache --no-color --attest --signing-key --artifacts-dir
-                     --list-artifacts) do
+                     --list-artifacts --isolate) do
         assert help =~ flag, "#{flag} is missing from the run help"
       end
     end

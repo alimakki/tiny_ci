@@ -19,6 +19,9 @@ defmodule Mix.Tasks.TinyCi.RunTest do
     {:ok, project_root: @tmp_dir}
   end
 
+  defp restore_app_env(key, nil), do: Application.delete_env(:tiny_ci, key)
+  defp restore_app_env(key, value), do: Application.put_env(:tiny_ci, key, value)
+
   describe "run/1" do
     test "runs a passing pipeline and prints success", %{project_root: root} do
       path = Path.join(root, "tiny_ci.exs")
@@ -36,6 +39,32 @@ defmodule Mix.Tasks.TinyCi.RunTest do
         end)
 
       assert output =~ "Pipeline completed successfully"
+    end
+
+    test "--isolate warns that Mix has already loaded the project", %{project_root: root} do
+      previous = Application.get_env(:tiny_ci, :default_image)
+      Application.delete_env(:tiny_ci, :default_image)
+      on_exit(fn -> restore_app_env(:default_image, previous) end)
+
+      path = Path.join(root, "tiny_ci.exs")
+
+      File.write!(path, """
+      stage :greet, mode: :serial do
+        step :hello, cmd: "echo hello"
+      end
+      """)
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            assert_raise Mix.Error, fn ->
+              Mix.Tasks.TinyCi.Run.run(["--file", path, "--isolate"])
+            end
+          end)
+        end)
+
+      assert stderr =~ "Mix has already loaded this project"
+      assert stderr =~ "tiny_ci` escript"
     end
 
     test "supply-chain verification allows a first-party/local module action",

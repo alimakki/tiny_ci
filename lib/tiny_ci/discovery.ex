@@ -64,14 +64,14 @@ defmodule TinyCI.Discovery do
     * `{:error, {:validation_error, violations}}` — when the file uses
       disallowed constructs
   """
-  @spec load_pipeline(String.t()) ::
+  @spec load_pipeline(String.t(), keyword()) ::
           {:ok, PipelineSpec.t()}
           | {:error, :file_not_found}
           | {:error, {:parse_error, String.t()}}
           | {:error, {:validation_error, [String.t()]}}
-  def load_pipeline(path) do
+  def load_pipeline(path, opts \\ []) do
     if File.exists?(path) do
-      Interpreter.interpret_file(path)
+      Interpreter.interpret_file(path, opts)
     else
       {:error, :file_not_found}
     end

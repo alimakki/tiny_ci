@@ -28,6 +28,8 @@ defmodule TinyCI.Secrets do
   @typedoc "A name → value map consulted before the environment and the file."
   @type provider :: %{optional(String.t()) => String.t()}
 
+  alias TinyCI.Execution.Paths
+
   @typedoc "Resolved secrets, keyed by declared name."
   @type resolved :: %{optional(String.t()) => String.t()}
 
@@ -39,6 +41,8 @@ defmodule TinyCI.Secrets do
     * `:root` — project root; the file is read from `root/#{@file_name}`
     * `:provider` — a `t:provider/0` map checked first (default `%{}`)
     * `:env` — the environment map (default `System.get_env/0`)
+    * `:allow_symlink` — follow a symlinked secrets file (default `true`); pass
+      `false` for an untrusted run so a repository cannot point the file at a host path
 
   ## Returns
 
@@ -46,19 +50,22 @@ defmodule TinyCI.Secrets do
     * `{:error, {:missing_secrets, names}}` with the unresolved names in
       declaration order
     * `{:error, {:secrets_file, path, {:line, n, reason}}}` when the file is malformed
+    * `{:error, {:secrets_file, path, :symlink}}` when symlinks are not allowed
   """
   @spec resolve([String.t()], keyword()) ::
           {:ok, resolved()}
           | {:error, {:missing_secrets, [String.t()]}}
-          | {:error, {:secrets_file, String.t(), {:line, pos_integer(), String.t()}}}
+          | {:error, {:secrets_file, String.t(), {:line, pos_integer(), String.t()} | :symlink}}
   def resolve([], _opts), do: {:ok, %{}}
 
   def resolve(names, opts) when is_list(names) do
     provider = Keyword.get(opts, :provider, %{})
     env = Keyword.get_lazy(opts, :env, &System.get_env/0)
     root = Keyword.get(opts, :root, File.cwd!())
+    allow_symlink? = Keyword.get(opts, :allow_symlink, true)
 
-    with {:ok, from_file} <- read_file(Path.join(root, @file_name)) do
+    with {:ok, from_file} <-
+           read_file(Path.join(root, @file_name), root, allow_symlink?) do
       lookup = fn name -> provider[name] || env[name] || from_file[name] end
       resolved = for name <- names, value = lookup.(name), do: {name, value}, into: %{}
 
@@ -135,7 +142,15 @@ defmodule TinyCI.Secrets do
   @spec file_path(String.t()) :: String.t()
   def file_path(root), do: Path.join(root, @file_name)
 
-  defp read_file(path) do
+  defp read_file(path, _root, true), do: read_content(path)
+
+  defp read_file(path, root, false) do
+    if Paths.inside?(root, path),
+      do: read_content(path),
+      else: {:error, {:secrets_file, path, :symlink}}
+  end
+
+  defp read_content(path) do
     case File.read(path) do
       {:ok, content} -> wrap_parse(parse_file(content), path)
       {:error, _} -> {:ok, %{}}

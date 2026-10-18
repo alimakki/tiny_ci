@@ -69,6 +69,37 @@ defmodule TinyCI.SecretsTest do
                Secrets.resolve(["A"], root: root, env: %{})
     end
 
+    @tag :tmp_dir
+    test "refuses a symlinked secrets file when allow_symlink is false", %{tmp_dir: root} do
+      File.mkdir_p!(Path.join(root, ".tiny_ci"))
+
+      outside =
+        Path.join(Path.dirname(root), "outside-secrets-#{System.unique_integer([:positive])}")
+
+      File.mkdir_p!(Path.dirname(outside))
+      File.write!(outside, "TOKEN=leaked\n")
+      on_exit(fn -> File.rm_rf(outside) end)
+      File.ln_s!(outside, Path.join(root, ".tiny_ci/secrets"))
+
+      assert {:error, {:secrets_file, _path, :symlink}} =
+               Secrets.resolve(["TOKEN"], root: root, env: %{}, allow_symlink: false)
+
+      assert {:ok, %{"TOKEN" => "leaked"}} =
+               Secrets.resolve(["TOKEN"], root: root, env: %{}, allow_symlink: true)
+    end
+
+    @tag :tmp_dir
+    test "refuses a symlinked parent directory when allow_symlink is false", %{tmp_dir: root} do
+      outside = Path.join(Path.dirname(root), "outside-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(outside)
+      File.write!(Path.join(outside, "secrets"), "TOKEN=leaked\n")
+      on_exit(fn -> File.rm_rf(outside) end)
+      File.ln_s!(outside, Path.join(root, ".tiny_ci"))
+
+      assert {:error, {:secrets_file, _path, :symlink}} =
+               Secrets.resolve(["TOKEN"], root: root, env: %{}, allow_symlink: false)
+    end
+
     test "no declared secrets resolves to an empty map without touching anything" do
       assert {:ok, %{}} = Secrets.resolve([], root: "/nonexistent", env: %{})
     end

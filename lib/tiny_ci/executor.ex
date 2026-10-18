@@ -51,6 +51,7 @@ defmodule TinyCI.Executor do
   alias TinyCI.{Hooks, Redaction, Runs, Secrets, StageResult, StepResult}
   alias TinyCI.Events
   alias TinyCI.Execution.Command
+  alias TinyCI.Execution.Preflight
   alias TinyCI.Executor.{Callback, Crash, Driver, Env}
   alias TinyCI.DSL.Value
 
@@ -121,8 +122,8 @@ defmodule TinyCI.Executor do
     * `{:error, {:aborted, stage_name}, [%StageResult{}]}` — when execution control
       aborted the run
     * `{:error, {:execution_unavailable, reason}, []}` — when no execution
-      backend is permitted (for example an untrusted run before the container
-      backend lands in M1.5-02)
+      backend is permitted (for example an untrusted run with no container
+      runtime, or no image and no operator default)
 
   Raises `ArgumentError` when `control:` carries an unparsable `--break` spec —
   a caller error, and one `mix tiny_ci.run` rejects before the run begins.
@@ -145,40 +146,58 @@ defmodule TinyCI.Executor do
       )
 
     ctx = Map.put(ctx, :events, dispatcher)
-    pipeline_name = opts[:pipeline_name] || :pipeline
     {ctx, control} = start_control_or_stop(ctx, opts[:control], dispatcher)
 
     try do
-      Events.emit(ctx, %PipelineStarted{
-        run_id: ctx.run_id,
-        timestamp: now(),
-        pipeline_name: pipeline_name,
-        branch: Map.get(ctx, :branch),
-        commit: Map.get(ctx, :commit),
-        base_ref: Map.get(ctx, :base_ref),
-        root: Map.get(ctx, :root)
-      })
-
-      case Execution.resolve_backend(ctx, opts) do
-        {:ok, backend} ->
-          ctx = Map.put(ctx, :execution_backend, backend)
-          run_stages_and_hooks(filtered, ctx, output_mode, opts)
-
-        {:error, reason} ->
-          Events.emit(ctx, %PipelineCompleted{
-            run_id: ctx.run_id,
-            timestamp: now(),
-            status: :failed,
-            duration_ms: 0
-          })
-
-          {:error, {:execution_unavailable, reason}, []}
-      end
+      run_started(stages, filtered, ctx, output_mode, opts)
     after
       # Stopped before the dispatcher so any control event it still emits is sunk.
       stop_control(control)
       Events.Dispatcher.stop(dispatcher)
     end
+  end
+
+  defp run_started(stages, filtered, ctx, output_mode, opts) do
+    Events.emit(ctx, %PipelineStarted{
+      run_id: ctx.run_id,
+      timestamp: now(),
+      pipeline_name: opts[:pipeline_name] || :pipeline,
+      branch: Map.get(ctx, :branch),
+      commit: Map.get(ctx, :commit),
+      base_ref: Map.get(ctx, :base_ref),
+      root: Map.get(ctx, :root)
+    })
+
+    case Preflight.check(ctx, stages, opts[:hooks] || %{}) do
+      :ok -> run_with_policy(filtered, ctx, output_mode, opts)
+      {:error, reason} -> fail_run(ctx, reason)
+    end
+  end
+
+  defp run_with_policy(stages, ctx, output_mode, opts) do
+    case Execution.resolve(ctx, opts) do
+      {:ok, %{backend: backend, image: image}} ->
+        ctx =
+          ctx
+          |> Map.put(:execution_backend, backend)
+          |> Map.put(:execution_image, image)
+
+        run_stages_and_hooks(stages, ctx, output_mode, opts)
+
+      {:error, reason} ->
+        fail_run(ctx, {:execution_unavailable, reason})
+    end
+  end
+
+  defp fail_run(ctx, reason) do
+    Events.emit(ctx, %PipelineCompleted{
+      run_id: ctx.run_id,
+      timestamp: now(),
+      status: :failed,
+      duration_ms: 0
+    })
+
+    {:error, reason, []}
   end
 
   defp run_stages_and_hooks(stages, ctx, output_mode, opts) do
@@ -536,7 +555,17 @@ defmodule TinyCI.Executor do
       context
       |> Map.put_new(:store, %{})
       |> Execution.put_default_trust()
-      |> Execution.ensure_backend!(opts)
+
+    context =
+      case Preflight.check(context, [stage], %{}) do
+        :ok ->
+          Execution.ensure_backend!(context, opts)
+
+        {:error, reason} ->
+          raise Execution.Error,
+            message: Execution.error_message(reason),
+            reason: reason
+      end
 
     case Map.get(context, :events) do
       nil ->
@@ -653,7 +682,7 @@ defmodule TinyCI.Executor do
   # combination inside `execute_matrix_stage/3`.
   defp review_stage(%{matrix: []} = stage, ctx, output_mode) do
     Execution.with_session(
-      Execution.session_spec(ctx),
+      Execution.session_spec(ctx, network: stage.network),
       fn session ->
         review_stage_body(stage, Map.put(ctx, :execution_session, session), output_mode)
       end,
@@ -774,8 +803,11 @@ defmodule TinyCI.Executor do
           zip_input_on_exit: true
         )
         |> Enum.map(fn
-          {:ok, result} -> result
-          {:exit, {combination, reason}} -> escaped_matrix_crash(stage, combination, reason)
+          {:ok, result} ->
+            result
+
+          {:exit, {combination, reason}} ->
+            escaped_matrix_crash(stage, combination, reason, context)
         end)
       end)
 
@@ -795,12 +827,21 @@ defmodule TinyCI.Executor do
 
   # Defense in depth, as with `escaped_stage_crash/3`: the step boundary should
   # have caught this inside the combination's own task.
-  defp escaped_matrix_crash(stage, combination, reason) do
+  defp escaped_matrix_crash(stage, combination, reason, context) do
     text = Crash.format(:exit, reason, [])
 
     Logger.error(
       "Matrix combination #{inspect(combination)} of stage #{stage.name} crashed: #{text}"
     )
+
+    Events.emit(context, %MatrixRunCompleted{
+      run_id: run_id(context),
+      timestamp: now(),
+      stage: stage.name,
+      combination: combination,
+      status: :failed,
+      duration_ms: 0
+    })
 
     %MatrixRunResult{combination: combination, status: :failed, step_results: [], store: %{}}
   end
@@ -850,7 +891,7 @@ defmodule TinyCI.Executor do
     stage_for_run = %{stage | matrix: [], max_parallel: nil}
 
     Execution.with_session(
-      Execution.session_spec(context),
+      Execution.session_spec(context, network: stage.network),
       fn session ->
         ctx = Map.put(ctx, :execution_session, session)
 
@@ -1092,40 +1133,52 @@ defmodule TinyCI.Executor do
 
   defp persist_step_artifacts(result, %{artifact: artifact}, ctx, working_dir) do
     artifacts_dir = Map.get(ctx, :artifacts_dir)
+    root = Map.get(ctx, :root, File.cwd!())
+    src_base = working_dir || root
 
-    if is_nil(artifacts_dir) do
-      result
-    else
-      src_base = working_dir || Map.get(ctx, :root, File.cwd!())
+    cond do
+      Execution.trust(ctx) == :untrusted ->
+        # Artifact copy validates a tree and then copies it; a step can race a
+        # symlink swap between those operations. An untrusted run therefore skips
+        # artifact persistence entirely rather than exposing a host file read.
+        result
 
-      case Artifacts.persist(artifact, src_base, artifacts_dir) do
-        {:ok, artifact_path} ->
-          store_key = String.to_atom("artifact_#{artifact.name}")
-          %{result | store_data: Map.put(result.store_data, store_key, artifact_path)}
+      is_nil(artifacts_dir) ->
+        result
 
-        {:warning, artifact_path, missing} ->
-          IO.puts(:stderr, [
-            IO.ANSI.yellow(),
-            "Warning: artifact \"#{artifact.name}\" missing optional paths: #{Enum.join(missing, ", ")}",
-            IO.ANSI.reset()
-          ])
+      true ->
+        persist_artifacts(result, artifact, src_base, artifacts_dir, ctx)
+    end
+  end
 
-          store_key = String.to_atom("artifact_#{artifact.name}")
-          %{result | store_data: Map.put(result.store_data, store_key, artifact_path)}
+  defp persist_artifacts(result, artifact, src_base, artifacts_dir, ctx) do
+    case Artifacts.persist(artifact, src_base, artifacts_dir) do
+      {:ok, artifact_path} ->
+        store_key = String.to_atom("artifact_#{artifact.name}")
+        %{result | store_data: Map.put(result.store_data, store_key, artifact_path)}
 
-        {:error, {:missing_required, name, missing}} ->
-          IO.puts(:stderr, [
-            IO.ANSI.red(),
-            "Error: required artifact \"#{name}\" paths not found: #{Enum.join(missing, ", ")}",
-            IO.ANSI.reset()
-          ])
+      {:warning, artifact_path, missing} ->
+        IO.puts(:stderr, [
+          IO.ANSI.yellow(),
+          "Warning: artifact \"#{artifact.name}\" missing optional paths: #{Enum.join(missing, ", ")}",
+          IO.ANSI.reset()
+        ])
 
-          %{result | status: :failed}
+        store_key = String.to_atom("artifact_#{artifact.name}")
+        %{result | store_data: Map.put(result.store_data, store_key, artifact_path)}
 
-        {:error, {:unsafe_path, name, path}} ->
-          message = mask(ctx, "Unsafe path #{inspect(path)} in artifact #{inspect(name)}")
-          %{result | status: :failed, output: result.output <> message}
-      end
+      {:error, {:missing_required, name, missing}} ->
+        IO.puts(:stderr, [
+          IO.ANSI.red(),
+          "Error: required artifact \"#{name}\" paths not found: #{Enum.join(missing, ", ")}",
+          IO.ANSI.reset()
+        ])
+
+        %{result | status: :failed}
+
+      {:error, {:unsafe_path, name, path}} ->
+        message = mask(ctx, "Unsafe path #{inspect(path)} in artifact #{inspect(name)}")
+        %{result | status: :failed, output: result.output <> message}
     end
   end
 
@@ -1141,6 +1194,24 @@ defmodule TinyCI.Executor do
 
   defp execute_with_cache(
          %{cache: cache} = step,
+         context,
+         output_mode,
+         prefix,
+         working_dir
+       ) do
+    if Execution.trust(context) == :untrusted do
+      # Cache restore/save are host-side file operations driven by repository
+      # paths. An untrusted run does not get that host access; the step still
+      # runs in its container, just without a cache.
+      run_step_with_retries(step, context, output_mode, prefix, working_dir)
+    else
+      execute_with_trusted_cache(step, cache, context, output_mode, prefix, working_dir)
+    end
+  end
+
+  defp execute_with_trusted_cache(
+         step,
+         cache,
          context,
          output_mode,
          prefix,
@@ -1339,7 +1410,7 @@ defmodule TinyCI.Executor do
 
   defp run_step(%{cmd: cmd} = step, ctx, _output_mode, _prefix, working_dir)
        when cmd != nil do
-    if working_dir != nil and not File.dir?(working_dir) do
+    if working_dir != nil and not File.dir?(working_dir) and not container_session?(ctx) do
       missing_working_dir_result(step, working_dir)
     else
       run_shell_step(step, ctx, working_dir)
@@ -1355,6 +1426,14 @@ defmodule TinyCI.Executor do
        )
        when not is_nil(module) do
     ctx = Map.put(ctx, :env, Env.resolve(ctx, step.env))
+
+    if Execution.trust(ctx) == :untrusted and
+         TinyCI.Sandbox.Trust.classify(module, load: false) != :builtin do
+      raise TinyCI.Execution.Error,
+        message: driver_error_message({:untrusted_action, module}),
+        reason: {:untrusted_action, module}
+    end
+
     driver = Driver.select(module, ctx)
     driver_opts = Keyword.put(Driver.opts(ctx), :timeout, step.timeout)
     timeout = if driver == Driver.Inline, do: step.timeout
@@ -1395,6 +1474,11 @@ defmodule TinyCI.Executor do
       allowed_failure: allow_failure
     }
   end
+
+  defp container_session?(%{execution_session: %TinyCI.Execution.Session{backend: backend}}),
+    do: backend == TinyCI.Execution.Backend.Container
+
+  defp container_session?(_ctx), do: false
 
   defp run_shell_step(
          %{cmd: cmd, name: name, env: env, timeout: timeout, allow_failure: allow_failure},

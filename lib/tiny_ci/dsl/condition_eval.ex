@@ -48,7 +48,12 @@ defmodule TinyCI.DSL.ConditionEval do
 
   def eval({:env, _, [var]}, ctx) when is_binary(var) do
     env = Map.get(ctx, :env) || TinyCI.Executor.Env.base(ctx)
-    Map.get_lazy(env, var, fn -> System.get_env(var) end)
+
+    cond do
+      Map.has_key?(env, var) -> Map.get(env, var)
+      TinyCI.Execution.trust(ctx) == :untrusted -> nil
+      true -> System.get_env(var)
+    end
   end
 
   def eval({:file_changed?, _, [glob]}, ctx) when is_binary(glob),

@@ -29,7 +29,8 @@ defmodule TinyCI.CLI.Run do
     break: :keep,
     break_timeout: :integer,
     break_timeout_action: :string,
-    debug_serial: :boolean
+    debug_serial: :boolean,
+    isolate: :boolean
   ]
 
   @aliases [f: :file, r: :root]
@@ -54,6 +55,14 @@ defmodule TinyCI.CLI.Run do
           "`--break-timeout abc`), or `--events -` together with `--output json`. " <>
           "Any other invalid value (`--output xml`, a bad `--break` spec, an unknown " <>
           "`--filter` stage) is reported as a failed run and exit `1`."
+      end
+
+    mix_note =
+      if mix? do
+        " With `mix tiny_ci.run`, Mix has already loaded the project; use the " <>
+          "`tiny_ci` escript for a hostile checkout."
+      else
+        ""
       end
 
     """
@@ -99,6 +108,9 @@ defmodule TinyCI.CLI.Run do
       * `--debug-serial` — force serial scheduling while breakpoints are armed, for
         predictable stepping. Off by default: pausing one branch must not freeze the
         independent ones.
+      * `--isolate` — run untrusted: every stage executes in a container and
+        repository module steps/hooks are refused. Requires a container runtime and
+        an operator `config :tiny_ci, :default_image`.#{mix_note}
 
     ## Execution control
 
@@ -221,30 +233,30 @@ defmodule TinyCI.CLI.Run do
     {:error, :no_pipeline}
   end
 
-  defp resolve_pipeline(opts, root, name, output_format) do
+  defp resolve_pipeline(opts, root, name, output_format, load_opts) do
     cond do
       opts[:file] ->
-        Discovery.load_pipeline(opts[:file])
+        Discovery.load_pipeline(opts[:file], load_opts)
 
       name ->
         case Discovery.find_pipeline_by_name(root, name) do
-          {:ok, path} -> load_and_announce(path, output_format)
+          {:ok, path} -> load_and_announce(path, output_format, load_opts)
           {:error, :not_found} -> {:error, {:named_not_found, name}}
         end
 
       true ->
-        discover_and_load(root, output_format)
+        discover_and_load(root, output_format, load_opts)
     end
   end
 
-  defp discover_and_load(root, output_format) do
+  defp discover_and_load(root, output_format, load_opts) do
     with {:ok, path} <- Discovery.find_pipeline(root) do
-      load_and_announce(path, output_format)
+      load_and_announce(path, output_format, load_opts)
     end
   end
 
-  defp load_and_announce(path, output_format) do
-    with {:ok, spec} <- Discovery.load_pipeline(path) do
+  defp load_and_announce(path, output_format, load_opts) do
+    with {:ok, spec} <- Discovery.load_pipeline(path, load_opts) do
       if output_format == :human, do: IO.puts("Found pipeline: #{path}")
       {:ok, spec}
     end
@@ -270,12 +282,18 @@ defmodule TinyCI.CLI.Run do
     with {:ok, output_format} <- parse_output_format(opts[:output]),
          :ok <- check_stdout_conflict(opts[:events], output_format) do
       output_format = if opts[:events] == "-", do: :events, else: output_format
+      trust = invocation_trust(opts)
+      load_opts = [load_actions: trust == :trusted]
 
-      case resolve_pipeline(opts, root, name, output_format) do
-        {:ok, spec} -> run_resolved(spec, opts, root, filter, output_format)
+      case resolve_pipeline(opts, root, name, output_format, load_opts) do
+        {:ok, spec} -> run_resolved(spec, opts, root, filter, output_format, trust)
         {:error, reason} -> handle_error(reason)
       end
     end
+  end
+
+  defp invocation_trust(opts) do
+    if opts[:isolate], do: :untrusted, else: TinyCI.Execution.default_trust()
   end
 
   defp check_stdout_conflict("-", :json),
@@ -283,17 +301,17 @@ defmodule TinyCI.CLI.Run do
 
   defp check_stdout_conflict(_events, _output_format), do: :ok
 
-  defp run_resolved(spec, opts, root, filter, output_format) do
+  defp run_resolved(spec, opts, root, filter, output_format, trust) do
     # Anchor working_dir/artifact/cache resolution to the project root the user
     # invoked from, not the pipeline file's own directory. Otherwise a pipeline in
     # `.tiny_ci/` would resolve relative paths against `.tiny_ci/` rather than the
     # repo root.
     spec = %{spec | root: Path.expand(root)}
 
-    with {:ok, secrets} <- resolve_secrets(spec, opts[:dry_run]),
-         :ok <- verify_actions(spec, opts[:dry_run]),
+    with {:ok, secrets} <- resolve_secrets(spec, opts[:dry_run], trust),
+         :ok <- verify_actions(spec, opts[:dry_run], trust),
          {:ok, control} <- resolve_control(opts, spec, output_format) do
-      run_and_attest(spec, opts, root, filter, output_format, control, secrets)
+      run_and_attest(spec, opts, root, filter, output_format, control, secrets, trust)
     else
       {:error, {:missing_secrets, _} = reason} ->
         print_error(reason)
@@ -310,16 +328,19 @@ defmodule TinyCI.CLI.Run do
 
   # Runs the pipeline and, when `--attest` is given, writes a signed provenance
   # attestation built from the run's event stream (skipped for --dry-run).
-  defp run_and_attest(spec, opts, root, filter, output_format, control, secrets) do
+  defp run_and_attest(spec, opts, root, filter, output_format, control, secrets, trust) do
     attest_path = if opts[:dry_run], do: nil, else: opts[:attest]
-    {run_opts, agent} = maybe_collector(base_run_opts(opts, control, secrets), attest_path)
+
+    {run_opts, agent} =
+      base_run_opts(opts, control, secrets, trust)
+      |> maybe_collector(attest_path)
 
     result = run_with_filter(spec, opts[:dry_run], filter, output_format, run_opts)
 
-    finalize_attest(agent, attest_path, spec, opts, root, result)
+    finalize_attest(agent, attest_path, spec, opts, root, result, trust)
   end
 
-  defp base_run_opts(opts, control, secrets) do
+  defp base_run_opts(opts, control, secrets, trust) do
     [
       no_cache: opts[:no_cache] || false,
       base: opts[:base],
@@ -327,7 +348,8 @@ defmodule TinyCI.CLI.Run do
       events: opts[:events],
       record: opts[:record],
       control: control,
-      secrets: secrets
+      secrets: secrets,
+      trust: trust
     ]
   end
 
@@ -338,10 +360,13 @@ defmodule TinyCI.CLI.Run do
   # Declared secrets are settled before anything runs: a missing one fails the run
   # (or warns under --dry-run, which runs nothing anyway). A secrets file that is
   # not gitignored is the classic way to leak a token, so it is called out.
-  defp resolve_secrets(spec, dry_run) do
+  defp resolve_secrets(spec, dry_run, trust) do
     warn_unignored_secrets_file(spec.root)
 
-    case {Secrets.resolve(spec.secrets, root: spec.root), dry_run} do
+    case {Secrets.resolve(spec.secrets,
+            root: spec.root,
+            allow_symlink: trust == :trusted
+          ), dry_run} do
       {{:ok, secrets}, _} ->
         {:ok, secrets}
 
@@ -468,23 +493,27 @@ defmodule TinyCI.CLI.Run do
     {run_opts ++ [extra_sinks: [{Provenance.Collector, agent: agent}]], agent}
   end
 
-  defp finalize_attest(nil, _path, _spec, _opts, _root, result), do: result
+  defp finalize_attest(nil, _path, _spec, _opts, _root, result, _trust), do: result
 
-  defp finalize_attest(agent, path, spec, opts, root, result) do
+  defp finalize_attest(agent, path, spec, opts, root, result, trust) do
     events = Provenance.Collector.events(agent)
     Agent.stop(agent)
 
-    case write_attestation(path, spec, opts, root, events) do
+    case write_attestation(path, spec, opts, root, events, trust) do
       # A pipeline failure dominates; otherwise a failed attestation surfaces.
       :ok -> result
       {:error, _} = attest_error -> if result == :ok, do: attest_error, else: result
     end
   end
 
-  defp write_attestation(path, spec, opts, root, events) do
+  defp write_attestation(path, spec, opts, root, events, trust) do
     with :ok <- refuse_divergent(events),
          {:ok, private} <- signing_key(opts),
-         {:ok, actions} <- Audit.analyze(spec, root, root_app: TinyCI.Project.root_app()),
+         {:ok, actions} <-
+           Audit.analyze(spec, root,
+             root_app: TinyCI.Project.root_app(),
+             load: trust == :trusted
+           ),
          ctx = TinyCI.Context.build(root: root),
          statement =
            Provenance.build(
@@ -529,10 +558,13 @@ defmodule TinyCI.CLI.Run do
   end
 
   # Supply-chain gate: before executing, verify every module action is pinned in
-  # the lockfile and matches the locked version (T6). Skipped for --dry-run.
-  defp verify_actions(_spec, true), do: :ok
+  # the lockfile and matches the locked version (T6). Skipped for --dry-run, and
+  # for an untrusted run: no non-builtin module action may run there at all, so
+  # loading module metadata would itself violate the isolation boundary.
+  defp verify_actions(_spec, true, _trust), do: :ok
+  defp verify_actions(_spec, _dry_run, :untrusted), do: :ok
 
-  defp verify_actions(spec, _dry_run) do
+  defp verify_actions(spec, _dry_run, _trust) do
     Audit.verify(spec, spec.root, root_app: TinyCI.Project.root_app())
   end
 
@@ -601,7 +633,8 @@ defmodule TinyCI.CLI.Run do
       root: root,
       pipeline_env: pipeline_env,
       base: run_opts[:base],
-      secret_names: names
+      secret_names: names,
+      trust: Keyword.get(run_opts, :trust)
     )
     |> Secrets.attach(Keyword.get(run_opts, :secrets, %{}))
   end
@@ -677,8 +710,17 @@ defmodule TinyCI.CLI.Run do
   defp failure_message({:aborted, stage}),
     do: "Pipeline aborted by execution control at stage :#{stage}."
 
-  defp failure_message({:execution_unavailable, _reason}),
-    do: "Pipeline cannot run: no execution backend is available for this environment."
+  defp failure_message({:execution_unavailable, reason}) do
+    "Pipeline cannot run: #{TinyCI.Execution.error_message(reason)}"
+  end
+
+  defp failure_message({:untrusted_actions, _} = reason) do
+    TinyCI.Execution.error_message(reason)
+  end
+
+  defp failure_message({:unsafe_pipeline_paths, _} = reason) do
+    TinyCI.Execution.error_message(reason)
+  end
 
   defp failure_message(_reason), do: "Pipeline failed."
 
@@ -794,6 +836,14 @@ defmodule TinyCI.CLI.Run do
     IO.puts(:stderr, [
       IO.ANSI.red(),
       "Cannot parse #{path}:#{line}: #{reason}",
+      IO.ANSI.reset()
+    ])
+  end
+
+  defp print_error({:secrets_file, path, :symlink}) do
+    IO.puts(:stderr, [
+      IO.ANSI.red(),
+      "Refusing to read a symlinked secrets file in an untrusted run: #{path}",
       IO.ANSI.reset()
     ])
   end

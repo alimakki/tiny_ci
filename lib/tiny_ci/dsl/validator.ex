@@ -201,6 +201,11 @@ defmodule TinyCI.DSL.Validator do
   defp validate_stage_opt({:allow_failure, _}, meta),
     do: [diag("Stage :allow_failure must be true or false", meta)]
 
+  defp validate_stage_opt({:network, v}, _meta) when is_boolean(v), do: []
+
+  defp validate_stage_opt({:network, _}, meta),
+    do: [diag("Stage :network must be true or false", meta)]
+
   # Keys outside the allowlist are reported by unknown_option_diags/4.
   defp validate_stage_opt(_opt, _meta), do: []
 

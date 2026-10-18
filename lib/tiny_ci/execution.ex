@@ -18,19 +18,20 @@ defmodule TinyCI.Execution do
     * `:server` mode defaults to `:untrusted`;
     * an explicit `trust:` on the context wins.
 
-  A trusted run uses `TinyCI.Execution.Backend.Local` unless an explicit
-  `backend:` is supplied. An untrusted run has no backend yet: M1.5-02 adds the
-  container backend and the policy that selects it, so until then an untrusted
-  run fails closed instead of silently falling back to the host.
+  A trusted run uses `TinyCI.Execution.Backend.Local` unless a `:backend` is
+  supplied or an image selects `TinyCI.Execution.Backend.Container`. An untrusted
+  run is never allowed to fall back to the host: `TinyCI.Execution.Policy` selects
+  the container backend (using the operator's `:default_image` when the pipeline
+  does not name one), and a run with no runtime or image fails closed.
 
   ## Sessions
 
-  A backend is opened once per stage, per matrix combination, and per shell hook
+  A backend is opened once per stage, per matrix combination, and per hook phase
   (`with_session/3`). The session is put on the executor's context and read by
   each step; `close/1` is always called from an `after` path.
   """
 
-  alias TinyCI.Execution.{Backend, Command, Session, SessionSpec}
+  alias TinyCI.Execution.{Backend, Command, Policy, Session, SessionSpec}
   alias TinyCI.Execution.Backend.Local
 
   defmodule Error do
@@ -119,35 +120,63 @@ defmodule TinyCI.Execution do
   end
 
   @doc """
-  Selects the backend for a run.
+  Resolves the backend and image for a run.
 
-  An explicit `:backend` option wins (it is how tests inject a backend and how a
-  future policy can pass its choice through). Otherwise a trusted run gets the
-  host (`Backend.Local`) and an untrusted run is refused until M1.5-02 provides
-  the container backend.
+  An explicit `:backend` option wins (it is how tests inject a backend). Local is
+  refused for an untrusted context even when named explicitly. Otherwise the
+  decision comes from `TinyCI.Execution.Policy`: trust and image select the
+  backend, and an untrusted run never falls back to the host.
+
+  ## Examples
+
+      iex> {:ok, %{backend: TinyCI.Execution.Backend.Local}} =
+      ...>   TinyCI.Execution.resolve(%{trust: :trusted})
+
+      iex> TinyCI.Execution.resolve(%{trust: :untrusted}, default_image: nil)
+      {:error, :no_default_image}
+  """
+  @spec resolve(map(), keyword()) :: {:ok, Policy.decision()} | {:error, term()}
+  def resolve(ctx, opts \\ []) do
+    image = Keyword.get(opts, :image) || Map.get(ctx, :image)
+
+    case Keyword.fetch(opts, :backend) do
+      {:ok, Local} ->
+        if trust(ctx) == :trusted,
+          do: {:ok, %{backend: Local, image: image}},
+          else: {:error, {:isolation_unavailable, :untrusted}}
+
+      {:ok, backend} ->
+        {:ok,
+         %{
+           backend: backend,
+           image: Keyword.get(opts, :image) || Map.get(ctx, :execution_image) || image
+         }}
+
+      :error ->
+        policy_opts =
+          opts
+          |> Keyword.delete(:backend)
+          |> Keyword.put_new(:default_image, Application.get_env(:tiny_ci, :default_image))
+
+        Policy.resolve(ctx, image, policy_opts)
+    end
+  end
+
+  @doc """
+  Selects only the backend module for a run.
+
+  A compatibility wrapper over `resolve/2`; callers that also need the chosen
+  image should use `resolve/2`.
 
   ## Examples
 
       iex> {:ok, TinyCI.Execution.Backend.Local} = TinyCI.Execution.resolve_backend(%{trust: :trusted})
-      iex> TinyCI.Execution.resolve_backend(%{trust: :untrusted})
-      {:error, {:isolation_unavailable, :untrusted}}
   """
   @spec resolve_backend(map(), keyword()) :: {:ok, module()} | {:error, term()}
   def resolve_backend(ctx, opts \\ []) do
-    case Keyword.fetch(opts, :backend) do
-      {:ok, Local} ->
-        if trust(ctx) == :trusted,
-          do: {:ok, Local},
-          else: {:error, {:isolation_unavailable, :untrusted}}
-
-      {:ok, backend} ->
-        {:ok, backend}
-
-      :error ->
-        case trust(ctx) do
-          :trusted -> {:ok, Local}
-          :untrusted -> {:error, {:isolation_unavailable, :untrusted}}
-        end
+    case resolve(ctx, opts) do
+      {:ok, %{backend: backend}} -> {:ok, backend}
+      {:error, _} = error -> error
     end
   end
 
@@ -155,7 +184,8 @@ defmodule TinyCI.Execution do
   Ensures a context carries a resolved backend, raising when none is permitted.
 
   Used by the standalone `TinyCI.Executor.execute/4` entrypoint, which has no
-  run-level error tuple to return.
+  run-level error tuple to return. The resolved image is stored alongside the
+  backend so sessions opened later use the same decision.
   """
   @spec ensure_backend!(map(), keyword()) :: map()
   def ensure_backend!(ctx, opts \\ []) do
@@ -166,9 +196,11 @@ defmodule TinyCI.Execution do
         {:error, stored} -> [backend: stored]
       end
 
-    case resolve_backend(ctx, opts) do
-      {:ok, backend} ->
-        Map.put(ctx, :execution_backend, backend)
+    case resolve(ctx, opts) do
+      {:ok, %{backend: backend, image: image}} ->
+        ctx
+        |> Map.put(:execution_backend, backend)
+        |> Map.put(:execution_image, image)
 
       {:error, reason} ->
         raise Error, message: error_message(reason), reason: reason
@@ -192,17 +224,32 @@ defmodule TinyCI.Execution do
   end
 
   @doc """
-  Builds the session spec for a run: the project root and the run id.
+  Builds the session spec for a run or one of its phases.
 
-  A step's own working directory belongs on its `Command`, not here, because the
-  container backend maps it under the workspace it mounts.
+  `:workspace` is the project root. A step's own working directory belongs on
+  its `Command`, not here, because the container backend maps it under the
+  mounted workspace.
+
+  ## Options
+
+    * `:network` — whether the session may use the network (default `true`)
+    * `:image` — an override; otherwise the run's resolved image is used
+    * `:limits` — container limits; otherwise operator config
   """
-  @spec session_spec(map()) :: SessionSpec.t()
-  def session_spec(ctx) do
+  @spec session_spec(map(), keyword()) :: SessionSpec.t()
+  def session_spec(ctx, opts \\ []) do
     %SessionSpec{
       workspace: Map.get(ctx, :root) || File.cwd!(),
-      run_id: Map.get(ctx, :run_id)
+      run_id: Map.get(ctx, :run_id),
+      image: Keyword.get(opts, :image, Map.get(ctx, :execution_image) || Map.get(ctx, :image)),
+      network: Keyword.get(opts, :network, true),
+      limits: Keyword.get(opts, :limits, container_limits(ctx))
     }
+  end
+
+  defp container_limits(ctx) do
+    Map.get(ctx, :container_limits) ||
+      Application.get_env(:tiny_ci, :container_limits, %{})
   end
 
   @doc """
@@ -250,12 +297,68 @@ defmodule TinyCI.Execution do
     backend.exec(ref, command, on_line)
   end
 
-  defp error_message({:isolation_unavailable, :untrusted}) do
-    "refusing to run an untrusted pipeline on the host: " <>
-      "no isolation backend is available (the container backend lands in M1.5-02)"
+  @doc """
+  Returns the human-readable explanation for an execution error reason.
+
+  The CLI and the Mix task use this so remediation text lives next to the code
+  that produced the reason.
+  """
+  @spec error_message(term()) :: String.t()
+  def error_message({:isolation_unavailable, :untrusted}) do
+    "refusing to run an untrusted pipeline on the host: no isolation backend is available"
   end
 
-  defp error_message({:session_open_failed, backend, reason}) do
+  def error_message(:no_isolation_backend) do
+    "no isolation backend is available (check `config :tiny_ci, :container_runtime`): " <>
+      "install rootless Podman or Docker, or drop --isolate to run a trusted pipeline on the host"
+  end
+
+  def error_message(:no_default_image) do
+    "an untrusted run needs a container image: set `config :tiny_ci, :default_image`, " <>
+      "or drop --isolate for a trusted run"
+  end
+
+  def error_message({:invalid_container_runtime, runtime}) do
+    "invalid :container_runtime #{inspect(runtime)}: expected :auto, :docker, or :podman"
+  end
+
+  def error_message({:untrusted_actions, details}) do
+    lines =
+      Enum.map_join(details, "\n", fn detail ->
+        location =
+          case detail do
+            %{stage: nil} -> "#{detail.kind} :#{detail.name}"
+            %{stage: stage} -> "#{detail.kind} :#{detail.name} in stage :#{stage}"
+          end
+
+        "  - #{location} uses #{inspect(detail.module)} " <>
+          "(#{detail.class}); only builtin actions may run in an untrusted run"
+      end)
+
+    "refusing to run repository module code in an untrusted run:\n" <>
+      lines <>
+      "\n  Replace the module step/hook with a `cmd:` block, or run a trusted invocation."
+  end
+
+  def error_message({:unsafe_pipeline_paths, details}) do
+    lines =
+      Enum.map_join(details, "\n", fn detail ->
+        location =
+          case detail.kind do
+            :stage -> "stage :#{detail.stage}"
+            kind -> "#{kind} :#{detail.name} in stage :#{detail.stage}"
+          end
+
+        "  - #{location} has a path outside the workspace: #{inspect(detail.path)}"
+      end)
+
+    "refusing to run an untrusted pipeline with paths outside the workspace:\n" <>
+      lines <> "\n  Use a working_dir under the project root."
+  end
+
+  def error_message({:session_open_failed, backend, reason}) do
     "could not open an execution session with #{inspect(backend)}: #{inspect(reason)}"
   end
+
+  def error_message(other), do: "execution error: #{inspect(other)}"
 end

@@ -25,6 +25,18 @@ defmodule TinyCI.Sandbox.TrustTest do
     test "a module with no owning application is local" do
       assert Trust.classify(ScriptLocal, root_app: :tiny_ci) == :local
     end
+
+    test "load: false never loads a module and reports it as unknown" do
+      module = TinyCI.SandboxFixtures.NeverLoaded
+
+      refute :code.is_loaded(module)
+      assert Trust.classify(module, load: false, root_app: :tiny_ci) == :unknown
+      refute :code.is_loaded(module)
+    end
+
+    test "load: false still classifies an already-loaded builtin" do
+      assert Trust.classify(Enum, load: false, root_app: :tiny_ci) == :builtin
+    end
   end
 
   describe "trusted?/2" do
@@ -33,6 +45,13 @@ defmodule TinyCI.Sandbox.TrustTest do
       assert Trust.trusted?(Enum, root_app: :tiny_ci)
       assert Trust.trusted?(ScriptLocal, root_app: :tiny_ci)
       refute Trust.trusted?(Echo, root_app: :some_other_app)
+    end
+
+    test "unknown is not trusted" do
+      refute Trust.trusted?(TinyCI.SandboxFixtures.NeverLoaded,
+               load: false,
+               root_app: :tiny_ci
+             )
     end
   end
 

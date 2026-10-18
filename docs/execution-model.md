@@ -24,10 +24,12 @@ the mode does — for example, a server configured to trust a particular
 repository. A pull request from a fork is untrusted regardless of that setting
 (M2).
 
-A trusted run uses the host backend unless a `:backend` option says otherwise.
-An untrusted run is never allowed to fall back to the host silently. The
-container backend and the policy that selects it land in M1.5-02; until then an
-untrusted run fails closed with an explicit error.
+A trusted run with no image uses the host backend. A trusted run with an image
+uses the container backend, and an untrusted run always uses the container
+backend (with the operator's default image when the pipeline names none). The
+selection is `TinyCI.Execution.Policy`; an untrusted run never falls back to the
+host. No runtime, or no image for an untrusted run, is an explicit error. See
+[isolation.md](isolation.md).
 
 ## The backend contract
 
@@ -68,7 +70,9 @@ process group inside a container.
 ```
 
 A shell command is passed to `sh -c`; an argv runs literally. This is the same
-semantics shell steps and sandbox launchers had before the seam.
+semantics shell steps and sandbox launchers had before the seam. (The container
+backend quotes argv elements and runs them through the image's `sh`; no host
+shell is involved.)
 
 `TinyCI.Execution.SessionSpec` says where:
 
@@ -86,7 +90,7 @@ semantics shell steps and sandbox launchers had before the seam.
 - `:workspace` is the project root. A step's own `working_dir` stays on its
   command, so a container backend can map it under the mounted workspace.
 - `:image`, `:network`, and `:limits` are ignored by the Local backend and
-  consumed by the Container backend (M1.5-02/03).
+  consumed by the Container backend.
 
 `TinyCI.Execution.with_session/3` opens the session, yields it, and closes it in
 an `after` path, so a normal return, a raise, and an exit all release it.
@@ -115,10 +119,16 @@ Durations, timestamps, and run ids are naturally different and are normalized;
 everything a user could observe — statuses, output, event order, event fields —
 must match.
 
+## Isolation
+
+The container backend, `TinyCI.Execution.Policy`, `--isolate`, and the refusal of
+repository module code in untrusted runs are in place; see
+[isolation.md](isolation.md). A stage's `network: false` applies to its container
+session; the Local backend ignores it.
+
 ## What is still missing
 
-- **M1.5-02:** the container backend, the trust policy, `--isolate`, and the
-  refusal of repository module code in untrusted runs.
-- **M1.5-03:** `image:` and reproducible environments.
+- **M1.5-03:** the `image:` directive and reproducible pipeline/stage images.
+  The backend already consumes `SessionSpec.image`.
 - **M1.5-04:** registering open sessions and OS pids with the run so cancellation
-  can close them.
+  can close them and a startup sweep can remove leaked containers.

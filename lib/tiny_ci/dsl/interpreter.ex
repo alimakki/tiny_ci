@@ -43,6 +43,12 @@ defmodule TinyCI.DSL.Interpreter do
   @doc """
   Reads, validates, and interprets a pipeline file.
 
+  ## Options
+
+    * `:load_actions` — validate module actions by loading them (default `true`).
+      Pass `false` for an untrusted run so validation never loads repository
+      code.
+
   ## Parameters
 
     * `path` — absolute or relative path to a `.exs` pipeline file
@@ -52,10 +58,10 @@ defmodule TinyCI.DSL.Interpreter do
     * `{:ok, %TinyCI.PipelineSpec{}}` on success
     * `{:error, reason}` on failure
   """
-  @spec interpret_file(String.t()) :: {:ok, PipelineSpec.t()} | {:error, term()}
-  def interpret_file(path) do
+  @spec interpret_file(String.t(), keyword()) :: {:ok, PipelineSpec.t()} | {:error, term()}
+  def interpret_file(path, opts \\ []) do
     case File.read(path) do
-      {:ok, content} -> interpret_string(content, path)
+      {:ok, content} -> interpret_string(content, path, opts)
       {:error, :enoent} -> {:error, :file_not_found}
       {:error, reason} -> {:error, reason}
     end
@@ -73,13 +79,14 @@ defmodule TinyCI.DSL.Interpreter do
     * `{:ok, %TinyCI.PipelineSpec{}}` on success
     * `{:error, reason}` on failure
   """
-  @spec interpret_string(String.t(), String.t()) :: {:ok, PipelineSpec.t()} | {:error, term()}
-  def interpret_string(content, path) do
+  @spec interpret_string(String.t(), String.t(), keyword()) ::
+          {:ok, PipelineSpec.t()} | {:error, term()}
+  def interpret_string(content, path, opts \\ []) do
     with {:ok, ast} <- parse(content, path),
          :ok <- Validator.validate(ast),
          spec = build_spec(ast, path),
          :ok <- TinyCI.DAG.validate(spec.stages),
-         :ok <- TinyCI.Action.validate_spec(spec) do
+         :ok <- TinyCI.Action.validate_spec(spec, opts) do
       {:ok, spec}
     else
       {:error, {:parse_error, _} = e} -> {:error, e}
@@ -245,6 +252,7 @@ defmodule TinyCI.DSL.Interpreter do
       allow_failure: Keyword.get(opts, :allow_failure, false),
       when_condition: condition(opts),
       working_dir: Keyword.get(opts, :working_dir),
+      network: Keyword.get(opts, :network, true),
       env: stage_env,
       steps: steps
     }

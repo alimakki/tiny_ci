@@ -7,10 +7,10 @@ defmodule TinyCI.Execution.Backend do
   rendering belongs to the event sinks and masking to the run's dispatcher (see
   `TinyCI.Execution` and `docs/execution-model.md`).
 
-  The contract is session-shaped so the container backend (M1.5-02) can share
-  state across the steps of a stage without changing callers. `open/1` returns an
-  opaque session; `exec/3` runs one command in it; `close/1` is idempotent and is
-  always called from an `after` path.
+  The contract is session-shaped so the container backend can share state across
+  the steps of a stage without changing callers. `open/1` returns an opaque
+  session; `exec/3` runs one command in it; `close/1` is idempotent and is always
+  called from an `after` path.
 
   `exec/3` owns the deadline. On `:timeout` the backend must already have killed
   the command's whole process tree (Local: the shell's descendants; Container: the

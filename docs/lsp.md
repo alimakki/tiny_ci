@@ -93,7 +93,7 @@ editor ──completion/hover──▶ TinyCI.LSP.Server
 | at file scope                            | `name`, `env`, `stage`, `on_success`, `on_failure`                     |
 | inside `stage do … end`                  | `step`, `env`                                                          |
 | inside `step` / hook `do … end`          | `set`                                                                  |
-| in a `stage` option list                 | `mode:`, `needs:`, `when:`, `working_dir:`, `matrix:`, `max_parallel:`, `allow_failure:` |
+| in a `stage` option list                 | `mode:`, `needs:`, `when:`, `working_dir:`, `matrix:`, `max_parallel:`, `allow_failure:`, `network:` |
 | in a `step` option list                  | `cmd:`, `module:`, `env:`, `timeout:`, `when:`, `retry:`, `cache:`, … |
 | in a hook option list                    | `cmd:`, `module:`, `env:`, `timeout:`                                  |
 | inside a `when:` value                   | `branch()`, `env(...)`, `file_changed?(...)`                           |

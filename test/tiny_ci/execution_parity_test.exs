@@ -111,7 +111,7 @@ defmodule TinyCI.ExecutionParityTest do
       stage = %Stage{name: :build, mode: :serial, steps: [%Step{name: :one, cmd: "true"}]}
       opts = @silent ++ [extra_sinks: [{TinyCI.TestSink, pid: self()}]]
 
-      assert {:error, {:execution_unavailable, {:isolation_unavailable, :untrusted}}, []} =
+      assert {:error, {:execution_unavailable, :no_default_image}, []} =
                Executor.run_pipeline([stage], %{root: File.cwd!()}, opts)
 
       assert_receive {:event, %PipelineStarted{}}

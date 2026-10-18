@@ -109,9 +109,9 @@ defmodule TinyCI.ExecutionTest do
                Execution.resolve_backend(%{trust: :trusted})
     end
 
-    test "resolve_backend/2 refuses an untrusted run with no backend" do
-      assert {:error, {:isolation_unavailable, :untrusted}} =
-               Execution.resolve_backend(%{trust: :untrusted})
+    test "resolve_backend/2 refuses an untrusted run with no image" do
+      assert {:error, :no_default_image} =
+               Execution.resolve_backend(%{trust: :untrusted}, default_image: nil)
     end
 
     test "resolve_backend/2 honours an explicit backend" do
@@ -132,9 +132,9 @@ defmodule TinyCI.ExecutionTest do
       assert Execution.backend(ctx) == TinyCI.Execution.Backend.Local
     end
 
-    test "ensure_backend!/2 raises for an untrusted context with no backend" do
-      assert_raise Execution.Error, ~r/refusing to run an untrusted pipeline/, fn ->
-        Execution.ensure_backend!(%{trust: :untrusted})
+    test "ensure_backend!/2 raises for an untrusted context with no image" do
+      assert_raise Execution.Error, ~r/untrusted run needs a container image/, fn ->
+        Execution.ensure_backend!(%{trust: :untrusted}, default_image: nil)
       end
     end
 
@@ -151,8 +151,10 @@ defmodule TinyCI.ExecutionTest do
       assert Execution.backend(%{trust: :trusted}) == Local
     end
 
-    test "backend/2 raises for an untrusted context with no backend" do
-      assert_raise Execution.Error, fn -> Execution.backend(%{trust: :untrusted}) end
+    test "backend/2 raises for an untrusted context with no image" do
+      assert_raise Execution.Error, fn ->
+        Execution.backend(%{trust: :untrusted}, default_image: nil)
+      end
     end
 
     test "backend/2 re-validates a stored Local backend for an untrusted context" do

@@ -10,6 +10,10 @@ This matters because *the BEAM is not a security boundary*. A module compiled
 into a dependency can call NIFs, `System.cmd/3`, or open sockets with the full
 authority of the runner. Isolation has to come from the operating system.
 
+This page covers module actions in a **trusted** run. An **untrusted** run does
+not run non-builtin module actions at all; its shell steps and hooks run in
+containers. See [isolation.md](isolation.md) for that second layer.
+
 ## Drivers
 
 Every module step is dispatched through a `TinyCI.Executor.Driver`:

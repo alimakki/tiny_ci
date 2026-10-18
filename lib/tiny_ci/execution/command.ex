@@ -8,8 +8,10 @@ defmodule TinyCI.Execution.Command do
   and an optional deadline.
 
   A shell command is only used by the Local and Container backends; a shell in the
-  container image is required for the latter (see M1.5-02). argv commands are what
-  the sandbox backends use to launch `bwrap` / `sandbox-exec`.
+  container image is required for the latter (see `docs/isolation.md`). argv
+  commands are what the sandbox backends use to launch `bwrap` / `sandbox-exec`;
+  the container backend also accepts them and runs them with literal argument
+  quoting through `sh -c`.
   """
 
   @typedoc "A shell string or a literal executable plus arguments."

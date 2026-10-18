@@ -156,6 +156,15 @@ defmodule TinyCI.DSL.Spec do
       type: "boolean",
       summary: "When true, the stage may fail without failing the pipeline.",
       example: "allow_failure: true"
+    },
+    %Entry{
+      name: :network,
+      kind: :option,
+      contexts: [:stage],
+      type: "boolean",
+      summary:
+        "Whether a containerised stage may use the network. Defaults to true; ignored by the host backend.",
+      example: "network: false"
     }
   ]
 

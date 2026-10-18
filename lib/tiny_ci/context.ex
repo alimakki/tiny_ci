@@ -365,6 +365,12 @@ defmodule TinyCI.Context do
   defp git(root, args, opts \\ []) do
     cmd_opts = [cd: root, stderr_to_stdout: true, env: Keyword.get(opts, :git_env, [])]
 
+    # Repository config can name programs for fsmonitor/diff; context gathering
+    # must not execute repository-controlled code on the host.
+    args =
+      ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "diff.external="] ++
+        args
+
     case System.cmd("git", args, cmd_opts) do
       {output, 0} -> {:ok, String.trim(output)}
       _ -> :error

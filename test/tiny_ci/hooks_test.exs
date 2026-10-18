@@ -84,6 +84,56 @@ defmodule TinyCI.HooksTest do
     end
 
     @tag :tmp_dir
+    test "a hook session uses the run's resolved image", %{tmp_dir: tmp_dir} do
+      context =
+        Map.merge(@base_context, %{
+          root: tmp_dir,
+          run_id: "run_hook_image",
+          execution_image: "alpine",
+          execution_backend: TinyCI.ExecutionFixtures.SpecBackend
+        })
+
+      hooks = %{on_success: [%Hook{name: :notify, cmd: "true"}]}
+
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        assert :ok = Hooks.run_hooks(hooks, :on_success, context)
+      end)
+
+      assert File.read!(Path.join(tmp_dir, "session_specs.log")) =~ "alpine|true|"
+    end
+
+    @tag :tmp_dir
+    test "two shell hooks share one session", %{tmp_dir: tmp_dir} do
+      context =
+        Map.merge(@base_context, %{
+          root: tmp_dir,
+          run_id: "run_hooks",
+          execution_backend: RecordingBackend
+        })
+
+      hooks = %{
+        on_success: [
+          %Hook{name: :first, cmd: "true"},
+          %Hook{name: :second, cmd: "true"}
+        ]
+      }
+
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        assert :ok = Hooks.run_hooks(hooks, :on_success, context)
+      end)
+
+      lines =
+        tmp_dir
+        |> Path.join("execution.log")
+        |> File.read!()
+        |> String.split("\n", trim: true)
+
+      assert Enum.count(lines, &String.starts_with?(&1, "open ")) == 1
+      assert Enum.count(lines, &String.starts_with?(&1, "exec ")) == 2
+      assert Enum.count(lines, &(&1 == "close")) == 1
+    end
+
+    @tag :tmp_dir
     test "an untrusted context never runs a shell hook on the host", %{tmp_dir: tmp_dir} do
       marker = Path.join(tmp_dir, "hook_marker")
       context = Map.merge(@base_context, %{root: tmp_dir, trust: :untrusted})
@@ -99,7 +149,7 @@ defmodule TinyCI.HooksTest do
           assert stderr =~ "Hook: unsafe"
         end)
 
-      assert log =~ "refusing to run an untrusted pipeline"
+      assert log =~ "an untrusted run needs a container image"
       refute File.exists?(marker)
     end
 

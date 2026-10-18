@@ -35,6 +35,20 @@ defmodule TinyCI.DSL.ConditionEvalTest do
       ast = quote do: env("TINY_CI_COND_MISSING")
       assert ConditionEval.eval(ast, @ctx) == nil
     end
+
+    test "an untrusted run does not read the host environment as a fallback" do
+      name = "TINY_CI_CONDITION_HOST_ONLY_#{System.unique_integer([:positive])}"
+      System.put_env(name, "leaked")
+      on_exit(fn -> System.delete_env(name) end)
+
+      ast = quote do: env(unquote(name))
+
+      assert ConditionEval.eval(ast, %{trust: :trusted, env: %{}}) == "leaked"
+      assert ConditionEval.eval(ast, %{trust: :untrusted, env: %{}}) == nil
+
+      assert ConditionEval.eval(ast, %{trust: :untrusted, env: %{name => "declared"}}) ==
+               "declared"
+    end
   end
 
   describe "file_changed?/1" do

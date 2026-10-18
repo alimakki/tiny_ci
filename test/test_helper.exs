@@ -7,6 +7,31 @@ backends = [
 
 exclude = for {tag, backend} <- backends, not backend.available?(), do: tag
 
+# The container backend suite needs a usable Docker/Podman runtime. When there is
+# none, exclude it (the same fail-loudly pattern as the OS sandbox suites).
+exclude =
+  if TinyCI.Execution.Backend.Container.available?() do
+    exclude
+  else
+    IO.puts(
+      :stderr,
+      "warning: no container runtime; excluding :container tests " <>
+        "(install Docker or Podman to run the isolation suite)"
+    )
+
+    [:container | exclude]
+  end
+
+# The rootless-Podman smoke test is separate from the :container suite because it
+# switches the configured runtime.
+podman? =
+  case System.find_executable("podman") do
+    nil -> false
+    podman -> match?({_output, 0}, System.cmd(podman, ["version"], stderr_to_stdout: true))
+  end
+
+exclude = if podman?, do: exclude, else: [:podman | exclude]
+
 # The escript integration suite builds ./tiny_ci and runs it in a fixture
 # directory with no mix.exs. It is opt-in (it is slow, and only the dogfood build
 # and M1-03 exercise it): set TINY_CI_ESCRIPT=1 to run it.

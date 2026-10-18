@@ -18,6 +18,8 @@ defmodule TinyCI.Action.Audit do
 
     * `:root_app` — the root project's application name (treated as first-party)
     * `:lock_path` — override the lockfile location (defaults to `<root>/mix.lock`)
+    * `:load` — load referenced modules before inspecting them (default `true`);
+      pass `false` for an untrusted run so auditing cannot load repository code
   """
   @spec analyze(PipelineSpec.t(), String.t(), keyword()) ::
           {:ok, [Resolver.entry()]} | {:error, term()}
@@ -25,7 +27,7 @@ defmodule TinyCI.Action.Audit do
     lock_path = Keyword.get(opts, :lock_path, Path.join(root, "mix.lock"))
 
     with {:ok, locks} <- Lockfile.read(lock_path) do
-      refs = spec |> Resolver.references() |> build_refs()
+      refs = spec |> Resolver.references() |> build_refs(opts)
       entries = Resolver.resolve(refs, locks, root_app: opts[:root_app])
       {:ok, Enum.sort_by(entries, &{&1.app || :"", inspect(&1.module)})}
     end
@@ -42,7 +44,7 @@ defmodule TinyCI.Action.Audit do
     lock_path = Keyword.get(opts, :lock_path, Path.join(root, "mix.lock"))
 
     with {:ok, locks} <- Lockfile.read(lock_path) do
-      refs = spec |> Resolver.references() |> build_refs()
+      refs = spec |> Resolver.references() |> build_refs(opts)
       Resolver.verify(refs, locks, root_app: opts[:root_app])
     end
   end
@@ -50,11 +52,17 @@ defmodule TinyCI.Action.Audit do
   @doc """
   Builds resolution references for a list of modules by looking up each module's
   owning OTP application and its loaded version.
+
+  Pass `load: false` to inspect only already-loaded modules; a module that is not
+  loaded reports no application and no version rather than being loaded on the
+  host.
   """
-  @spec build_refs([module()]) :: [Resolver.ref()]
-  def build_refs(modules) do
+  @spec build_refs([module()], keyword()) :: [Resolver.ref()]
+  def build_refs(modules, opts \\ []) do
+    load? = Keyword.get(opts, :load, true)
+
     Enum.map(modules, fn module ->
-      Code.ensure_loaded(module)
+      if load?, do: Code.ensure_loaded(module)
       app = app_for(module)
       %{module: module, app: app, version: version_for(app)}
     end)

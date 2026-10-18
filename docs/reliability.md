@@ -28,10 +28,11 @@ described in [execution-model.md](execution-model.md).
 
 These are follow-ups, not guarantees provided by this hardening pass:
 
-- **Whole-run isolation:** shell commands execute on the host. Dependencies can
-  run code while compiling/loading; action metadata still executes before OS
-  confinement. Sandbox reads are broadly allowed. Do not execute untrusted PRs
-  or action packages without isolating the entire runner externally.
+- **Whole-run isolation:** an untrusted run (`--isolate`, or the server default)
+  executes shell steps and hooks in containers and refuses repository module
+  code; see [isolation.md](isolation.md). A trusted local run still executes shell
+  commands on the host, and dependencies can run code while compiling/loading.
+  Do not execute untrusted PRs or action packages in trusted mode.
 - **Process ownership:** breakpoint abort remains cooperative. A callback task's
   termination does not kill arbitrary independently spawned BEAM or OS processes.
   Shell/backend timeout cleanup takes a process-tree snapshot, not a cgroup lease.

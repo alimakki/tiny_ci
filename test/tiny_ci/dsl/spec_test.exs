@@ -39,7 +39,16 @@ defmodule TinyCI.DSL.SpecTest do
   describe "options/1 and option_keys/1" do
     test "stage options match the documented set" do
       assert Spec.option_keys(:stage) |> Enum.sort() ==
-               [:allow_failure, :matrix, :max_parallel, :mode, :needs, :when, :working_dir]
+               [
+                 :allow_failure,
+                 :matrix,
+                 :max_parallel,
+                 :mode,
+                 :needs,
+                 :network,
+                 :when,
+                 :working_dir
+               ]
     end
 
     test "step options match the documented set" do

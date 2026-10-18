@@ -72,8 +72,32 @@ defmodule TinyCI.Hooks do
   def run_hooks(hooks, event, context) when is_map(hooks) do
     hooks_list = Map.get(hooks, event, [])
     ctx = Map.put(context, :pipeline_result, event)
-    Enum.each(hooks_list, &run_hook_emitting(&1, ctx))
+
+    if Enum.any?(hooks_list, &shell_hook?/1) do
+      try do
+        Execution.with_session(
+          Execution.session_spec(ctx),
+          fn session ->
+            ctx = Map.put(ctx, :execution_session, session)
+            Enum.each(hooks_list, &run_hook_emitting(&1, ctx))
+          end,
+          backend: Execution.backend(ctx)
+        )
+      rescue
+        e in Execution.Error ->
+          # No permitted session (e.g. an untrusted run with no isolation
+          # backend): each hook still reports its own failure through the normal
+          # hook events, so the run's stream stays complete.
+          Logger.error("Hook session unavailable: " <> Exception.message(e))
+          Enum.each(hooks_list, &run_hook_emitting(&1, ctx))
+      end
+    else
+      Enum.each(hooks_list, &run_hook_emitting(&1, ctx))
+    end
   end
+
+  defp shell_hook?(%Hook{cmd: cmd}), do: not is_nil(cmd)
+  defp shell_hook?(_hook), do: false
 
   defp run_hook_emitting(%Hook{name: name} = hook, ctx) do
     emit(ctx, %HookStarted{run_id: run_id(ctx), timestamp: now(), hook: name})
@@ -139,12 +163,7 @@ defmodule TinyCI.Hooks do
       timeout: actual_timeout
     }
 
-    outcome =
-      Execution.with_session(
-        Execution.session_spec(context),
-        fn session -> Execution.exec(session, command, fn _line -> :ok end) end,
-        backend: Execution.backend(context)
-      )
+    outcome = execute_hook_command(context, command)
 
     case outcome do
       {:passed, _output} ->
@@ -190,12 +209,36 @@ defmodule TinyCI.Hooks do
     end
   end
 
+  defp execute_hook_command(context, command) do
+    case Map.get(context, :execution_session) do
+      %TinyCI.Execution.Session{} = session -> exec_in(session, command)
+      nil -> exec_in_new_session(context, command)
+    end
+  end
+
+  defp exec_in(session, command), do: Execution.exec(session, command, fn _line -> :ok end)
+
+  defp exec_in_new_session(context, command) do
+    Execution.with_session(
+      Execution.session_spec(context),
+      fn session -> exec_in(session, command) end,
+      backend: Execution.backend(context)
+    )
+  end
+
   defp invoke_module_hook(module, block, context) do
-    if TinyCI.Sandbox.Trust.trusted?(module, Driver.opts(context)) do
-      config = Value.resolve(if(block, do: block.(), else: []), Map.get(context, :store, %{}))
-      apply(module, :run, [config, context])
-    else
-      {:error, {:untrusted_hook, module}}
+    class = TinyCI.Sandbox.Trust.classify(module, load: false)
+
+    cond do
+      Execution.trust(context) == :untrusted and class != :builtin ->
+        {:error, {:untrusted_hook, module}}
+
+      TinyCI.Sandbox.Trust.trusted?(module, Driver.opts(context)) ->
+        config = Value.resolve(if(block, do: block.(), else: []), Map.get(context, :store, %{}))
+        apply(module, :run, [config, context])
+
+      true ->
+        {:error, {:untrusted_hook, module}}
     end
   end
 

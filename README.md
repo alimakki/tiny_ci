@@ -124,6 +124,24 @@ mix tiny_ci.run [pipeline] [options]     # or: tiny_ci run [pipeline] [options]
 | `--break-timeout MS` | | Auto-resolve a breakpoint after `MS`; required when no terminal can answer |
 | `--break-timeout-action ACT` | | `abort` (default) or `continue` on timeout |
 | `--debug-serial` | | Force serial scheduling while breakpoints are armed |
+| `--isolate` | | Run untrusted: containers for every stage and no repository module steps. See [Isolation](docs/isolation.md) |
+
+`--isolate` requires a container runtime and an operator `default_image`:
+
+```elixir
+config :tiny_ci,
+  default_image: "alpine:3.22",
+  container_runtime: :auto,          # :auto | :docker | :podman
+  container_limits: %{memory: "2g", cpus: 2, pids: 512}
+```
+
+A trusted local run is unchanged and keeps running on the host. In an untrusted
+run, shell steps and shell hooks execute in containers and non-builtin module
+steps/hooks are refused; module code never runs in the container. With
+`mix tiny_ci.run --isolate`, Mix has already loaded the project, so use the
+`tiny_ci` escript when the checkout itself is hostile. See
+[docs/isolation.md](docs/isolation.md) for the threat model and explicit
+non-goals.
 
 An unknown flag is a usage error (exit code `2` from `tiny_ci run`; a `Mix.Error` from
 `mix tiny_ci.run`) rather than being silently ignored. Both `tiny_ci run` and `mix tiny_ci.run`
@@ -380,6 +398,7 @@ end
 | `:matrix` | `[]` | Keyword list of variable names to value lists; stage runs once per combination |
 | `:max_parallel` | online schedulers | Maximum number of matrix runs executing at the same time |
 | `:allow_failure` | `false` | When `true`, a failing matrix combination does not fail the parent stage |
+| `:network` | `true` | Whether a containerised stage may use the network. Ignored by the host backend |
 
 ### Stage Dependencies (DAG)
 
@@ -1053,7 +1072,7 @@ Module hooks also receive `:pipeline_result` (`:on_success` or `:on_failure`).
 Pipeline files are validated against an allowlist of permitted constructs before execution:
 
 - `name`, `env`, `secret`, `stage`, `step`, `on_success`, `on_failure`, `set`
-- Stage options: `:mode`, `:needs`, `:when`, `:working_dir`, `:matrix`, `:max_parallel`, `:allow_failure`
+- Stage options: `:mode`, `:needs`, `:when`, `:working_dir`, `:matrix`, `:max_parallel`, `:allow_failure`, `:network`
 - Step options: `:cmd`, `:module`, `:timeout`, `:env`, `:allow_failure`, `:when`, `:working_dir`, `:retry`, `:retry_delay`, `:cache`, `:artifact`
 - Condition expressions: `branch()`, `env/1`, `file_changed?/1`, `==`, `!=`, `and`, `or`, `not`, `if/else`
 

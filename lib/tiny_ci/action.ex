@@ -123,22 +123,24 @@ defmodule TinyCI.Action do
   end
 
   @doc """
-  Verifies that every `module:` target in a spec satisfies its contract.
+  Verifies every module step and hook in a spec is loadable and implements its
+  callback.
 
-  Step modules must implement `TinyCI.Action` (export `execute/2`); hook modules
-  must export `run/2`. Failures are collected so the loader can report them all
-  at once, **before** any step runs.
-
-  ## Returns
-
-    * `:ok` — all module targets are valid
-    * `{:error, {:invalid_action, [String.t()]}}` — one message per invalid target
+  Pass `load_actions: false` in an untrusted run: that skips every module load
+  (including `Code.ensure_loaded?/1`) so repository code can never run while a
+  pipeline is being validated. The run-level pre-flight then refuses every
+  non-builtin module action.
   """
-  @spec validate_spec(PipelineSpec.t()) :: :ok | {:error, {:invalid_action, [String.t()]}}
-  def validate_spec(%PipelineSpec{stages: stages, hooks: hooks}) do
-    case stage_errors(stages) ++ hook_errors(hooks) do
-      [] -> :ok
-      errors -> {:error, {:invalid_action, errors}}
+  @spec validate_spec(PipelineSpec.t(), keyword()) ::
+          :ok | {:error, {:invalid_action, [String.t()]}}
+  def validate_spec(%PipelineSpec{} = spec, opts \\ []) do
+    if Keyword.get(opts, :load_actions, true) do
+      case stage_errors(spec.stages) ++ hook_errors(spec.hooks) do
+        [] -> :ok
+        errors -> {:error, {:invalid_action, errors}}
+      end
+    else
+      :ok
     end
   end
 

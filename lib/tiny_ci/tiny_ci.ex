@@ -71,6 +71,7 @@ defmodule TinyCI.Stage do
           allow_failure: boolean(),
           when_condition: Macro.t() | (map() -> boolean()) | nil,
           working_dir: String.t() | nil,
+          network: boolean(),
           env: %{optional(String.t()) => String.t()}
         }
 
@@ -83,5 +84,6 @@ defmodule TinyCI.Stage do
             allow_failure: false,
             when_condition: nil,
             working_dir: nil,
+            network: true,
             env: %{}
 end
