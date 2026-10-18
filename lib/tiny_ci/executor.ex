@@ -47,9 +47,10 @@ defmodule TinyCI.Executor do
   so nothing that escapes those boundaries can take it down either.
   """
 
-  alias TinyCI.{Artifacts, Cache, Control, DAG, Matrix, MatrixRunResult, Output}
+  alias TinyCI.{Artifacts, Cache, Control, DAG, Execution, Matrix, MatrixRunResult, Output}
   alias TinyCI.{Hooks, Redaction, Runs, Secrets, StageResult, StepResult}
   alias TinyCI.Events
+  alias TinyCI.Execution.Command
   alias TinyCI.Executor.{Callback, Crash, Driver, Env}
   alias TinyCI.DSL.Value
 
@@ -109,6 +110,9 @@ defmodule TinyCI.Executor do
       * `:secrets`  — resolved secrets as a `%{name => value}` map (see
         `TinyCI.Secrets`). They become the lowest env layer of every step and
         hook, and their values are masked in step output, results, and events.
+      * `:backend`  — override the execution backend (default: Local for a
+        trusted run). This is a programmatic policy/test seam; an untrusted run
+        with no explicit backend fails closed.
 
   ## Returns
 
@@ -116,6 +120,9 @@ defmodule TinyCI.Executor do
     * `{:error, {:stage_failed, stage_name, reason}, [%StageResult{}]}` — on first failure
     * `{:error, {:aborted, stage_name}, [%StageResult{}]}` — when execution control
       aborted the run
+    * `{:error, {:execution_unavailable, reason}, []}` — when no execution
+      backend is permitted (for example an untrusted run before the container
+      backend lands in M1.5-02)
 
   Raises `ArgumentError` when `control:` carries an unparsable `--break` spec —
   a caller error, and one `mix tiny_ci.run` rejects before the run begins.
@@ -123,7 +130,7 @@ defmodule TinyCI.Executor do
   def run_pipeline(stages, context \\ nil, opts \\ [])
 
   def run_pipeline(stages, context, opts) when is_list(stages) do
-    ctx = context || TinyCI.Context.build()
+    ctx = (context || TinyCI.Context.build()) |> Execution.put_default_trust()
     ctx = Map.put_new(ctx, :store, %{})
     ctx = Map.put(ctx, :no_cache, opts[:no_cache] || false)
     ctx = put_artifacts_dir(ctx, opts)
@@ -152,30 +159,48 @@ defmodule TinyCI.Executor do
         root: Map.get(ctx, :root)
       })
 
-      {duration_ms, result} =
-        measure(fn ->
-          if DAG.dag_mode?(filtered) do
-            run_pipeline_dag(filtered, ctx, output_mode)
-          else
-            run_pipeline_sequential(filtered, ctx, output_mode)
-          end
-        end)
+      case Execution.resolve_backend(ctx, opts) do
+        {:ok, backend} ->
+          ctx = Map.put(ctx, :execution_backend, backend)
+          run_stages_and_hooks(filtered, ctx, output_mode, opts)
 
-      run_pipeline_hooks(opts[:hooks], result, ctx)
+        {:error, reason} ->
+          Events.emit(ctx, %PipelineCompleted{
+            run_id: ctx.run_id,
+            timestamp: now(),
+            status: :failed,
+            duration_ms: 0
+          })
 
-      Events.emit(ctx, %PipelineCompleted{
-        run_id: ctx.run_id,
-        timestamp: now(),
-        status: pipeline_status(result),
-        duration_ms: duration_ms
-      })
-
-      result
+          {:error, {:execution_unavailable, reason}, []}
+      end
     after
       # Stopped before the dispatcher so any control event it still emits is sunk.
       stop_control(control)
       Events.Dispatcher.stop(dispatcher)
     end
+  end
+
+  defp run_stages_and_hooks(stages, ctx, output_mode, opts) do
+    {duration_ms, result} =
+      measure(fn ->
+        if DAG.dag_mode?(stages) do
+          run_pipeline_dag(stages, ctx, output_mode)
+        else
+          run_pipeline_sequential(stages, ctx, output_mode)
+        end
+      end)
+
+    run_pipeline_hooks(opts[:hooks], result, ctx)
+
+    Events.emit(ctx, %PipelineCompleted{
+      run_id: ctx.run_id,
+      timestamp: now(),
+      status: pipeline_status(result),
+      duration_ms: duration_ms
+    })
+
+    result
   end
 
   # Starts the run's control plane only when the caller armed breakpoints, and puts
@@ -491,11 +516,15 @@ defmodule TinyCI.Executor do
     * `stage`       — a `%TinyCI.Stage{}` struct
     * `context`     — a map of context data passed to conditions and steps
     * `output_mode` — `:streaming` or `:buffered` (default `:buffered`)
-    * `opts`        — sink options; `console: false` attaches no console sink
+    * `opts`        — sink options; `console: false` attaches no console sink,
+      and `backend: Module` overrides the execution backend
 
   ## Returns
 
     * `%StageResult{}` with status `:passed`, `:failed`, or `:skipped`
+
+  Raises `TinyCI.Execution.Error` when the context is untrusted and no execution
+  backend is permitted.
   """
   def execute(
         %TinyCI.Stage{} = stage,
@@ -503,7 +532,11 @@ defmodule TinyCI.Executor do
         output_mode \\ :buffered,
         opts \\ []
       ) do
-    context = Map.put_new(context, :store, %{})
+    context =
+      context
+      |> Map.put_new(:store, %{})
+      |> Execution.put_default_trust()
+      |> Execution.ensure_backend!(opts)
 
     case Map.get(context, :events) do
       nil ->
@@ -614,7 +647,25 @@ defmodule TinyCI.Executor do
     %{result | store_delta: Map.merge(overrides, result.store_delta)}
   end
 
-  defp review_stage(stage, ctx, output_mode) do
+  # A regular stage owns one session for its whole life: the body, the `after:`
+  # boundary, and any retry. A retry must keep the toolchain and `$HOME` state the
+  # session exists to preserve; matrix stages instead open one session per
+  # combination inside `execute_matrix_stage/3`.
+  defp review_stage(%{matrix: []} = stage, ctx, output_mode) do
+    Execution.with_session(
+      Execution.session_spec(ctx),
+      fn session ->
+        review_stage_body(stage, Map.put(ctx, :execution_session, session), output_mode)
+      end,
+      backend: Execution.backend(ctx)
+    )
+  end
+
+  defp review_stage(%{matrix: _matrix} = stage, ctx, output_mode) do
+    review_stage_body(stage, ctx, output_mode)
+  end
+
+  defp review_stage_body(stage, ctx, output_mode) do
     result = run_stage_body(stage, ctx, output_mode)
     # The `after:` payload must show the store the stage produced, not the one it
     # started with, so the operator inspects (and edits) what actually happened.
@@ -634,7 +685,7 @@ defmodule TinyCI.Executor do
         %{result | status: :aborted}
 
       :retry ->
-        retried = review_stage(stage, ctx, output_mode)
+        retried = review_stage_body(stage, ctx, output_mode)
         %{retried | store_delta: Map.merge(result.store_delta, retried.store_delta)}
     end
   end
@@ -798,28 +849,36 @@ defmodule TinyCI.Executor do
 
     stage_for_run = %{stage | matrix: [], max_parallel: nil}
 
-    {duration_ms, {step_results, updated_store}} =
-      measure(fn -> execute_by_mode(stage_for_run, ctx, :buffered) end)
+    Execution.with_session(
+      Execution.session_spec(context),
+      fn session ->
+        ctx = Map.put(ctx, :execution_session, session)
 
-    status = rollup_status(step_results)
+        {duration_ms, {step_results, updated_store}} =
+          measure(fn -> execute_by_mode(stage_for_run, ctx, :buffered) end)
 
-    Events.emit(context, %MatrixRunCompleted{
-      run_id: run_id(context),
-      timestamp: now(),
-      stage: stage.name,
-      combination: combination,
-      status: status,
-      duration_ms: duration_ms
-    })
+        status = rollup_status(step_results)
 
-    %MatrixRunResult{
-      combination: combination,
-      status: status,
-      step_results: step_results,
-      duration_ms: duration_ms,
-      store: updated_store,
-      store_delta: Map.merge(combo_store, step_writes(step_results))
-    }
+        Events.emit(context, %MatrixRunCompleted{
+          run_id: run_id(context),
+          timestamp: now(),
+          stage: stage.name,
+          combination: combination,
+          status: status,
+          duration_ms: duration_ms
+        })
+
+        %MatrixRunResult{
+          combination: combination,
+          status: status,
+          step_results: step_results,
+          duration_ms: duration_ms,
+          store: updated_store,
+          store_delta: Map.merge(combo_store, step_writes(step_results))
+        }
+      end,
+      backend: Execution.backend(context)
+    )
   end
 
   defp step_writes(results) do
@@ -1278,54 +1337,12 @@ defmodule TinyCI.Executor do
     crashed_step(ctx, step, Crash.format(:exit, reason, []))
   end
 
-  defp run_step(
-         %{cmd: cmd, name: name, env: env, timeout: timeout, allow_failure: allow_failure},
-         ctx,
-         output_mode,
-         _prefix,
-         working_dir
-       )
+  defp run_step(%{cmd: cmd} = step, ctx, _output_mode, _prefix, working_dir)
        when cmd != nil do
     if working_dir != nil and not File.dir?(working_dir) do
-      %StepResult{
-        name: name,
-        status: :failed,
-        output: "Working directory not found: #{working_dir}",
-        duration_ms: 0,
-        allowed_failure: allow_failure
-      }
+      missing_working_dir_result(step, working_dir)
     else
-      merged_env = Env.resolve(ctx, env)
-      live? = live_line_events?(ctx)
-
-      output_opts = [
-        mode: output_mode,
-        env: merged_env,
-        working_dir: working_dir,
-        redact: secret_values(ctx)
-      ]
-
-      output_opts =
-        if live?, do: Keyword.put(output_opts, :on_line, emit_line(ctx, name)), else: output_opts
-
-      {duration_ms, {status, output}} =
-        measure(fn ->
-          run_cmd_with_timeout(cmd, output_opts, timeout)
-        end)
-
-      masked = mask(ctx, output)
-      # A secret containing a newline can only be masked against the whole
-      # output, not line by line, so in that case the line events are emitted
-      # from the masked result rather than live.
-      if live?, do: :ok, else: emit_step_output(ctx, name, masked)
-
-      %StepResult{
-        name: name,
-        status: status,
-        output: masked,
-        duration_ms: duration_ms,
-        allowed_failure: allow_failure and status == :failed
-      }
+      run_shell_step(step, ctx, working_dir)
     end
   end
 
@@ -1369,6 +1386,51 @@ defmodule TinyCI.Executor do
     }
   end
 
+  defp missing_working_dir_result(%{name: name, allow_failure: allow_failure}, working_dir) do
+    %StepResult{
+      name: name,
+      status: :failed,
+      output: "Working directory not found: #{working_dir}",
+      duration_ms: 0,
+      allowed_failure: allow_failure
+    }
+  end
+
+  defp run_shell_step(
+         %{cmd: cmd, name: name, env: env, timeout: timeout, allow_failure: allow_failure},
+         ctx,
+         working_dir
+       ) do
+    session = Map.fetch!(ctx, :execution_session)
+
+    command = %Command{
+      run: {:shell, cmd},
+      env: Env.resolve(ctx, env),
+      working_dir: working_dir,
+      timeout: timeout
+    }
+
+    live? = live_line_events?(ctx)
+    on_line = if live?, do: emit_line(ctx, name), else: fn _line -> :ok end
+
+    {duration_ms, {status, output}} =
+      measure(fn -> run_command(session, command, on_line) end)
+
+    masked = mask(ctx, output)
+    # A secret containing a newline can only be masked against the whole
+    # output, not line by line, so in that case the line events are emitted
+    # from the masked result rather than live.
+    if live?, do: :ok, else: emit_step_output(ctx, name, masked)
+
+    %StepResult{
+      name: name,
+      status: status,
+      output: masked,
+      duration_ms: duration_ms,
+      allowed_failure: allow_failure and status == :failed
+    }
+  end
+
   # Live per-line emission is only safe when no secret can span a line break:
   # `Output` (and the dispatcher) redact one line at a time, so a multi-line
   # secret would survive as fragments. With one present, emit from the whole
@@ -1378,7 +1440,7 @@ defmodule TinyCI.Executor do
   end
 
   # Results are masked at creation so `Results.to_json/2` and the reporter never
-  # see a secret; Output and the dispatcher mask the console and events.
+  # see a secret; the dispatcher masks the console and events.
   defp mask(ctx, output), do: Redaction.redact(output, secret_values(ctx))
 
   defp secret_values(ctx), do: Map.get(ctx, :secret_values, [])
@@ -1400,16 +1462,19 @@ defmodule TinyCI.Executor do
   defp driver_error_message(reason) when is_binary(reason), do: reason
   defp driver_error_message(reason), do: inspect(reason)
 
-  defp run_cmd_with_timeout(cmd, output_opts, nil) do
-    Output.run_cmd(cmd, output_opts)
-  end
+  # The backend owns the deadline and has already killed the command's process
+  # tree when it reports :timeout. A timed-out step is a failed step, and its
+  # output is the existing human-readable deadline message.
+  defp run_command(session, %Command{timeout: timeout} = command, on_line) do
+    case Execution.exec(session, command, on_line) do
+      {:timeout, _output} when is_integer(timeout) ->
+        {:failed, "Step timed out after #{timeout}ms"}
 
-  defp run_cmd_with_timeout(cmd, output_opts, timeout) when is_integer(timeout) do
-    # Output.run_cmd enforces the timeout at the OS-process level, killing the
-    # command's entire subtree so nothing is left orphaned when it elapses.
-    case Output.run_cmd(cmd, Keyword.put(output_opts, :timeout, timeout)) do
-      {:timeout, _output} -> {:failed, "Step timed out after #{timeout}ms"}
-      result -> result
+      {:timeout, output} ->
+        {:failed, output}
+
+      outcome ->
+        outcome
     end
   end
 

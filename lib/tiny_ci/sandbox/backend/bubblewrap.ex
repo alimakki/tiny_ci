@@ -18,6 +18,8 @@ defmodule TinyCI.Sandbox.Backend.Bubblewrap do
 
   @behaviour TinyCI.Sandbox.Backend
 
+  alias TinyCI.Execution
+  alias TinyCI.Execution.{Backend.Local, Command, SessionSpec}
   alias TinyCI.Sandbox.Backend.Runtime
   alias TinyCI.Sandbox.{Policy, Profile}
 
@@ -43,15 +45,30 @@ defmodule TinyCI.Sandbox.Backend.Bubblewrap do
           env_args(policy, scratch, request_path, response_path) ++
           ["--"] ++ Runtime.elixir_command()
 
-      case TinyCI.Output.run_executable("bwrap", args, mode: :buffered, timeout: opts[:timeout]) do
-        {_out, 0} -> Runtime.read_response(response_path)
-        {_out, :timeout} -> {:error, :timeout}
-        {out, code} -> {:error, {:sandbox_exit, code, String.trim(String.slice(out, 0, 800))}}
+      case run_bwrap(args, opts) do
+        {:passed, _out} -> Runtime.read_response(response_path)
+        {:timeout, _out} -> {:error, :timeout}
+        {:failed, out} -> {:error, {:sandbox_exit, :failed, trim(out)}}
       end
     after
       File.rm_rf(scratch)
     end
   end
+
+  # Sandboxed actions only run in trusted local runs, so this bypasses backend
+  # policy and goes straight to the host backend. The bwrap argv is already
+  # assembled, so the command is literal.
+  defp run_bwrap(args, opts) do
+    command = %Command{run: {:argv, "bwrap", args}, timeout: opts[:timeout]}
+
+    Execution.with_session(
+      %SessionSpec{workspace: File.cwd!(), run_id: opts[:run_id]},
+      fn session -> Execution.exec(session, command, fn _line -> :ok end) end,
+      backend: Local
+    )
+  end
+
+  defp trim(output), do: String.trim(String.slice(output, 0, 800))
 
   # bwrap expresses env inline: clear everything, then set each granted var.
   # LANG keeps the confined BEAM on a UTF-8 locale (a cleared env has none).

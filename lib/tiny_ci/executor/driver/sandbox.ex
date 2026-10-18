@@ -49,7 +49,8 @@ defmodule TinyCI.Executor.Driver.Sandbox do
     }
 
     with {:ok, encoded} <- Protocol.encode_request(request),
-         {:ok, response} <- backend.run(encoded, policy, opts),
+         {:ok, response} <-
+           backend.run(encoded, policy, Keyword.put(opts, :run_id, Map.get(context, :run_id))),
          {:ok, delta} <- Protocol.decode_response(response) do
       {:ok, Redaction.redact(delta, secrets)}
     else

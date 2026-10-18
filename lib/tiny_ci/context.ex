@@ -23,9 +23,12 @@ defmodule TinyCI.Context do
 
   `Context` is a struct, but `build/1` preserves arbitrary override keys (and
   the executor adds dynamic keys such as `:run_id`, `:artifacts_dir`, `:events`,
-  and `:stage_env` as a run progresses). These extra keys are readable via map
-  access (`ctx.pr_number`) while the value remains a `%TinyCI.Context{}` struct.
-  The guaranteed fields above are the stable, documented surface.
+  `:stage_env`, `:trust`, `:execution_backend`, and `:execution_session` as a run
+  progresses). These extra keys are readable via map access (`ctx.pr_number`)
+  while the value remains a `%TinyCI.Context{}` struct. `:trust` is the
+  invocation's `:trusted | :untrusted` level (see `docs/execution-model.md`); the
+  execution keys are internal handles set by `TinyCI.Execution`. The guaranteed
+  fields above are the stable, documented surface.
 
   ## Where git runs
 

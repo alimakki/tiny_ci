@@ -32,9 +32,10 @@ defmodule TinyCI.Hooks do
   alias TinyCI.DSL.Value
   alias TinyCI.Events
   alias TinyCI.Events.{HookCompleted, HookStarted}
+  alias TinyCI.Execution
+  alias TinyCI.Execution.Command
   alias TinyCI.Redaction
   alias TinyCI.Hook
-  alias TinyCI.Output
 
   require Logger
 
@@ -127,19 +128,30 @@ defmodule TinyCI.Hooks do
     actual_timeout = timeout || @default_timeout
     redact = Map.get(context, :secret_values, [])
 
-    # Buffered so hook output does not interleave with pipeline output, and with a
-    # timeout that kills the hook's process subtree rather than orphaning it.
-    case Output.run_cmd(cmd,
-           mode: :buffered,
-           env: merged_env,
-           timeout: actual_timeout,
-           working_dir: Map.get(context, :root),
-           redact: redact
-         ) do
+    # Buffered (no live lines) so hook output does not interleave with pipeline
+    # output, and with a timeout that kills the hook's process subtree rather
+    # than orphaning it. The backend reports raw output; the dispatcher masks
+    # event streams, so the stderr line below masks explicitly.
+    command = %Command{
+      run: {:shell, cmd},
+      env: merged_env,
+      working_dir: Map.get(context, :root),
+      timeout: actual_timeout
+    }
+
+    outcome =
+      Execution.with_session(
+        Execution.session_spec(context),
+        fn session -> Execution.exec(session, command, fn _line -> :ok end) end,
+        backend: Execution.backend(context)
+      )
+
+    case outcome do
       {:passed, _output} ->
         :passed
 
       {:failed, output} ->
+        output = Redaction.redact(output, redact)
         IO.puts(:stderr, "Hook #{name} failed: #{String.trim(output)}")
         :failed
 

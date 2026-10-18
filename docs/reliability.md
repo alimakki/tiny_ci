@@ -2,6 +2,8 @@
 
 TinyCI currently targets trusted local repositories and dependencies. It is not
 yet a safe multi-tenant runner or a complete unattended deployment control plane.
+The seam that decides *where* a step runs — and the trust rules around it — is
+described in [execution-model.md](execution-model.md).
 
 ## Execution contracts
 

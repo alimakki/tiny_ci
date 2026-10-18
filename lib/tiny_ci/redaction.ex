@@ -2,10 +2,11 @@ defmodule TinyCI.Redaction do
   @moduledoc """
   Masks secret values in any term before it reaches a console, a sink, or a result.
 
-  This is the single masking function in tiny_ci. Three choke points call it:
-  `TinyCI.Output` (each printed line and the returned output), the executor
-  (a `StepResult.output` before it is built), and `TinyCI.Events.Dispatcher`
-  (every event, once, before any sink). `TinyCI.Control.Session` and the sandbox
+  This is the single masking function in tiny_ci. The execution seam reports raw
+  lines and output, so masking happens above it: the executor masks every
+  `StepResult.output` before it is built, `TinyCI.Hooks` masks failed shell-hook
+  output before printing it to stderr, and `TinyCI.Events.Dispatcher` masks every
+  event once before any sink sees it. `TinyCI.Control.Session` and the sandbox
   driver use it too, so a breakpoint payload or a sandboxed action's result
   cannot leak a granted secret.
 

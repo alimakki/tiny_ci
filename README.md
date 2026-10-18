@@ -6,6 +6,8 @@ A local CI runner for Elixir projects. Define your build pipeline as code — st
 
 Use trusted repositories and dependencies. The DSL parser and action sandbox are
 not a complete boundary for untrusted builds; see [Reliability and trust](docs/reliability.md).
+Where a step runs — the execution seam, trust levels, and sessions — is described
+in [The execution model](docs/execution-model.md).
 
 ## Quick Start
 
@@ -1223,6 +1225,13 @@ tiny_ci/
         value.ex                     #   keeps action config inert until runtime
         diagnostic.ex                #   a load-time problem with a source span
         flow_analysis.ex             #   semantic diagnostics over a resolved pipeline
+      execution.ex                   # Where a step runs: trust, backends, sessions
+      execution/
+        command.ex                   #   what to run (shell or argv)
+        session_spec.ex              #   where a session runs
+        session.ex                   #   an open session
+        backend.ex                   #   execution backend behaviour
+        backend/local.ex             #     the host backend
       executor.ex                    # Stage/step execution engine
       executor/
         env.ex                       #   resolves pipeline + stage + step env
@@ -1289,6 +1298,11 @@ tiny_ci/
       sandbox_fixtures.ex            #     sandboxed action modules
       test_sink.ex                   #     forwards events to the test process
     tiny_ci/
+      execution_test.exs             #   execution seam, trust, backend contract
+      execution_parity_test.exs      #   local/server parity (invariant I1)
+      executor_execution_test.exs    #   sessions, trust gating, retry lifetime
+      execution/
+        backend/local_test.exs       #   host backend: lines, argv, timeouts
       executor_test.exs              #   engine behaviour
       executor_recording_test.exs    #   run recording from the executor
       execution_regression_test.exs  #   regressions found by review

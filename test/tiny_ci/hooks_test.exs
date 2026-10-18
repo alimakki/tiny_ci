@@ -2,6 +2,7 @@ defmodule TinyCI.HooksTest do
   use ExUnit.Case, async: true
 
   alias TinyCI.{Hook, Hooks}
+  alias TinyCI.ExecutionFixtures.RecordingBackend
 
   @base_context %{branch: "main", commit: "abc123", store: %{}}
 
@@ -56,6 +57,50 @@ defmodule TinyCI.HooksTest do
     test "runs a passing shell command hook" do
       hooks = %{on_success: [%Hook{name: :pass, cmd: "true"}]}
       assert :ok = Hooks.run_hooks(hooks, :on_success, @base_context)
+    end
+
+    @tag :tmp_dir
+    test "runs through the execution seam and closes the session", %{tmp_dir: tmp_dir} do
+      context =
+        Map.merge(@base_context, %{
+          root: tmp_dir,
+          run_id: "run_hook",
+          execution_backend: RecordingBackend
+        })
+
+      hooks = %{on_success: [%Hook{name: :seam, cmd: "true"}]}
+
+      ExUnit.CaptureIO.capture_io(:stderr, fn ->
+        assert :ok = Hooks.run_hooks(hooks, :on_success, context)
+      end)
+
+      lines =
+        tmp_dir
+        |> Path.join("execution.log")
+        |> File.read!()
+        |> String.split("\n", trim: true)
+
+      assert lines == ["open #{tmp_dir} run_hook", "exec {:shell, \"true\"}", "close"]
+    end
+
+    @tag :tmp_dir
+    test "an untrusted context never runs a shell hook on the host", %{tmp_dir: tmp_dir} do
+      marker = Path.join(tmp_dir, "hook_marker")
+      context = Map.merge(@base_context, %{root: tmp_dir, trust: :untrusted})
+      hooks = %{on_success: [%Hook{name: :unsafe, cmd: "touch #{marker}"}]}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          stderr =
+            ExUnit.CaptureIO.capture_io(:stderr, fn ->
+              assert :ok = Hooks.run_hooks(hooks, :on_success, context)
+            end)
+
+          assert stderr =~ "Hook: unsafe"
+        end)
+
+      assert log =~ "refusing to run an untrusted pipeline"
+      refute File.exists?(marker)
     end
 
     test "logs failure but continues when shell hook fails" do

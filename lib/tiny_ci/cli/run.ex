@@ -677,6 +677,9 @@ defmodule TinyCI.CLI.Run do
   defp failure_message({:aborted, stage}),
     do: "Pipeline aborted by execution control at stage :#{stage}."
 
+  defp failure_message({:execution_unavailable, _reason}),
+    do: "Pipeline cannot run: no execution backend is available for this environment."
+
   defp failure_message(_reason), do: "Pipeline failed."
 
   defp list_artifacts(root, artifacts_dir_override) do
