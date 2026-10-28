@@ -44,11 +44,12 @@ agreed.
 | [M1.5-01](M1.5-01-execution-seam.md) | Execution seam: one core, local and hosted | M | M1-02, M1.5-07 | ✅ |
 | [M1.5-02](M1.5-02-shell-isolation.md) | Untrusted-run isolation: trust policy + container sessions | L–XL | M1.5-01 | ✅ |
 | [M1.5-03](M1.5-03-reproducible-environments.md) | `image:` / reproducible environments | M | M1.5-01, M1.5-02 | ✅ |
-| [M1.5-04](M1.5-04-run-process-tree.md) | Run process tree + hard cancellation | M–L | M0-06, M1.5-01 | ⬜ |
-| [M1.5-05](M1.5-05-readiness-scheduler.md) | Readiness-based DAG + global concurrency cap | M | M1.5-04 | ⬜ |
+| [M1.5-04](M1.5-04-run-process-tree.md) | Run process tree + hard cancellation | M–L | M0-06, M1.5-01, M1.5-09 | ⬜ |
+| [M1.5-05](M1.5-05-readiness-scheduler.md) | Readiness-based DAG + global concurrency cap | M | M1.5-04, M1.5-09 | ⬜ |
 | [M1.5-06](M1.5-06-run-store-port.md) | `RunStore` port shared by local and hosted | M | M0-06 | ⬜ |
 | [M1.5-07](M1.5-07-unify-output-pipeline.md) | One rendering path (retire the legacy listener) | M | — | ✅ |
 | [M1.5-08](M1.5-08-housekeeping.md) | Dead fields, stale types and docs | S | — | ✅ |
+| [M1.5-09](M1.5-09-split-executor.md) | Split `TinyCI.Executor` into a facade + focused modules | M | — | ⬜ |
 
 ## M2 — The server
 

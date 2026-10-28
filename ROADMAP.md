@@ -119,6 +119,7 @@ cancellation and one complete event stream. Overview, decisions, and the full ga
 | [M1.5-06](.tasks/M1.5-06-run-store-port.md) | A `RunStore` port so local and hosted share the run model |
 | [M1.5-07](.tasks/M1.5-07-unify-output-pipeline.md) | One rendering path (retire the legacy listener) |
 | [M1.5-08](.tasks/M1.5-08-housekeeping.md) | Dead fields, stale types and docs |
+| [M1.5-09](.tasks/M1.5-09-split-executor.md) | Split the executor into a facade and focused modules (before -04/-05) |
 
 **Gate:** a pipeline with `image:` runs the same toolchain locally and via the server entrypoint
 through the same `TinyCI.Runner`; an untrusted run executes no repository-controlled code on the
