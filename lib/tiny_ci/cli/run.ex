@@ -109,8 +109,10 @@ defmodule TinyCI.CLI.Run do
         predictable stepping. Off by default: pausing one branch must not freeze the
         independent ones.
       * `--isolate` — run untrusted: every stage executes in a container and
-        repository module steps/hooks are refused. Requires a container runtime and
-        an operator `config :tiny_ci, :default_image`.#{mix_note}
+        repository module steps/hooks are refused. Requires a container runtime
+        and an image: a pipeline/stage `image:` (or an `environment:` mapped via
+        `config :tiny_ci, :environments`), or the operator `default_image` when
+        the pipeline declares none.#{mix_note}
 
     ## Execution control
 
@@ -332,7 +334,7 @@ defmodule TinyCI.CLI.Run do
     attest_path = if opts[:dry_run], do: nil, else: opts[:attest]
 
     {run_opts, agent} =
-      base_run_opts(opts, control, secrets, trust)
+      base_run_opts(opts, control, secrets, trust, spec)
       |> maybe_collector(attest_path)
 
     result = run_with_filter(spec, opts[:dry_run], filter, output_format, run_opts)
@@ -340,7 +342,7 @@ defmodule TinyCI.CLI.Run do
     finalize_attest(agent, attest_path, spec, opts, root, result, trust)
   end
 
-  defp base_run_opts(opts, control, secrets, trust) do
+  defp base_run_opts(opts, control, secrets, trust, spec) do
     [
       no_cache: opts[:no_cache] || false,
       base: opts[:base],
@@ -349,7 +351,9 @@ defmodule TinyCI.CLI.Run do
       record: opts[:record],
       control: control,
       secrets: secrets,
-      trust: trust
+      trust: trust,
+      pipeline_image: spec.image,
+      pipeline_environment: spec.environment
     ]
   end
 
@@ -642,8 +646,21 @@ defmodule TinyCI.CLI.Run do
   defp dry_run_pipeline(%TinyCI.PipelineSpec{stages: stages} = spec, filter, run_opts) do
     context = build_context(spec, run_opts)
     filtered = filter_stages(stages, filter)
-    DryRun.print_plan(filtered, context)
+    plan = dry_run_plan(filtered, context, spec)
+    DryRun.print_plan(filtered, context, plan)
     :ok
+  end
+
+  # A dry run must not pull an image or require a container runtime, and it
+  # exits 0 even when an environment is unresolved (the same contract as a
+  # missing secret under --dry-run).
+  defp dry_run_plan(stages, context, spec) do
+    TinyCI.Environment.plan(stages, context,
+      pipeline_image: spec.image,
+      pipeline_environment: spec.environment,
+      pull: false,
+      check_availability: false
+    )
   end
 
   defp execute_pipeline(

@@ -8,7 +8,16 @@ defmodule TinyCI.LSP.CompletionTest do
 
   describe "items/1 by context" do
     test "top level offers the file-scope directives" do
-      assert labels(:top_level) == ["env", "name", "on_failure", "on_success", "secret", "stage"]
+      assert labels(:top_level) == [
+               "env",
+               "environment",
+               "image",
+               "name",
+               "on_failure",
+               "on_success",
+               "secret",
+               "stage"
+             ]
     end
 
     test "stage body offers step and env" do
@@ -25,7 +34,18 @@ defmodule TinyCI.LSP.CompletionTest do
 
     test "stage options offer the stage option keys" do
       assert labels(:stage_opts) ==
-               ["allow_failure", "matrix", "max_parallel", "mode", "needs", "when", "working_dir"]
+               [
+                 "allow_failure",
+                 "environment",
+                 "image",
+                 "matrix",
+                 "max_parallel",
+                 "mode",
+                 "needs",
+                 "network",
+                 "when",
+                 "working_dir"
+               ]
     end
 
     test "step options offer the step option keys" do

@@ -19,7 +19,7 @@ defmodule TinyCI.DSL.Spec do
 
   ## Contexts
 
-    * `:top_level` — file scope (`name`, `env`, `secret`, `stage`, `on_success`, `on_failure`)
+    * `:top_level` — file scope (`name`, `env`, `secret`, `image`, `environment`, `stage`, `on_success`, `on_failure`)
     * `:stage` — inside a `stage do … end` block (`step`, `env`) and stage options
     * `:step` — inside a `step do … end` block (`set`) and step options
     * `:hook` — inside an `on_success`/`on_failure do … end` block and hook options
@@ -53,6 +53,24 @@ defmodule TinyCI.DSL.Spec do
       summary:
         "Declares a secret the pipeline needs. Resolved at run start; its value is masked everywhere.",
       example: "secret :SLACK_WEBHOOK_URL"
+    },
+    %Entry{
+      name: :image,
+      kind: :directive,
+      contexts: [:top_level],
+      type: "OCI image reference",
+      summary:
+        "Runs the pipeline's shell steps in this container image, on a laptop and a server alike.",
+      example: ~s|image "elixir:1.18"|
+    },
+    %Entry{
+      name: :environment,
+      kind: :directive,
+      contexts: [:top_level],
+      type: "atom or string",
+      summary:
+        "Names a host toolchain from the repository's mise configuration instead of a container image.",
+      example: ~s|environment "ci"|
     },
     %Entry{
       name: :stage,
@@ -165,6 +183,24 @@ defmodule TinyCI.DSL.Spec do
       summary:
         "Whether a containerised stage may use the network. Defaults to true; ignored by the host backend.",
       example: "network: false"
+    },
+    %Entry{
+      name: :image,
+      kind: :option,
+      contexts: [:stage],
+      type: "OCI image reference",
+      summary:
+        "Runs this stage's shell steps in the given image, replacing the pipeline-level environment.",
+      example: ~s|image: "elixir:1.18"|
+    },
+    %Entry{
+      name: :environment,
+      kind: :option,
+      contexts: [:stage],
+      type: "atom or string",
+      summary:
+        "Runs this stage's shell steps on the named host toolchain, replacing the pipeline-level environment.",
+      example: ~s|environment: "ci"|
     }
   ]
 

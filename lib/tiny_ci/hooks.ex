@@ -146,9 +146,13 @@ defmodule TinyCI.Hooks do
     store = Map.get(context, :store, %{})
     hook_env = build_hook_env(context)
     resolved_env = resolve_env(env, store)
-    # `Env.base/1` layers the run's secrets under the pipeline env, exactly as
-    # a step sees them.
-    merged_env = context |> Env.base() |> Map.merge(hook_env) |> Map.merge(resolved_env)
+    # The run's toolchain environment sits under secrets/pipeline/stage/step,
+    # exactly as a step sees it. `TINY_CI_*` values are hook-scoped and win.
+    merged_env =
+      context
+      |> Env.process(resolved_env)
+      |> Map.merge(hook_env)
+
     actual_timeout = timeout || @default_timeout
     redact = Map.get(context, :secret_values, [])
 

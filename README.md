@@ -126,13 +126,17 @@ mix tiny_ci.run [pipeline] [options]     # or: tiny_ci run [pipeline] [options]
 | `--debug-serial` | | Force serial scheduling while breakpoints are armed |
 | `--isolate` | | Run untrusted: containers for every stage and no repository module steps. See [Isolation](docs/isolation.md) |
 
-`--isolate` requires a container runtime and an operator `default_image`:
+`--isolate` requires a container runtime. An untrusted run needs an image: the
+pipeline's `image:` (or a stage's), or an operator `default_image` when the
+pipeline declares none. An `environment:` is mapped to an image through
+`:environments`.
 
 ```elixir
 config :tiny_ci,
   default_image: "alpine:3.22",
   container_runtime: :auto,          # :auto | :docker | :podman
-  container_limits: %{memory: "2g", cpus: 2, pids: 512}
+  container_limits: %{memory: "2g", cpus: 2, pids: 512},
+  environments: %{"ci" => "ghcr.io/acme/ci:24.04"}
 ```
 
 A trusted local run is unchanged and keeps running on the host. In an untrusted
@@ -354,9 +358,10 @@ matching single or double quotes around the value are removed (no escapes, no
 interpolation); a line without `=` is an error. The file must be gitignored — tiny_ci
 warns when it is not.
 
-**Precedence.** Secrets are the *lowest* environment layer: a pipeline-, stage-, or
-step-level `env` of the same name wins, so the pipeline's explicit configuration is
-always authoritative.
+**Precedence.** The layers are
+`toolchain < secrets < pipeline < stage < step`: a resolved `environment:` is the
+lowest, and a pipeline-, stage-, or step-level `env` of the same name wins over a
+secret, so the pipeline's explicit configuration is always authoritative.
 
 **Masking guarantees.** A secret value appearing in step output is replaced by `***`
 in the streaming and buffered console, in `StepResult.output` and therefore
@@ -379,6 +384,76 @@ nothing downstream needs to know about secrets.
   arbitrary Logger handlers, module-load callbacks, and independently spawned
   processes can bypass capture. Do not treat redaction as a security boundary.
 
+### Environments (`image` / `environment`)
+
+A pipeline can declare the toolchain its steps run in, so a laptop and a server
+share it instead of inheriting whatever is installed on the host. Declare it
+once for the pipeline, or per stage:
+
+```elixir
+# Run every stage in this image.
+image "elixir:1.18"
+
+stage :test do
+  step :unit, cmd: "mix test"
+end
+
+# …or use the repository's host toolchain for one stage instead.
+stage :docs, environment: "ci" do
+  step :build, cmd: "mix docs"
+end
+```
+
+| Form | Meaning |
+|---|---|
+| `image "oci-ref"` | Pipeline-level container image |
+| `image: "oci-ref"` | Stage-level container image |
+| `environment "name"` / `environment :name` | Pipeline-level host toolchain |
+| `environment: "name"` / `environment: :name` | Stage-level host toolchain |
+
+**Precedence.** The first of these wins for each stage:
+
+1. the stage's `image:`
+2. the stage's `environment:`
+3. the pipeline's `image`
+4. the pipeline's `environment`
+5. nothing declared
+
+A stage declaration is a **whole replacement**, not a merge. A stage with
+`environment: "ci"` under a pipeline `image:` runs on the host toolchain, not
+inside the pipeline image. `image` and `environment` are mutually exclusive at
+the same scope (pipeline or stage); the validator rejects both.
+
+**Defaults.** With nothing declared a **trusted** run stays on the host, even if
+the operator configured `default_image`. An **untrusted** run uses the
+operator's `default_image` (or an engine-supplied image) and fails if there is
+none; an untrusted `environment:` is translated through
+`config :tiny_ci, :environments` and never falls back to `default_image`.
+
+**Image identity.** A tag can move, so the runner inspects the image and runs
+by its local image ID; a reference with `@sha256:` keeps the declared digest as
+its identity. The cache key includes the resolved digest, so `latest` drift
+cannot reuse a stale build. `--dry-run` prints the resolved image/digest per
+stage without pulling anything.
+
+**`environment:` and mise.** A named environment is resolved from the
+repository's mise configuration:
+
+- `environment "default"` uses `.mise.toml`, `mise.toml`, or `.tool-versions`;
+- `environment "ci"` requires `mise.ci.toml` or `.mise.ci.toml`;
+- missing config, a missing tool, or a missing `mise` install is an explicit
+  error, never a silent host fallback.
+
+The resolved variables layer as
+`toolchain < secrets < pipeline < stage < step`, and both the tool list's
+fingerprint and a hash of those variables join the cache key. mise `[env]`
+values are configuration, not a secret store. `environment:` trusts the local
+mise install; containers are the strong isolation guarantee.
+
+**Module steps stay in the VM.** `image:` applies to shell steps and shell
+hooks. A `module:` step in an imaged stage still runs in the runner's VM (its
+cache key and environment are unchanged); it is not executed inside the image.
+
 ### Stages
 
 By default, stages run sequentially. When any stage declares `needs:`, the pipeline switches to DAG execution: independent stages run in parallel while dependent stages wait for their prerequisites.
@@ -399,6 +474,8 @@ end
 | `:max_parallel` | online schedulers | Maximum number of matrix runs executing at the same time |
 | `:allow_failure` | `false` | When `true`, a failing matrix combination does not fail the parent stage |
 | `:network` | `true` | Whether a containerised stage may use the network. Ignored by the host backend |
+| `:image` | (pipeline) | OCI image for this stage's shell steps. Replaces the pipeline image **and** the pipeline environment |
+| `:environment` | (pipeline) | Host toolchain name for this stage. Replaces the pipeline environment **and** the pipeline image |
 
 ### Stage Dependencies (DAG)
 
@@ -1071,8 +1148,8 @@ Module hooks also receive `:pipeline_result` (`:on_success` or `:on_failure`).
 
 Pipeline files are validated against an allowlist of permitted constructs before execution:
 
-- `name`, `env`, `secret`, `stage`, `step`, `on_success`, `on_failure`, `set`
-- Stage options: `:mode`, `:needs`, `:when`, `:working_dir`, `:matrix`, `:max_parallel`, `:allow_failure`, `:network`
+- `name`, `env`, `secret`, `image`, `environment`, `stage`, `step`, `on_success`, `on_failure`, `set`
+- Stage options: `:mode`, `:needs`, `:when`, `:working_dir`, `:matrix`, `:max_parallel`, `:allow_failure`, `:network`, `:image`, `:environment`
 - Step options: `:cmd`, `:module`, `:timeout`, `:env`, `:allow_failure`, `:when`, `:working_dir`, `:retry`, `:retry_delay`, `:cache`, `:artifact`
 - Condition expressions: `branch()`, `env/1`, `file_changed?/1`, `==`, `!=`, `and`, `or`, `not`, `if/else`
 

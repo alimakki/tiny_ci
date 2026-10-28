@@ -72,6 +72,8 @@ defmodule TinyCI.Stage do
           when_condition: Macro.t() | (map() -> boolean()) | nil,
           working_dir: String.t() | nil,
           network: boolean(),
+          image: String.t() | nil,
+          environment: String.t() | nil,
           env: %{optional(String.t()) => String.t()}
         }
 
@@ -85,5 +87,27 @@ defmodule TinyCI.Stage do
             when_condition: nil,
             working_dir: nil,
             network: true,
+            image: nil,
+            environment: nil,
             env: %{}
+
+  @doc """
+  Returns `true` when the stage's `when:` condition excludes it.
+
+  Shared by the executor, the dry-run plan, and the environment plan so a stage
+  that will not run is never resolved or pulled.
+
+  ## Examples
+
+      iex> TinyCI.Stage.skipped?(%TinyCI.Stage{name: :test}, %{})
+      false
+  """
+  @spec skipped?(TinyCI.Stage.t(), map()) :: boolean()
+  def skipped?(%{when_condition: nil}, _context), do: false
+
+  def skipped?(%{when_condition: f}, context) when is_function(f, 1),
+    do: !f.(context)
+
+  def skipped?(%{when_condition: ast}, context),
+    do: !TinyCI.DSL.ConditionEval.eval(ast, context)
 end

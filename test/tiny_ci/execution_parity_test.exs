@@ -79,6 +79,22 @@ defmodule TinyCI.ExecutionParityTest do
              Enum.map(server_events, &normalize_event/1)
   end
 
+  # An imaged run needs a backend; a purpose-built fake keeps Docker out and
+  # makes the comparison about mode, not about the runtime.
+  defp run_with_image(stages, root) do
+    opts =
+      @silent ++
+        [
+          backend: TinyCI.ExecutionFixtures.SpecBackend,
+          digest: :ref,
+          available?: fn -> true end,
+          extra_sinks: [{TinyCI.TestSink, pid: self()}]
+        ]
+
+    result = Executor.run_pipeline(stages, %{root: root}, opts)
+    {result, drain_events([])}
+  end
+
   describe "local/server parity" do
     test "a passing shell pipeline is identical in both modes" do
       assert_parity([
@@ -102,6 +118,30 @@ defmodule TinyCI.ExecutionParityTest do
         }
       ])
     end
+
+    @tag :tmp_dir
+    test "a pipeline image is identical in both modes", %{tmp_dir: tmp} do
+      stages = [
+        %Stage{
+          name: :build,
+          mode: :serial,
+          image: "alpine:3.22",
+          steps: [%Step{name: :one, cmd: "echo one"}]
+        }
+      ]
+
+      put_mode(:local)
+      {local_result, local_events} = run_with_image(stages, tmp)
+
+      put_mode(:server)
+      {server_result, server_events} = run_with_image(stages, tmp)
+
+      assert normalize_result(local_result) == normalize_result(server_result)
+      assert local_events != []
+
+      assert Enum.map(local_events, &normalize_event/1) ==
+               Enum.map(server_events, &normalize_event/1)
+    end
   end
 
   describe "server mode policy" do
@@ -111,7 +151,7 @@ defmodule TinyCI.ExecutionParityTest do
       stage = %Stage{name: :build, mode: :serial, steps: [%Step{name: :one, cmd: "true"}]}
       opts = @silent ++ [extra_sinks: [{TinyCI.TestSink, pid: self()}]]
 
-      assert {:error, {:execution_unavailable, :no_default_image}, []} =
+      assert {:error, {:execution_unavailable, {:stage, :build, :no_default_image}}, []} =
                Executor.run_pipeline([stage], %{root: File.cwd!()}, opts)
 
       assert_receive {:event, %PipelineStarted{}}

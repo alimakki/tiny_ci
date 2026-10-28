@@ -20,9 +20,14 @@ defmodule TinyCI.DSL.Validator do
   - `name :atom`
   - `env KEY: "value", ...`
   - `secret :NAME` / `secret "NAME"`
+  - `image "oci-ref"` (at most one)
+  - `environment "name"` / `environment :name` (at most one)
   - `stage :name, opts do ... end`
   - `on_success :name, opts` / `on_success :name, opts do ... end`
   - `on_failure :name, opts` / `on_failure :name, opts do ... end`
+
+  `image` and `environment` are mutually exclusive at each scope (pipeline and
+  stage), because an environment is a whole replacement, not a layer.
 
   **Inside a stage block:** `step :name, opts` / `step :name, opts do ... end`
 
@@ -83,7 +88,14 @@ defmodule TinyCI.DSL.Validator do
     expressions = unwrap_block(ast)
 
     duplicate_names(expressions, :name) ++
+      duplicate_directives(expressions, :image, "Only one image directive is allowed") ++
+      duplicate_directives(
+        expressions,
+        :environment,
+        "Only one environment directive is allowed"
+      ) ++
       duplicate_names(expressions, :stage) ++
+      top_level_exclusion(expressions) ++
       Enum.flat_map(expressions, &validate_top_level/1)
   end
 
@@ -125,6 +137,29 @@ defmodule TinyCI.DSL.Validator do
   defp validate_top_level({:secret, meta, _}),
     do: [diag("secret expects a single atom or string name, e.g. `secret :API_TOKEN`", meta)]
 
+  defp validate_top_level({:image, meta, [ref]}) when is_binary(ref),
+    do: validate_image_ref(ref, meta)
+
+  defp validate_top_level({:image, meta, _}),
+    do: [
+      diag(
+        "image expects a single OCI image reference string, e.g. `image \"elixir:1.18\"`",
+        meta
+      )
+    ]
+
+  defp validate_top_level({:environment, meta, [name]})
+       when (is_atom(name) and not is_nil(name)) or is_binary(name),
+       do: validate_environment_name(name, meta)
+
+  defp validate_top_level({:environment, meta, _}),
+    do: [
+      diag(
+        "environment expects a single atom or string name, e.g. `environment \"ci\"`",
+        meta
+      )
+    ]
+
   defp validate_top_level({:defmodule, meta, _}),
     do: [
       diag(
@@ -158,6 +193,13 @@ defmodule TinyCI.DSL.Validator do
   defp validate_stage_opts(opts, meta) do
     with_keyword(opts, meta, fn ->
       unknown_option_diags(opts, :stage, "stage", meta) ++
+        mutual_exclusion_diags(
+          opts,
+          :image,
+          :environment,
+          "Stage :image and :environment are mutually exclusive: an environment replaces the image, it does not layer on it",
+          meta
+        ) ++
         Enum.flat_map(opts, &validate_stage_opt(&1, meta))
     end)
   end
@@ -205,6 +247,29 @@ defmodule TinyCI.DSL.Validator do
 
   defp validate_stage_opt({:network, _}, meta),
     do: [diag("Stage :network must be true or false", meta)]
+
+  defp validate_stage_opt({:image, ref}, meta) when is_binary(ref),
+    do: validate_image_ref(ref, meta)
+
+  defp validate_stage_opt({:image, _}, meta),
+    do: [
+      diag(
+        "Stage :image must be a single OCI image reference string, e.g. image: \"elixir:1.18\"",
+        meta
+      )
+    ]
+
+  defp validate_stage_opt({:environment, name}, meta)
+       when (is_atom(name) and not is_nil(name)) or is_binary(name),
+       do: validate_environment_name(name, meta)
+
+  defp validate_stage_opt({:environment, _}, meta),
+    do: [
+      diag(
+        "Stage :environment must be an atom or string name, e.g. environment: \"ci\"",
+        meta
+      )
+    ]
 
   # Keys outside the allowlist are reported by unknown_option_diags/4.
   defp validate_stage_opt(_opt, _meta), do: []
@@ -605,6 +670,69 @@ defmodule TinyCI.DSL.Validator do
     end)
     |> elem(1)
     |> Enum.reverse()
+  end
+
+  # `image` and `environment` are singletons regardless of their value, unlike
+  # `stage` names where the duplicate is the same name.
+  defp duplicate_directives(expressions, directive, message) do
+    expressions
+    |> Enum.filter(&match?({^directive, _, _}, &1))
+    |> Enum.drop(1)
+    |> Enum.map(fn {_, meta, _} -> diag(message, meta) end)
+  end
+
+  defp top_level_exclusion(expressions) do
+    image = Enum.find(expressions, &match?({:image, _, _}, &1))
+    environment = Enum.find(expressions, &match?({:environment, _, _}, &1))
+
+    if image && environment do
+      [
+        diag(
+          "Only one of image or environment can be declared for a pipeline: " <>
+            "an environment replaces the image, it does not layer on it",
+          meta_of(environment)
+        )
+      ]
+    else
+      []
+    end
+  end
+
+  defp mutual_exclusion_diags(opts, left, right, message, meta) do
+    if Keyword.has_key?(opts, left) and Keyword.has_key?(opts, right),
+      do: [diag(message, meta)],
+      else: []
+  end
+
+  defp validate_image_ref(ref, meta) do
+    case TinyCI.Environment.Image.validate_ref(ref) do
+      :ok ->
+        []
+
+      {:error, _} ->
+        [
+          diag(
+            "image must be a non-empty OCI image reference without whitespace " <>
+              "and must not start with \"-\"",
+            meta
+          )
+        ]
+    end
+  end
+
+  defp validate_environment_name(name, meta) do
+    normalized = if is_atom(name), do: Atom.to_string(name), else: name
+
+    if TinyCI.Environment.valid_name?(normalized) do
+      []
+    else
+      [
+        diag(
+          "environment name must match ^[a-z][a-z0-9._-]{0,63}$, e.g. environment \"ci\"",
+          meta
+        )
+      ]
+    end
   end
 
   # ---------------------------------------------------------------------------

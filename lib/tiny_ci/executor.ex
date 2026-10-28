@@ -47,7 +47,18 @@ defmodule TinyCI.Executor do
   so nothing that escapes those boundaries can take it down either.
   """
 
-  alias TinyCI.{Artifacts, Cache, Control, DAG, Execution, Matrix, MatrixRunResult, Output}
+  alias TinyCI.{
+    Artifacts,
+    Cache,
+    Control,
+    DAG,
+    Environment,
+    Execution,
+    Matrix,
+    MatrixRunResult,
+    Output
+  }
+
   alias TinyCI.{Hooks, Redaction, Runs, Secrets, StageResult, StepResult}
   alias TinyCI.Events
   alias TinyCI.Execution.Command
@@ -114,6 +125,16 @@ defmodule TinyCI.Executor do
       * `:backend`  — override the execution backend (default: Local for a
         trusted run). This is a programmatic policy/test seam; an untrusted run
         with no explicit backend fails closed.
+      * `:pipeline_image` — the pipeline-level `image:` declaration. Stages
+        inherit it unless they declare their own `image:` or `environment:`.
+        Legacy callers may pass `:image` (or set `ctx.image`) instead.
+      * `:pipeline_environment` — the pipeline-level `environment:`
+        declaration, resolved through `mise` for a trusted run and mapped to an
+        image (or refused) for an untrusted one.
+      * `:available?`, `:digest`, `:toolchain`, `:default_image`,
+        `:environments`, `:pull`, `:check_availability` — environment
+        resolution seams and operator configuration. See
+        `TinyCI.Environment.plan/3`.
 
   ## Returns
 
@@ -175,19 +196,91 @@ defmodule TinyCI.Executor do
   end
 
   defp run_with_policy(stages, ctx, output_mode, opts) do
-    case Execution.resolve(ctx, opts) do
-      {:ok, %{backend: backend, image: image}} ->
-        ctx =
-          ctx
-          |> Map.put(:execution_backend, backend)
-          |> Map.put(:execution_image, image)
+    env_opts = environment_opts(ctx, opts)
+    plan = Environment.plan(stages, ctx, env_opts)
 
-        run_stages_and_hooks(stages, ctx, output_mode, opts)
+    ctx =
+      ctx
+      |> Map.put(:environment_plan, plan)
+      |> Map.put(:environment_opts, env_opts)
+
+    case Environment.strict(plan) do
+      {:ok, %{run: run_env}} ->
+        run_stages_and_hooks(stages, put_run_environment(ctx, run_env), output_mode, opts)
 
       {:error, reason} ->
         fail_run(ctx, {:execution_unavailable, reason})
     end
   end
+
+  # The pipeline declaration applies to the hook phase. A shell hook in a
+  # trusted run with no declaration resolves to the host environment, so the
+  # hook's behaviour and environment are unchanged.
+  defp put_run_environment(ctx, nil), do: ctx
+  defp put_run_environment(ctx, env), do: put_execution_env(ctx, env)
+
+  defp put_execution_env(ctx, %Environment{} = env) do
+    ctx
+    |> Map.put(:execution_backend, env.backend)
+    |> Map.put(:execution_image, env.run_ref)
+    |> Map.put(:image, env.run_ref)
+    |> Map.put(:execution_environment, env)
+    |> Map.put(:toolchain_env, env.env)
+  end
+
+  # Everything `TinyCI.Environment.plan/3` needs. Nil values are omitted because
+  # `Environment` falls back to operator configuration for `:default_image` and
+  # `:environments`, and to the real resolver for `:digest`/`:toolchain`.
+  defp environment_opts(ctx, opts) do
+    {pipeline_image, pipeline_environment} = pipeline_declaration(ctx, opts)
+
+    [
+      pipeline_image: pipeline_image,
+      pipeline_environment: pipeline_environment,
+      hooks: opts[:hooks] || %{},
+      backend: opts[:backend],
+      available?: opts[:available?],
+      digest: opts[:digest],
+      toolchain: opts[:toolchain],
+      pull: Keyword.get(opts, :pull, true),
+      check_availability: Keyword.get(opts, :check_availability, true)
+    ]
+    |> put_present(:default_image, opts[:default_image])
+    |> put_present(:environments, opts[:environments])
+  end
+
+  defp put_present(opts, _key, nil), do: opts
+  defp put_present(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # `:pipeline_image`/`:pipeline_environment` are the current options;
+  # `opts[:image]` and `ctx[:image]` are the pre-M1.5-03 spellings and still
+  # name a pipeline image.
+  defp pipeline_declaration(ctx, opts) do
+    image =
+      Keyword.get(opts, :pipeline_image) ||
+        Keyword.get(opts, :image) ||
+        Map.get(ctx, :image)
+
+    environment =
+      normalize_environment(
+        Keyword.get(opts, :pipeline_environment) || Map.get(ctx, :pipeline_environment)
+      )
+
+    case {blank?(image), environment} do
+      {false, _environment} -> {image, nil}
+      {true, nil} -> {nil, nil}
+      {true, environment} -> {nil, environment}
+    end
+  end
+
+  defp blank?(value), do: not (is_binary(value) and value != "")
+
+  defp normalize_environment(nil), do: nil
+
+  defp normalize_environment(environment) when is_atom(environment),
+    do: Atom.to_string(environment)
+
+  defp normalize_environment(environment) when is_binary(environment), do: environment
 
   defp fail_run(ctx, reason) do
     Events.emit(ctx, %PipelineCompleted{
@@ -556,16 +649,18 @@ defmodule TinyCI.Executor do
       |> Map.put_new(:store, %{})
       |> Execution.put_default_trust()
 
-    context =
-      case Preflight.check(context, [stage], %{}) do
-        :ok ->
-          Execution.ensure_backend!(context, opts)
+    case Preflight.check(context, [stage], %{}) do
+      :ok ->
+        :ok
 
-        {:error, reason} ->
-          raise Execution.Error,
-            message: Execution.error_message(reason),
-            reason: reason
-      end
+      {:error, reason} ->
+        raise Execution.Error,
+          message: Execution.error_message(reason),
+          reason: reason
+    end
+
+    {context, plan} = environment_for_execute(context, stage, opts)
+    context = stage_environment!(context, plan, stage)
 
     case Map.get(context, :events) do
       nil ->
@@ -576,6 +671,75 @@ defmodule TinyCI.Executor do
       _pid ->
         do_execute(stage, context, output_mode)
     end
+  end
+
+  # `run_pipeline/3` plans every runnable stage up front and puts the plan on
+  # the context. A standalone `execute/4` plans its single stage here. Using a
+  # stage's entry (rather than re-resolving) is what keeps every session of a
+  # stage on one digest.
+  defp environment_for_execute(context, stage, opts) do
+    env_opts = environment_opts(context, opts)
+
+    case Map.get(context, :environment_plan) do
+      %{} = plan ->
+        {Map.put_new(context, :environment_opts, env_opts), plan}
+
+      nil ->
+        plan = Environment.plan([stage], context, env_opts)
+
+        context =
+          context
+          |> Map.put(:environment_plan, plan)
+          |> Map.put(:environment_opts, env_opts)
+
+        {context, plan}
+    end
+  end
+
+  # A stage that was omitted from the plan was skipped at plan time. It can
+  # still become runnable (a `when:` that reads the store), and then it must
+  # resolve its own declaration — never inherit whatever backend happened to be
+  # on the context, and never fall back to the host.
+  defp stage_environment!(context, plan, stage) do
+    case plan_entry(plan, stage.name) do
+      nil -> context
+      {:ok, env} -> put_execution_env(context, env)
+      {:error, reason} -> raise_stage_environment(stage.name, reason)
+    end
+  end
+
+  defp ensure_stage_environment!(context, stage) do
+    case plan_entry(Map.get(context, :environment_plan), stage.name) do
+      {:ok, env} ->
+        put_execution_env(context, env)
+
+      {:error, reason} ->
+        raise_stage_environment(stage.name, reason)
+
+      nil ->
+        entry =
+          Environment.stage_environment(
+            stage,
+            context,
+            Map.get(context, :environment_opts, [])
+          )
+
+        case entry do
+          {:ok, env} -> put_execution_env(context, env)
+          {:error, reason} -> raise_stage_environment(stage.name, reason)
+        end
+    end
+  end
+
+  defp plan_entry(%{stages: stages}, name), do: Map.get(stages, name)
+  defp plan_entry(_plan, _name), do: nil
+
+  defp raise_stage_environment(name, reason) do
+    tagged = {:stage, name, reason}
+
+    raise Execution.Error,
+      message: Execution.error_message(tagged),
+      reason: tagged
   end
 
   # When `execute/4` is called standalone (no run dispatcher on the context),
@@ -625,7 +789,7 @@ defmodule TinyCI.Executor do
   defp run_stage_or_skip(stage, context, output_mode) do
     context = Map.put(context, :stage_env, stage.env || %{})
 
-    if skip_stage?(stage, context) do
+    if TinyCI.Stage.skipped?(stage, context) do
       Events.emit(context, %StageSkipped{
         run_id: run_id(context),
         timestamp: now(),
@@ -641,6 +805,12 @@ defmodule TinyCI.Executor do
         store: context.store
       }
     else
+      # Resolve here, after the skip check: a stage that is still skipped must
+      # not pull an image or need a runtime. This also covers a stage that was
+      # omitted from the plan because its condition was false and became true
+      # once an earlier stage updated the store.
+      context = ensure_stage_environment!(context, stage)
+
       ctx_with_stage =
         context
         |> Map.put(:stage_env, stage.env || %{})
@@ -933,14 +1103,6 @@ defmodule TinyCI.Executor do
 
   defp matrix_artifacts(ctx, _stage, _combination), do: ctx
 
-  defp skip_stage?(%{when_condition: nil}, _context), do: false
-
-  defp skip_stage?(%{when_condition: f}, context) when is_function(f, 1),
-    do: !f.(context)
-
-  defp skip_stage?(%{when_condition: ast}, context),
-    do: !TinyCI.DSL.ConditionEval.eval(ast, context)
-
   defp resolve_working_dir(nil, root), do: root || File.cwd!()
 
   defp resolve_working_dir(dir, root) do
@@ -1221,17 +1383,17 @@ defmodule TinyCI.Executor do
     root = Map.get(context, :root, File.cwd!())
     key_file = Path.join(root, cache.key)
 
-    inputs = %{
-      command: step.cmd,
-      module: step.module,
-      env: Map.merge(System.get_env(), Env.resolve(context, step.env)),
-      working_dir: working_dir,
-      matrix: Map.get(context, :matrix_combination),
-      paths: cache.paths,
-      runtime:
-        {System.version(), :erlang.system_info(:system_version),
-         :erlang.system_info(:system_architecture)}
-    }
+    inputs =
+      %{
+        command: step.cmd,
+        module: step.module,
+        env: cache_env(context, step),
+        working_dir: working_dir,
+        matrix: Map.get(context, :matrix_combination),
+        paths: cache.paths
+      }
+      |> maybe_put_runtime(context, step)
+      |> maybe_put_environment(context, step)
 
     with false <- no_cache,
          {:ok, key} <- Cache.compute_key(key_file, inputs) do
@@ -1240,6 +1402,52 @@ defmodule TinyCI.Executor do
     else
       _ -> run_step_with_retries(step, context, output_mode, prefix, working_dir)
     end
+  end
+
+  # A shell step that runs in an image never sees the host environment, so its
+  # key must not change when a host variable does. A module step always runs in
+  # the runner's VM, even in an imaged stage, so it keeps the host environment
+  # and the host runtime tuple.
+  defp imaged_shell_step?(_context, %{cmd: nil}), do: false
+
+  defp imaged_shell_step?(context, %{cmd: cmd}) when not is_nil(cmd) do
+    case Map.get(context, :execution_environment) do
+      %Environment{image: image} -> is_binary(image)
+      _ -> false
+    end
+  end
+
+  defp cache_env(context, step) do
+    resolved = Env.resolve(context, step.env)
+
+    if imaged_shell_step?(context, step),
+      do: Env.process(context, resolved),
+      else: Map.merge(System.get_env(), resolved)
+  end
+
+  # The image identity is the runtime for an imaged shell step; keeping the host
+  # tuple would make an unchanged image miss after a runner upgrade.
+  defp maybe_put_runtime(inputs, context, step) do
+    if imaged_shell_step?(context, step),
+      do: inputs,
+      else: Map.put(inputs, :runtime, host_runtime())
+  end
+
+  # Only a shell step can run in the image, so only a shell step inherits the
+  # image/toolchain identity. A nil identity (a plain host run) adds no input,
+  # which keeps existing host cache keys unchanged.
+  defp maybe_put_environment(inputs, context, step) do
+    identity =
+      if is_nil(step.cmd),
+        do: nil,
+        else: Environment.cache_identity(Map.get(context, :execution_environment))
+
+    if identity, do: Map.put(inputs, :execution_environment, identity), else: inputs
+  end
+
+  defp host_runtime do
+    {System.version(), :erlang.system_info(:system_version),
+     :erlang.system_info(:system_architecture)}
   end
 
   defp run_cached(
@@ -1489,7 +1697,7 @@ defmodule TinyCI.Executor do
 
     command = %Command{
       run: {:shell, cmd},
-      env: Env.resolve(ctx, env),
+      env: Env.process(ctx, Env.resolve(ctx, env)),
       working_dir: working_dir,
       timeout: timeout
     }

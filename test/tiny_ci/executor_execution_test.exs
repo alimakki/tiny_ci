@@ -285,7 +285,7 @@ defmodule TinyCI.ExecutorExecutionTest do
       opts = @silent ++ [extra_sinks: [{TinyCI.TestSink, pid: self()}]]
       context = %{root: tmp_dir, trust: :untrusted}
 
-      assert {:error, {:execution_unavailable, :no_default_image}, []} =
+      assert {:error, {:execution_unavailable, {:stage, :build, :no_default_image}}, []} =
                Executor.run_pipeline([stage], context, opts)
 
       assert_receive {:event, %PipelineStarted{}}

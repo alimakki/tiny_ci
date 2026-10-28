@@ -13,6 +13,9 @@ defmodule TinyCI.DSL.Interpreter do
       # optional — defaults to filename stem
       name :my_pipeline
 
+      # optional — run every shell step in a pinned container image
+      image "elixir:1.18"
+
       stage :test, mode: :parallel do
         step :unit, cmd: "mix test"
         step :lint, cmd: "mix credo"
@@ -197,6 +200,10 @@ defmodule TinyCI.DSL.Interpreter do
     secrets =
       Enum.uniq(for {:secret, _, [secret_name]} <- secret_exprs, do: to_string(secret_name))
 
+    {image, rest} = single_directive(rest, :image)
+    {environment, rest} = single_directive(rest, :environment)
+    environment = normalize_environment(environment)
+
     {stages, pipeline_env, hooks} =
       Enum.reduce(rest, {[], %{}, %{on_success: [], on_failure: []}}, fn expr,
                                                                          {stages, env_acc, hooks} ->
@@ -223,9 +230,29 @@ defmodule TinyCI.DSL.Interpreter do
       hooks: hooks,
       root: root,
       env: pipeline_env,
-      secrets: secrets
+      secrets: secrets,
+      image: image,
+      environment: environment
     }
   end
+
+  # The validator guarantees at most one of each; taking the first keeps this
+  # total even when called on a degenerate buffer by the language server.
+  defp single_directive(exprs, directive) do
+    {matches, rest} = Enum.split_with(exprs, &match?({^directive, _, _}, &1))
+
+    value =
+      case matches do
+        [{^directive, _, [value]}] -> value
+        _ -> nil
+      end
+
+    {value, rest}
+  end
+
+  defp normalize_environment(nil), do: nil
+  defp normalize_environment(name) when is_atom(name), do: Atom.to_string(name)
+  defp normalize_environment(name) when is_binary(name), do: name
 
   # ---------------------------------------------------------------------------
   # Stage
@@ -253,6 +280,8 @@ defmodule TinyCI.DSL.Interpreter do
       when_condition: condition(opts),
       working_dir: Keyword.get(opts, :working_dir),
       network: Keyword.get(opts, :network, true),
+      image: Keyword.get(opts, :image),
+      environment: normalize_environment(Keyword.get(opts, :environment)),
       env: stage_env,
       steps: steps
     }

@@ -168,6 +168,74 @@ defmodule TinyCI.ExecutorContainerTest do
     refute result.output =~ ~r/^[^\t]+\t00000000\t/m
   end
 
+  test "a pipeline image is inherited and a stage image replaces it", %{tmp_dir: tmp_dir} do
+    {:ok, runtime} = Container.runtime()
+    override = "alpine:3.21"
+    ensure_image(runtime, override)
+
+    inherited = %Stage{
+      name: :inherited,
+      mode: :serial,
+      steps: [%Step{name: :release, cmd: "cat /etc/alpine-release"}]
+    }
+
+    overridden = %Stage{
+      name: :overridden,
+      mode: :serial,
+      image: override,
+      steps: [%Step{name: :release, cmd: "cat /etc/alpine-release"}]
+    }
+
+    context = %{
+      root: tmp_dir,
+      run_id: "run_image_#{System.unique_integer([:positive])}",
+      trust: :trusted
+    }
+
+    {result, run_id} = run_with_run_id([inherited, overridden], context, pipeline_image: image())
+
+    assert {:ok, [%{step_results: [inherited_result]}, %{step_results: [overridden_result]}]} =
+             result
+
+    assert String.starts_with?(inherited_result.output, "3.22")
+    assert String.starts_with?(overridden_result.output, "3.21")
+    assert containers_for(run_id) == []
+  end
+
+  test "matrix combinations share the stage's resolved image", %{tmp_dir: tmp_dir} do
+    stage = %Stage{
+      name: :compat,
+      mode: :serial,
+      matrix: [variant: ["a", "b"]],
+      # Rootless Podman can race two fresh user namespaces; serialising the two
+      # combinations keeps this smoke test deterministic without weakening what
+      # it proves (both sessions come from the same resolved image).
+      max_parallel: 1,
+      steps: [%Step{name: :release, cmd: "cat /etc/alpine-release"}]
+    }
+
+    context = %{
+      root: tmp_dir,
+      run_id: "run_matrix_image_#{System.unique_integer([:positive])}",
+      trust: :trusted
+    }
+
+    {result, run_id} = run_with_run_id([stage], context, pipeline_image: image())
+
+    assert {:ok, [%{status: :passed, matrix_runs: [first, second]}]} = result
+
+    outputs =
+      Enum.map([first, second], fn run ->
+        assert [%{output: output}] = run.step_results
+        output
+      end)
+
+    assert [a, b] = outputs
+    assert a == b
+    assert String.starts_with?(a, "3.22")
+    assert containers_for(run_id) == []
+  end
+
   defp ensure_image(runtime, image) do
     case System.cmd(runtime.command, ["image", "inspect", image], stderr_to_stdout: true) do
       {_output, 0} ->

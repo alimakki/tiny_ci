@@ -141,9 +141,7 @@ defmodule TinyCI.Execution do
 
     case Keyword.fetch(opts, :backend) do
       {:ok, Local} ->
-        if trust(ctx) == :trusted,
-          do: {:ok, %{backend: Local, image: image}},
-          else: {:error, {:isolation_unavailable, :untrusted}}
+        resolve_local(ctx, image)
 
       {:ok, backend} ->
         {:ok,
@@ -159,6 +157,27 @@ defmodule TinyCI.Execution do
           |> Keyword.put_new(:default_image, Application.get_env(:tiny_ci, :default_image))
 
         Policy.resolve(ctx, image, policy_opts)
+    end
+  end
+
+  # Local cannot honour an image; refusing it explicitly is what stops a caller
+  # (or a stale stored backend) from silently running an imaged stage on the
+  # host.
+  defp resolve_local(ctx, image) do
+    stored_image = Map.get(ctx, :execution_image)
+
+    cond do
+      is_binary(stored_image) and stored_image != "" ->
+        {:error, {:image_requires_container, stored_image}}
+
+      is_binary(image) and image != "" ->
+        {:error, {:image_requires_container, image}}
+
+      trust(ctx) == :trusted ->
+        {:ok, %{backend: Local, image: image}}
+
+      true ->
+        {:error, {:isolation_unavailable, :untrusted}}
     end
   end
 
@@ -316,6 +335,77 @@ defmodule TinyCI.Execution do
   def error_message(:no_default_image) do
     "an untrusted run needs a container image: set `config :tiny_ci, :default_image`, " <>
       "or drop --isolate for a trusted run"
+  end
+
+  def error_message({:image_requires_container, image}) do
+    "the image #{inspect(image)} requires the container backend: " <>
+      "the host backend cannot honour an image"
+  end
+
+  def error_message({:stage, name, reason}) do
+    "stage :#{name} cannot run: #{error_message(reason)}"
+  end
+
+  def error_message({:hooks, reason}) do
+    "pipeline hooks cannot run: #{error_message(reason)}"
+  end
+
+  def error_message({:conflicting_declaration, image, environment}) do
+    "a stage cannot declare both image #{inspect(image)} and environment #{inspect(environment)}: " <>
+      "an environment replaces the image, it does not layer on it"
+  end
+
+  def error_message({:invalid_image, image}) do
+    "#{inspect(image)} is not a valid OCI image reference: " <>
+      "it must be non-empty, must not start with \"-\", and must not contain whitespace"
+  end
+
+  def error_message({:image_unavailable, image, :missing_after_pull}) do
+    "image #{inspect(image)} was pulled but is still not available locally"
+  end
+
+  def error_message({:image_unavailable, image, status, output}) do
+    "could not pull image #{inspect(image)} (exit #{status}): #{String.trim(to_string(output))}"
+  end
+
+  def error_message(:no_toolchain_config) do
+    "environment \"default\" needs a mise config (.mise.toml, mise.toml, or .tool-versions) " <>
+      "in the project root"
+  end
+
+  def error_message({:unknown_environment, name, searched}) do
+    "environment #{inspect(name)} has no mise config; looked for #{Enum.join(searched, ", ")} " <>
+      "in the project root"
+  end
+
+  def error_message(:mise_unavailable) do
+    "environment: needs `mise` on PATH to resolve a host toolchain; " <>
+      "install mise, or declare an `image:` instead"
+  end
+
+  def error_message({:mise_failed, name, :timeout}) do
+    "resolving environment #{inspect(name)} with mise timed out"
+  end
+
+  def error_message({:mise_failed, name, _reason}) do
+    "resolving environment #{inspect(name)} with mise failed"
+  end
+
+  def error_message({:missing_tools, name, tools}) do
+    missing = Enum.map_join(tools, ", ", fn {tool, version} -> "#{tool} #{version}" end)
+
+    "environment #{inspect(name)} requests tools that mise has not installed: #{missing}. " <>
+      "Run `mise install` in the project root."
+  end
+
+  def error_message({:environment_requires_image, name}) do
+    "an untrusted run cannot use environment #{inspect(name)} on the host: " <>
+      "map it to an image with `config :tiny_ci, :environments` or declare an `image:`"
+  end
+
+  def error_message({:invalid_environment, name}) do
+    "#{inspect(name)} is not a valid environment name: use lowercase letters, digits, " <>
+      "'.', '_' or '-', starting with a letter (max 64 characters)"
   end
 
   def error_message({:invalid_container_runtime, runtime}) do

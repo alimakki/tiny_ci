@@ -15,10 +15,21 @@ defmodule TinyCI.PipelineSpec do
     * `:root`   — the project root the pipeline runs against
     * `:env`    — pipeline-level environment from `env` directives
     * `:secrets` — names declared with `secret`, in declaration order, deduplicated
+    * `:image`  — the pipeline-level container image (`image` directive)
+    * `:environment` — the pipeline-level host toolchain name (`environment` directive)
   """
 
   @enforce_keys [:name, :stages, :hooks]
-  defstruct [:name, :stages, :hooks, root: nil, env: %{}, secrets: []]
+  defstruct [
+    :name,
+    :stages,
+    :hooks,
+    root: nil,
+    env: %{},
+    secrets: [],
+    image: nil,
+    environment: nil
+  ]
 
   @type t :: %__MODULE__{
           name: atom(),
@@ -26,6 +37,8 @@ defmodule TinyCI.PipelineSpec do
           hooks: %{on_success: [TinyCI.Hook.t()], on_failure: [TinyCI.Hook.t()]},
           root: String.t() | nil,
           env: %{optional(String.t()) => String.t()},
-          secrets: [String.t()]
+          secrets: [String.t()],
+          image: String.t() | nil,
+          environment: String.t() | nil
         }
 end

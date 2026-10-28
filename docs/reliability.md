@@ -21,6 +21,9 @@ described in [execution-model.md](execution-model.md).
   devices, arbitrary Logger output, module loading, or independent processes.
 - Cache identity includes execution inputs as well as the nominated key file.
   Lookup and restore share a lock; module actions still run after a cache restore.
+  For a shell step, the inputs include its execution environment (image digest,
+  toolchain name, toolchain fingerprint, and a hash of the resolved toolchain
+  variables); an imaged step's key excludes the host environment and host runtime.
 - Run IDs have random suffixes. Matrix artifact destinations are distinct;
   artifact copying rejects path traversal, escaping symlinks, and cycles.
 

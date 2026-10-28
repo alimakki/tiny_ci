@@ -163,11 +163,14 @@ defmodule TinyCI.Execution.Backend.Container do
   # Lifecycle
   # ---------------------------------------------------------------------------
 
-  defp image(%SessionSpec{image: image}) do
-    if is_binary(image) and image != "",
-      do: {:ok, image},
-      else: {:error, :no_default_image}
+  defp image(%SessionSpec{image: image}) when is_binary(image) and image != "" do
+    case TinyCI.Environment.Image.validate_ref(image) do
+      :ok -> {:ok, image}
+      {:error, _} = error -> error
+    end
   end
+
+  defp image(%SessionSpec{}), do: {:error, :no_default_image}
 
   defp ensure_workspace(%SessionSpec{workspace: workspace}) do
     if File.dir?(workspace),
@@ -252,17 +255,36 @@ defmodule TinyCI.Execution.Backend.Container do
   end
 
   defp ensure_image(runtime, image) do
-    case System.cmd(runtime.command, ["image", "inspect", image], stderr_to_stdout: true) do
-      {_output, 0} ->
-        :ok
-
-      {_output, _status} ->
-        case System.cmd(runtime.command, ["pull", image], stderr_to_stdout: true) do
-          {_output, 0} -> :ok
-          {output, status} -> {:error, {:image_unavailable, image, status, String.trim(output)}}
-        end
+    case inspect_image(runtime, image) do
+      :ok -> :ok
+      :missing -> pull_image(runtime, image)
     end
   end
+
+  defp inspect_image(runtime, image) do
+    case System.cmd(runtime.command, ["image", "inspect", image], stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {_output, _status} -> :missing
+    end
+  end
+
+  defp pull_image(runtime, image) do
+    if image_id?(image) do
+      # An image ID is not a registry reference; `pull` would fail with a
+      # confusing registry error. The image was removed between resolution and
+      # open, so fail with the truth.
+      {:error, {:image_missing, image}}
+    else
+      case System.cmd(runtime.command, ["pull", image], stderr_to_stdout: true) do
+        {_output, 0} -> :ok
+        {output, status} -> {:error, {:image_unavailable, image, status, String.trim(output)}}
+      end
+    end
+  end
+
+  # The resolved run reference is an image ID (`sha256:<64 hex>`), which is not
+  # something a registry can pull.
+  defp image_id?(image), do: Regex.match?(~r/^(sha256:)?[0-9a-f]{64}$/, image)
 
   defp git_args(runtime, workspace) do
     git = Path.join(workspace, ".git")

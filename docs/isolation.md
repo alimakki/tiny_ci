@@ -66,11 +66,18 @@ operator default, the run fails closed. There is no silent fallback to the host.
 config :tiny_ci,
   default_image: "ghcr.io/acme/ci:24.04",
   container_runtime: :auto,          # :auto | :docker | :podman
-  container_limits: %{memory: "2g", cpus: 2, pids: 512}
+  container_limits: %{memory: "2g", cpus: 2, pids: 512},
+  environments: %{"ci" => "ghcr.io/acme/ci:24.04"}
 ```
 
-- `:default_image` has no built-in default; an untrusted run requires it until
-  the `image:` directive lands (M1.5-03).
+- `:default_image` has no built-in default. An untrusted run that declares no
+  image needs it; an untrusted run whose stages all declare `image:` (and whose
+  shell hooks, if any, are covered by a pipeline image) does not.
+- `:environments` maps an `environment:` name to an image for untrusted runs.
+  There is deliberately no fallback to `:default_image`: a host toolchain is not
+  an isolation boundary.
+- A **trusted** run with an `image:` (pipeline or stage) also selects the
+  container backend, so local and hosted runs share the toolchain.
 - `:auto` tries Docker, then Podman.
 - Limits are applied to the stage container with `--memory`, `--cpus`, and
   `--pids-limit`.

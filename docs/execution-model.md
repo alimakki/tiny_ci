@@ -24,12 +24,12 @@ the mode does — for example, a server configured to trust a particular
 repository. A pull request from a fork is untrusted regardless of that setting
 (M2).
 
-A trusted run with no image uses the host backend. A trusted run with an image
-uses the container backend, and an untrusted run always uses the container
-backend (with the operator's default image when the pipeline names none). The
-selection is `TinyCI.Execution.Policy`; an untrusted run never falls back to the
-host. No runtime, or no image for an untrusted run, is an explicit error. See
-[isolation.md](isolation.md).
+A trusted run with no declaration uses the host backend. A trusted run with an
+image uses the container backend, and an untrusted run always uses a container
+(with the operator's default image when the pipeline names none). The selection
+is `TinyCI.Execution.Policy` and `TinyCI.Environment`; an untrusted run never
+falls back to the host. No runtime, or no image for an untrusted run, is an
+explicit error. See [isolation.md](isolation.md).
 
 ## The backend contract
 
@@ -95,6 +95,68 @@ shell is involved.)
 `TinyCI.Execution.with_session/3` opens the session, yields it, and closes it in
 an `after` path, so a normal return, a raise, and an exit all release it.
 
+## Environments
+
+An **environment** is the toolchain a stage runs in. It is either a container
+image (`image:`) or a host toolchain (`environment:`), declared at pipeline or
+stage level:
+
+```elixir
+image "elixir:1.18"
+
+stage :docs, environment: "ci" do
+  step :build, cmd: "mix docs"
+end
+```
+
+`TinyCI.Environment` resolves the declaration once per run, before any stage
+starts, and selects the backend for each stage:
+
+| effective declaration | trusted | untrusted |
+|---|---|---|
+| stage `image:` | Container | Container |
+| stage `environment:` | Local (host toolchain) | mapped to an image, or refused |
+| pipeline `image` | Container | Container |
+| pipeline `environment` | Local (host toolchain) | mapped to an image, or refused |
+| nothing | Local (host) | operator `default_image`, else error |
+
+The stage's declaration wins over the pipeline's, and it is a **whole
+replacement**: `environment:` under a pipeline `image:` runs on the host, not in
+the image. `image` and `environment` cannot both appear at the same scope.
+
+Two properties make this reproducible:
+
+- **Digest pinning.** A tag can move. Resolution inspects the local image and
+  runs by its ID; a `@sha256:` reference keeps the declared digest. Every
+  session of a stage — its steps, and each matrix combination's session — uses
+  the same resolved ID, so the image cannot change between the cache key and
+  execution.
+- **Parity.** The same declaration selects the same backend and the same
+  resolved identity whether the run is invoked locally or by the server. Mode
+  changes defaults and policy; it never changes the environment.
+
+An `environment:` is resolved through `mise` for a trusted run, and its
+variables layer as `toolchain < secrets < pipeline < stage < step`. An untrusted
+run never runs `mise`: the name is mapped through `config :tiny_ci,
+:environments` or the run fails with `{:environment_requires_image, name}`.
+
+**Hooks use the pipeline declaration only.** A pipeline image also covers the
+shell-hook container; shell hooks with no pipeline declaration use the same
+trust-based default, and module hooks need no session at all.
+
+**Module steps stay in the VM.** A `module:` step in an imaged stage still runs
+in the runner's own VM; `image:` governs shell steps (and shell hooks). Its cache
+identity therefore does not inherit the image.
+
+An environment is part of the cache identity: the image digest (or ref when
+unresolved), the toolchain name, the toolchain fingerprint, and a hash of the
+resolved toolchain variables are added for shell steps only. A plain host run
+adds nothing, so existing host cache keys do not change.
+
+`--dry-run` prints one `Environment:` line per stage with a non-default
+environment, including `digest=unresolved` when the image is not local. It never
+pulls and never requires a runtime.
+
 ## The Local backend
 
 `TinyCI.Execution.Backend.Local` runs commands as direct children of the runner
@@ -128,7 +190,10 @@ session; the Local backend ignores it.
 
 ## What is still missing
 
-- **M1.5-03:** the `image:` directive and reproducible pipeline/stage images.
-  The backend already consumes `SessionSpec.image`.
 - **M1.5-04:** registering open sessions and OS pids with the run so cancellation
   can close them and a startup sweep can remove leaked containers.
+- Private-registry authentication, image allow-listing, and an environment
+  lockfile that records resolved digests alongside the pipeline (see
+  [M1.5-03](../.tasks/M1.5-03-reproducible-environments.md)).
+- Recording resolved environments in the run stream and attestation, so history
+  states the exact image digest and toolchain a run used.

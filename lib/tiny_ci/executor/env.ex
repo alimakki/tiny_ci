@@ -57,6 +57,37 @@ defmodule TinyCI.Executor.Env do
   end
 
   @doc """
+  Layers the run's toolchain environment underneath a resolved step environment.
+
+  This is the environment a **shell step** (or shell hook) runs with, and the
+  order is the documented contract:
+
+      toolchain < secrets < pipeline < stage < step
+
+  The toolchain variables come from `environment:` (a resolved `mise` config).
+  They sit lowest so a declared pipeline value of the same name still wins.
+
+  Deliberately not part of `resolve/2`: conditions, cache inputs, and control
+  payloads must keep their toolchain-free meaning.
+
+  ## Examples
+
+      iex> ctx = %{
+      ...>   toolchain_env: %{"PATH" => "/tools/bin", "MIX_ENV" => "from-toolchain"},
+      ...>   pipeline_env: %{"MIX_ENV" => "test"}
+      ...> }
+      iex> TinyCI.Executor.Env.process(ctx, TinyCI.Executor.Env.resolve(ctx, %{}))
+      %{"MIX_ENV" => "test", "PATH" => "/tools/bin"}
+  """
+  @spec process(map(), env()) :: env()
+  def process(context, resolved_env) do
+    context
+    |> Map.get(:toolchain_env, %{})
+    |> Map.merge(base(context))
+    |> Map.merge(resolved_env)
+  end
+
+  @doc """
   Replaces `{:store, key}` values in a step's `env:` with the store's current value.
 
   A missing key resolves to `""` rather than raising — a step reading an unset

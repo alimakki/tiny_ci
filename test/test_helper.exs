@@ -32,6 +32,23 @@ podman? =
 
 exclude = if podman?, do: exclude, else: [:podman | exclude]
 
+# The `environment:` integration test runs the real `mise`. Exclude the suite
+# loudly when mise is not installed, like the sandbox/container suites.
+mise? = not is_nil(System.find_executable("mise"))
+
+exclude =
+  if mise? do
+    exclude
+  else
+    IO.puts(
+      :stderr,
+      "warning: `mise` not found; excluding :mise tests " <>
+        "(install mise to run the host-toolchain integration test)"
+    )
+
+    [:mise | exclude]
+  end
+
 # The escript integration suite builds ./tiny_ci and runs it in a fixture
 # directory with no mix.exs. It is opt-in (it is slow, and only the dogfood build
 # and M1-03 exercise it): set TINY_CI_ESCRIPT=1 to run it.
